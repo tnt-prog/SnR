@@ -2354,6 +2354,17 @@ open_count  = sum(1 for s in signals if s["status"]=="open")
 tp_count    = sum(1 for s in signals if s["status"]=="tp_hit")
 sl_count    = sum(1 for s in signals if s["status"]=="sl_hit")
 queue_count = sum(1 for s in signals if s["status"]=="queue_limit")
+
+# ── Warn if log loaded from a previous session already exceeds the 15-trade cap
+# (e.g. migrating from v1 which had no limit).  No new trades will fire until
+# open_count drops below 15 via TP or SL hits.
+if open_count > 15:
+    st.warning(
+        f"⚠️ **{open_count} open trades detected** — this exceeds the 15-trade limit "
+        f"(likely loaded from a log created before the queue-limit was enforced). "
+        f"No new trades will be opened until the open count drops below 15 via TP or SL hits. "
+        f"You can also use **Clear History** in the sidebar to reset the log."
+    )
 pre_out     = health.get("pre_filtered_out", 0)
 deep_sc     = health.get("deep_scanned",     0)
 
