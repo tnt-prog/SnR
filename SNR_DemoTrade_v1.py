@@ -7,6 +7,15 @@ Performance improvements:
   C. Staged candle fetch      — quick 50-candle RSI/resistance check before full fetch
   D. Symbol cache             — OKX instrument list cached for 6 h, not re-fetched every cycle
   + API semaphore             — hard cap of 8 concurrent HTTP requests (no exchange blocking)
+
+v2 additions:
+  E. 15-trade Queue Limit     — when 15 open trades exist, new signals are logged as
+                                 status="queue_limit" (no order placed). The coin is NOT
+                                 blocked by active or cooldown filters — it is freely
+                                 re-scanned every cycle until a slot opens.
+  F. Alert column (col 2)     — signals table column 2 shows a quick visual status flag;
+                                 SL Hit trades are highlighted with 🔴 SL HIT for instant
+                                 identification.
 """
 
 import base64, hashlib, hmac, json, math, os, pathlib, threading, time, uuid, traceback
@@ -1690,22 +1699,43 @@ def _bg_loop():
                           and s.get("status") in ("tp_hit", "sl_hit")
                           and datetime.fromisoformat(s["close_time"].replace("Z","+00:00")) >= cutoff}
                 active = {s["symbol"] for s in _b._bsc_log["signals"] if s["status"]=="open"}
+                # ── Queue-limit check ─────────────────────────────────────────
+                # Count only genuinely OPEN trades (queue_limit entries are NOT
+                # real open positions — no order was placed for them).
+                open_trade_count = len(active)
+                MAX_OPEN_TRADES  = 15
                 _new_sig_syms      = [s["symbol"] for s in new_sigs]
                 _blocked_active    = sorted(active  & set(_new_sig_syms))
                 _blocked_cooldown  = sorted(cooled  & set(_new_sig_syms))
                 skip         = cooled | active
                 _added_syms  = []
+                _queued_syms = []           # symbols logged as queue_limit this cycle
                 sigs_to_trade = []          # signals that need an order placed
                 for sig in new_sigs:
                     if sig["symbol"] not in skip:
-                        _b._bsc_log["signals"].append(sig)
-                        skip.add(sig["symbol"])
-                        _added_syms.append(sig["symbol"])
-                        if (cfg.get("trade_enabled") and
-                                cfg.get("api_key") and cfg.get("api_secret") and
-                                cfg.get("api_passphrase")):
-                            sigs_to_trade.append(sig)
+                        if open_trade_count >= MAX_OPEN_TRADES:
+                            # ── Queue Limit: log the signal but do NOT place a trade
+                            # and do NOT add to `active` / `skip` so this coin
+                            # remains freely re-scannable on every future cycle.
+                            # No cooldown applies because no trade was ever opened.
+                            queued_sig = dict(sig)
+                            queued_sig["status"] = "queue_limit"
+                            _b._bsc_log["signals"].append(queued_sig)
+                            _queued_syms.append(sig["symbol"])
+                            # Add to skip only for THIS cycle to prevent duplicate
+                            # queue_limit entries within the same scan batch.
+                            skip.add(sig["symbol"])
+                        else:
+                            _b._bsc_log["signals"].append(sig)
+                            skip.add(sig["symbol"])
+                            _added_syms.append(sig["symbol"])
+                            open_trade_count += 1   # keep running count accurate
+                            if (cfg.get("trade_enabled") and
+                                    cfg.get("api_key") and cfg.get("api_secret") and
+                                    cfg.get("api_passphrase")):
+                                sigs_to_trade.append(sig)
                 _filter_counts["new_signal_syms"]         = _added_syms
+                _filter_counts["queued_syms"]             = _queued_syms
                 _filter_counts["blocked_by_active_syms"]  = _blocked_active
                 _filter_counts["blocked_by_cooldown_syms"]= _blocked_cooldown
                 elapsed = time.time() - t0
@@ -2301,21 +2331,23 @@ if _trade_on and _api_stat == "ok":
     st.caption(f"🤖 Auto-Trading active · {_api_cs.get('message','')} · tested {_tested_str}")
 
 # ── Health metrics ─────────────────────────────────────────────────────────────
-open_count = sum(1 for s in signals if s["status"]=="open")
-tp_count   = sum(1 for s in signals if s["status"]=="tp_hit")
-sl_count   = sum(1 for s in signals if s["status"]=="sl_hit")
-pre_out    = health.get("pre_filtered_out", 0)
-deep_sc    = health.get("deep_scanned",     0)
+open_count  = sum(1 for s in signals if s["status"]=="open")
+tp_count    = sum(1 for s in signals if s["status"]=="tp_hit")
+sl_count    = sum(1 for s in signals if s["status"]=="sl_hit")
+queue_count = sum(1 for s in signals if s["status"]=="queue_limit")
+pre_out     = health.get("pre_filtered_out", 0)
+deep_sc     = health.get("deep_scanned",     0)
 
-m1,m2,m3,m4,m5c,m6,m7,m8 = st.columns(8)
+m1,m2,m3,m4,m5c,m6,m7,m8,m9 = st.columns(9)
 m1.metric("Cycles",        health.get("total_cycles",0))
 m2.metric("Scan Time",     f"{health.get('last_scan_duration_s',0)}s")
 m3.metric("API Errors",    health.get("total_api_errors",0))
 m4.metric("Pre-filtered ⚡", pre_out, help="Coins removed by bulk ticker pre-filter (saves API calls)")
 m5c.metric("Deep Scanned", deep_sc, help="Coins that passed pre-filter and received full candle analysis")
-m6.metric("Open",          open_count)
+m6.metric("Open",          open_count,  help="Active open trades (max 15 allowed simultaneously)")
 m7.metric("TP Hit ✅",     tp_count)
 m8.metric("SL Hit ❌",     sl_count)
+m9.metric("⏳ Queued",     queue_count, help="Signals detected while 15-trade limit was reached — no order placed, coin rescanned each cycle")
 
 if getattr(_b, "_bsc_last_error", ""):
     st.warning(f"⚠️ {_b._bsc_last_error}")
@@ -2435,7 +2467,19 @@ if filtered_sorted:
     rows = []
     for s in filtered_sorted:
         status      = s.get("status","open")
-        status_icon = {"open":"🔵 Open","tp_hit":"✅ TP Hit","sl_hit":"❌ SL Hit"}.get(status,status)
+        status_icon = {
+            "open":        "🔵 Open",
+            "tp_hit":      "✅ TP Hit",
+            "sl_hit":      "❌ SL Hit",
+            "queue_limit": "⏳ Queue Limit",
+        }.get(status, status)
+        # Column 2 — quick visual alert (prominently highlights SL hits in red)
+        alert_col = {
+            "sl_hit":      "🔴 SL HIT",
+            "tp_hit":      "🟢 TP HIT",
+            "open":        "🔵 Open",
+            "queue_limit": "⏳ Queued",
+        }.get(status, "—")
         ts_str      = fmt_dubai(s.get("timestamp",""))
         close_str   = fmt_dubai(s["close_time"]) if s.get("close_time") else "—"
         crit        = s.get("criteria",{})
@@ -2463,7 +2507,7 @@ if filtered_sorted:
             f"• PDZ 15m   : {pdz_15m_val}"
         ) if crit else "—"
         max_lev    = s.get("max_lev", get_max_leverage(s.get("symbol","")))
-        sl_reason  = analyze_sl_reason(s) if status=="sl_hit" else "—"
+        sl_reason  = analyze_sl_reason(s) if status == "sl_hit" else "—"
         setup_type = "⭐ Super" if s.get("is_super_setup") else "Normal"
         # ── $TP / $SL USDT value ─────────────────────────────────────────────
         # Use trade params stored in the signal (auto-traded) or fall back to
@@ -2514,6 +2558,7 @@ if filtered_sorted:
                 pass
         rows.append({
             "Time (GST)":     ts_str,
+            "Alert":          alert_col,
             "Symbol":         s.get("symbol",""),
             "Setup":          setup_type,
             "Sector":         s.get("sector","Other"),
@@ -2536,6 +2581,10 @@ if filtered_sorted:
         })
     st.dataframe(rows, use_container_width=True, hide_index=True,
                  column_config={
+                     "Alert":          st.column_config.TextColumn(
+                                           "🚨 Alert",
+                                           width="small",
+                                           help="Quick visual status — 🔴 SL HIT is highlighted red for instant identification"),
                      "Setup":          st.column_config.TextColumn(width="small"),
                      "Signal Entry":   st.column_config.NumberColumn(format="%.8f",
                                            help="Price when the scanner signal fired"),
