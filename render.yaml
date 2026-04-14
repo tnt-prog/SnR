@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: binance-futures-scanner
+    env: python
+    plan: starter          # $7/month — never sleeps (free tier sleeps after 15 min)
+    buildCommand: pip install -r requirements.txt
+    startCommand: python "Binance Scanner - 30m Spike_v1.py"
+    healthCheckPath: /api/data
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.0
