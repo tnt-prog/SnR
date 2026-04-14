@@ -14,8 +14,9 @@ v2 additions:
                                  blocked by active or cooldown filters — it is freely
                                  re-scanned every cycle until a slot opens.
   F. Alert column (col 2)     — signals table column 2 shows a quick visual status flag;
-                                 SL Hit trades are highlighted with 🔴 SL HIT for instant
-                                 identification.
+                                 turns 🔴 red when an open trade's latest price has dropped
+                                 ≥5% below its entry price (early warning, before SL is hit).
+                                 Threshold constant: _PRICE_ALERT_PCT = 5.0
 """
 
 import base64, hashlib, hmac, json, math, os, pathlib, threading, time, uuid, traceback
@@ -1653,6 +1654,8 @@ def scan(cfg: dict):
 # ─────────────────────────────────────────────────────────────────────────────
 # Open signal tracker
 # ─────────────────────────────────────────────────────────────────────────────
+_PRICE_ALERT_PCT = 5.0   # alert when current price is this % or more below entry
+
 def update_open_signals(signals):
     for sig in signals:
         if sig["status"] != "open": continue
@@ -1669,10 +1672,26 @@ def update_open_signals(signals):
                     sig.update(status="tp_hit", close_price=sig["tp"],
                                close_time=to_dubai(datetime.fromtimestamp(
                                    tp_time/1000, tz=timezone.utc)).isoformat())
+                    sig.pop("price_alert", None)   # clear alert on close
                 else:
                     sig.update(status="sl_hit", close_price=sig["sl"],
                                close_time=to_dubai(datetime.fromtimestamp(
                                    sl_time/1000, tz=timezone.utc)).isoformat())
+                    sig.pop("price_alert", None)   # clear alert on close
+            else:
+                # ── 5 % price-drop alert (trade still open) ───────────────────
+                # Use the most recent candle close as the current price.
+                # Flag the signal so the UI Alert column can highlight it red.
+                if candles:
+                    latest_price = candles[-1]["close"]
+                    entry_price  = float(sig.get("entry", 0) or 0)
+                    if entry_price > 0:
+                        drop_pct = (entry_price - latest_price) / entry_price * 100
+                        sig["price_alert"]      = drop_pct >= _PRICE_ALERT_PCT
+                        sig["price_alert_pct"]  = round(drop_pct, 2)
+                    else:
+                        sig["price_alert"]     = False
+                        sig["price_alert_pct"] = 0.0
         except Exception:
             pass
     return signals
@@ -2473,13 +2492,23 @@ if filtered_sorted:
             "sl_hit":      "❌ SL Hit",
             "queue_limit": "⏳ Queue Limit",
         }.get(status, status)
-        # Column 2 — quick visual alert (prominently highlights SL hits in red)
-        alert_col = {
-            "sl_hit":      "🔴 SL HIT",
-            "tp_hit":      "🟢 TP HIT",
-            "open":        "🔵 Open",
-            "queue_limit": "⏳ Queued",
-        }.get(status, "—")
+        # Column 2 — quick visual alert
+        # For OPEN trades: turns 🔴 red when current price is ≥5% below entry.
+        # For closed/queued trades: shows their final outcome colour.
+        if status == "open":
+            if s.get("price_alert", False):
+                _drop = s.get("price_alert_pct", 0.0)
+                alert_col = f"🔴 -{_drop:.1f}% ALERT"
+            else:
+                alert_col = "🔵 Open"
+        elif status == "tp_hit":
+            alert_col = "🟢 TP HIT"
+        elif status == "sl_hit":
+            alert_col = "⚫ SL HIT"
+        elif status == "queue_limit":
+            alert_col = "⏳ Queued"
+        else:
+            alert_col = "—"
         ts_str      = fmt_dubai(s.get("timestamp",""))
         close_str   = fmt_dubai(s["close_time"]) if s.get("close_time") else "—"
         crit        = s.get("criteria",{})
@@ -2584,7 +2613,7 @@ if filtered_sorted:
                      "Alert":          st.column_config.TextColumn(
                                            "🚨 Alert",
                                            width="small",
-                                           help="Quick visual status — 🔴 SL HIT is highlighted red for instant identification"),
+                                           help="🔴 turns red when an open trade's current price has dropped ≥5% below its entry price — early warning before SL is hit"),
                      "Setup":          st.column_config.TextColumn(width="small"),
                      "Signal Entry":   st.column_config.NumberColumn(format="%.8f",
                                            help="Price when the scanner signal fired"),
