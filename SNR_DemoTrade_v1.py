@@ -2551,181 +2551,186 @@ for i, sec in enumerate(all_sectors):
         st.session_state["sector_filter"] = sec; st.rerun()
 selected_sector = st.session_state["sector_filter"]
 
-# ── Signals table ──────────────────────────────────────────────────────────────
-filtered        = signals if selected_sector=="All" else \
-                  [s for s in signals if s.get("sector")==selected_sector]
-filtered_sorted = sorted(filtered, key=lambda x: x.get("timestamp",""), reverse=True)
-st.markdown(f"### Signals ({len(filtered_sorted)} shown)")
+# ── Shared helpers for row building ────────────────────────────────────────────
+def _cv(v):
+    """Format a criteria value: numeric → compact float, else as-is."""
+    if v is None or v == "—" or v == "✅": return "—"
+    try: return f"{float(v):.6f}".rstrip("0").rstrip(".")
+    except (TypeError, ValueError): return str(v)
 
-if filtered_sorted:
-    rows = []
-    for s in filtered_sorted:
-        status      = s.get("status","open")
-        status_icon = {
-            "open":        "🔵 Open",
-            "tp_hit":      "✅ TP Hit",
-            "sl_hit":      "❌ SL Hit",
-            "queue_limit": "⏳ Queue Limit",
-        }.get(status, status)
-        # Column 2 — Alert flag (open trades only, blank otherwise)
-        #   Price down ≥3% from entry           → 🔴 DL
-        #   Trade open for ≥2 hours             → 🔴 TL
-        #   Both conditions simultaneously      → 🔴 DL / TL
-        #   Neither / closed / queued           → blank
-        if status == "open":
-            _dl = s.get("price_alert", False)
-            _tl = False
-            if s.get("timestamp"):
-                try:
-                    _t_open = datetime.fromisoformat(s["timestamp"].replace("Z", "+00:00"))
-                    _tl = (dubai_now() - _t_open).total_seconds() >= 7200  # 2 hours
-                except Exception:
-                    pass
-            if _dl and _tl:
-                alert_col = "🔴 DL / TL"
-            elif _dl:
-                alert_col = "🔴 DL"
-            elif _tl:
-                alert_col = "🔴 TL"
-            else:
-                alert_col = ""
-        else:
-            alert_col = ""
-        ts_str      = fmt_dubai(s.get("timestamp",""))
-        close_str   = fmt_dubai(s["close_time"]) if s.get("close_time") else "—"
-        crit        = s.get("criteria",{})
-        def _cv(v):
-            """Format a criteria value: show number if numeric, else show as-is."""
-            if v is None or v == "—" or v == "✅": return "—"
-            try: return f"{float(v):.6f}".rstrip("0").rstrip(".")
-            except (TypeError, ValueError): return str(v)
-        pdz_5m_val  = crit.get("pdz_zone_5m",  "—") or "—"
-        pdz_15m_val = crit.get("pdz_zone_15m", "—") or "—"
-        crit_str    = (
-            f"• RSI 5m    : {crit.get('rsi_5m','—')}\n"
-            f"• RSI 1h    : {crit.get('rsi_1h','—')}\n"
-            f"• EMA 3m    : {_cv(crit.get('ema_3m','—'))}\n"
-            f"• EMA 5m    : {_cv(crit.get('ema_5m','—'))}\n"
-            f"• EMA 15m   : {_cv(crit.get('ema_15m','—'))}\n"
-            f"• MACD 3m   : {_cv(crit.get('macd_3m'))}\n"
-            f"• MACD 5m   : {_cv(crit.get('macd_5m'))}\n"
-            f"• MACD 15m  : {_cv(crit.get('macd_15m'))}\n"
-            f"• SAR 3m    : {_cv(crit.get('sar_3m'))}\n"
-            f"• SAR 5m    : {_cv(crit.get('sar_5m'))}\n"
-            f"• SAR 15m   : {_cv(crit.get('sar_15m'))}\n"
-            f"• Vol ×avg  : {_cv(crit.get('vol_ratio'))}\n"
-            f"• PDZ 5m    : {pdz_5m_val}\n"
-            f"• PDZ 15m   : {pdz_15m_val}"
-        ) if crit else "—"
-        max_lev    = s.get("max_lev", get_max_leverage(s.get("symbol","")))
-        sl_reason  = analyze_sl_reason(s) if status == "sl_hit" else "—"
-        setup_type = "⭐ Super" if s.get("is_super_setup") else "Normal"
-        # ── $TP / $SL USDT value ─────────────────────────────────────────────
-        # Use trade params stored in the signal (auto-traded) or fall back to
-        # current config values for indicative display on manual/older signals.
-        _usdt = float(s.get("trade_usdt", _snap_cfg.get("trade_usdt_amount", 0)))
-        _lev  = int(s.get("trade_lev",   _snap_cfg.get("trade_leverage", 10)))
-        _entry_p = float(s.get("entry", 0) or 0)
-        _tp_p    = float(s.get("tp",    0) or 0)
-        _sl_p    = float(s.get("sl",    0) or 0)
-        if _usdt > 0 and _lev > 0 and _entry_p > 0:
-            _pos = _usdt * _lev
-            tp_usd_str = f"+${_pos * (_tp_p - _entry_p) / _entry_p:.2f}"
-            sl_usd_str = f"-${_pos * (_entry_p - _sl_p) / _entry_p:.2f}"
-        else:
-            tp_usd_str = sl_usd_str = "—"
-        # ── Order info (auto-trading) ─────────────────────────────────────────
-        ord_id_str  = s.get("order_id", "") or "—"
-        algo_id_str = s.get("algo_id",  "") or "—"
-        ord_env     = "🟡 Demo" if s.get("demo_mode") else "🔴 Live"
-        ord_status  = s.get("order_status", "")
-        ord_err     = s.get("order_error", "")
-        if ord_status == "placed":
-            ord_status_str = f"✅ Entry+OCO {ord_env}"
-        elif ord_status == "partial":
-            ord_status_str = f"⚠️ Entry only {ord_env} · {ord_err[:80]}"
-        elif ord_status == "error":
-            ord_status_str = f"❌ {ord_err[:80]}" if ord_err else "❌ Error"
-        else:
-            ord_status_str = "—"
-        # ── Duration ──────────────────────────────────────────────────────────
-        # Closed trades  → time from entry to TP/SL close
-        # Open trades    → live elapsed time from entry to now (Dubai time)
-        # Queue / other  → "—"
-        def _fmt_secs(secs: int) -> str:
-            if secs < 0:
-                return "—"
-            if secs < 3600:
-                return f"{secs // 60}m {secs % 60}s"
-            if secs < 86400:
-                h, rem = divmod(secs, 3600)
-                return f"{h}h {rem // 60}m"
-            d, rem = divmod(secs, 86400)
-            return f"{d}d {rem // 3600}h"
+def _fmt_secs(secs: int) -> str:
+    if secs < 0:   return "—"
+    if secs < 3600: return f"{secs // 60}m {secs % 60}s"
+    if secs < 86400:
+        h, rem = divmod(secs, 3600); return f"{h}h {rem // 60}m"
+    d, rem = divmod(secs, 86400);   return f"{d}d {rem // 3600}h"
 
-        duration_str = "—"
+def _build_signal_row(s: dict) -> dict:
+    """Convert one signal dict into a table row dict (all columns)."""
+    status      = s.get("status", "open")
+    status_icon = {
+        "open":        "🔵 Open",
+        "tp_hit":      "✅ TP Hit",
+        "sl_hit":      "❌ SL Hit",
+        "queue_limit": "⏳ Queue Limit",
+    }.get(status, status)
+
+    # Alert column — only meaningful for open trades
+    alert_col = ""
+    if status == "open":
+        _dl = s.get("price_alert", False)
+        _tl = False
         if s.get("timestamp"):
             try:
-                t_open = datetime.fromisoformat(s["timestamp"].replace("Z", "+00:00"))
-                if status == "open":
-                    # Live elapsed time — recalculated on every dashboard refresh
-                    secs = int((dubai_now() - t_open).total_seconds())
-                    duration_str = _fmt_secs(secs)
-                elif s.get("close_time"):
-                    t_close = datetime.fromisoformat(s["close_time"].replace("Z", "+00:00"))
-                    secs = int((t_close - t_open).total_seconds())
-                    duration_str = _fmt_secs(secs)
+                _t_open = datetime.fromisoformat(s["timestamp"].replace("Z", "+00:00"))
+                _tl = (dubai_now() - _t_open).total_seconds() >= 7200
             except Exception:
                 pass
-        rows.append({
-            "Time (GST)":     ts_str,
-            "Alert":          alert_col,
-            "Symbol":         s.get("symbol",""),
-            "Setup":          setup_type,
-            "Sector":         s.get("sector","Other"),
-            "Signal Entry":   s.get("signal_entry", s.get("entry","")),
-            "Fill $":         s.get("entry","") if s.get("signal_entry") else "—",
-            "TP":             s.get("tp",""),
-            "TP $":           tp_usd_str,
-            "SL":             s.get("sl",""),
-            "SL $":           sl_usd_str,
-            "Status":         status_icon,
-            "Duration":       duration_str,
-            "Close Time":     close_str,
-            "Close $":        s.get("close_price") or "—",
-            "Max Lev":        f"{max_lev}×",
-            "Order":          ord_status_str,
-            "Order ID":       ord_id_str,
-            "Algo ID":        algo_id_str,
-            "Entry Criteria": crit_str,
-            "⚠️ SL Reason":  sl_reason,
-        })
-    st.dataframe(rows, use_container_width=True, hide_index=True,
-                 column_config={
-                     "Alert":          st.column_config.TextColumn(
-                                           "🚨 Alert",
-                                           width="small",
-                                           help="🔴 turns red when an open trade's current price has dropped ≥5% below its entry price — early warning before SL is hit"),
-                     "Setup":          st.column_config.TextColumn(width="small"),
-                     "Signal Entry":   st.column_config.NumberColumn(format="%.8f",
-                                           help="Price when the scanner signal fired"),
-                     "Fill $":         st.column_config.NumberColumn(format="%.8f",
-                                           help="Actual market fill price (may differ from signal entry)"),
-                     "TP":             st.column_config.NumberColumn(format="%.8f"),
-                     "TP $":           st.column_config.TextColumn(width="small"),
-                     "SL":             st.column_config.NumberColumn(format="%.8f"),
-                     "SL $":           st.column_config.TextColumn(width="small"),
-                     "Duration":       st.column_config.TextColumn(width="small"),
-                     "Close Time":     st.column_config.TextColumn(width="small"),
-                     "Max Lev":        st.column_config.TextColumn(width="small"),
-                     "Order":          st.column_config.TextColumn(width="medium"),
-                     "Order ID":       st.column_config.TextColumn(width="medium"),
-                     "Algo ID":        st.column_config.TextColumn(width="medium"),
-                     "Entry Criteria": st.column_config.TextColumn(width="medium"),
-                     "⚠️ SL Reason":  st.column_config.TextColumn(width="medium"),
-                 })
-else:
-    st.info("No signals yet — scanner runs every few minutes.")
+        if _dl and _tl:   alert_col = "🔴 DL / TL"
+        elif _dl:          alert_col = "🔴 DL"
+        elif _tl:          alert_col = "🔴 TL"
+
+    ts_str    = fmt_dubai(s.get("timestamp", ""))
+    close_str = fmt_dubai(s["close_time"]) if s.get("close_time") else "—"
+    crit      = s.get("criteria", {})
+    pdz_5m_val  = crit.get("pdz_zone_5m",  "—") or "—"
+    pdz_15m_val = crit.get("pdz_zone_15m", "—") or "—"
+    crit_str = (
+        f"• RSI 5m    : {crit.get('rsi_5m','—')}\n"
+        f"• RSI 1h    : {crit.get('rsi_1h','—')}\n"
+        f"• EMA 3m    : {_cv(crit.get('ema_3m','—'))}\n"
+        f"• EMA 5m    : {_cv(crit.get('ema_5m','—'))}\n"
+        f"• EMA 15m   : {_cv(crit.get('ema_15m','—'))}\n"
+        f"• MACD 3m   : {_cv(crit.get('macd_3m'))}\n"
+        f"• MACD 5m   : {_cv(crit.get('macd_5m'))}\n"
+        f"• MACD 15m  : {_cv(crit.get('macd_15m'))}\n"
+        f"• SAR 3m    : {_cv(crit.get('sar_3m'))}\n"
+        f"• SAR 5m    : {_cv(crit.get('sar_5m'))}\n"
+        f"• SAR 15m   : {_cv(crit.get('sar_15m'))}\n"
+        f"• Vol ×avg  : {_cv(crit.get('vol_ratio'))}\n"
+        f"• PDZ 5m    : {pdz_5m_val}\n"
+        f"• PDZ 15m   : {pdz_15m_val}"
+    ) if crit else "—"
+
+    max_lev   = s.get("max_lev", get_max_leverage(s.get("symbol", "")))
+    sl_reason = analyze_sl_reason(s) if status == "sl_hit" else "—"
+    setup_type = "⭐ Super" if s.get("is_super_setup") else "Normal"
+
+    _usdt    = float(s.get("trade_usdt", _snap_cfg.get("trade_usdt_amount", 0)))
+    _lev     = int(s.get("trade_lev",   _snap_cfg.get("trade_leverage", 10)))
+    _entry_p = float(s.get("entry", 0) or 0)
+    _tp_p    = float(s.get("tp",    0) or 0)
+    _sl_p    = float(s.get("sl",    0) or 0)
+    if _usdt > 0 and _lev > 0 and _entry_p > 0:
+        _pos = _usdt * _lev
+        tp_usd_str = f"+${_pos * (_tp_p - _entry_p) / _entry_p:.2f}"
+        sl_usd_str = f"-${_pos * (_entry_p - _sl_p) / _entry_p:.2f}"
+    else:
+        tp_usd_str = sl_usd_str = "—"
+
+    ord_id_str  = s.get("order_id", "") or "—"
+    algo_id_str = s.get("algo_id",  "") or "—"
+    ord_env     = "🟡 Demo" if s.get("demo_mode") else "🔴 Live"
+    ord_status  = s.get("order_status", "")
+    ord_err     = s.get("order_error",  "")
+    if   ord_status == "placed":  ord_status_str = f"✅ Entry+OCO {ord_env}"
+    elif ord_status == "partial": ord_status_str = f"⚠️ Entry only {ord_env} · {ord_err[:80]}"
+    elif ord_status == "error":   ord_status_str = f"❌ {ord_err[:80]}" if ord_err else "❌ Error"
+    else:                         ord_status_str = "—"
+
+    duration_str = "—"
+    if s.get("timestamp"):
+        try:
+            t_open = datetime.fromisoformat(s["timestamp"].replace("Z", "+00:00"))
+            if status == "open":
+                duration_str = _fmt_secs(int((dubai_now() - t_open).total_seconds()))
+            elif s.get("close_time"):
+                t_close = datetime.fromisoformat(s["close_time"].replace("Z", "+00:00"))
+                duration_str = _fmt_secs(int((t_close - t_open).total_seconds()))
+        except Exception:
+            pass
+
+    return {
+        "Time (GST)":     ts_str,
+        "Alert":          alert_col,
+        "Symbol":         s.get("symbol", ""),
+        "Setup":          setup_type,
+        "Sector":         s.get("sector", "Other"),
+        "Signal Entry":   s.get("signal_entry", s.get("entry", "")),
+        "Fill $":         s.get("entry", "") if s.get("signal_entry") else "—",
+        "TP":             s.get("tp", ""),
+        "TP $":           tp_usd_str,
+        "SL":             s.get("sl", ""),
+        "SL $":           sl_usd_str,
+        "Status":         status_icon,
+        "Duration":       duration_str,
+        "Close Time":     close_str,
+        "Close $":        s.get("close_price") or "—",
+        "Max Lev":        f"{max_lev}×",
+        "Order":          ord_status_str,
+        "Order ID":       ord_id_str,
+        "Algo ID":        algo_id_str,
+        "Entry Criteria": crit_str,
+        "⚠️ SL Reason":  sl_reason,
+    }
+
+# Shared column_config used by all four tables
+_SIG_COL_CFG = {
+    "Alert":          st.column_config.TextColumn(
+                          "🚨 Alert", width="small",
+                          help="🔴 DL = price ≥3% below entry  |  🔴 TL = open ≥2 hours"),
+    "Setup":          st.column_config.TextColumn(width="small"),
+    "Signal Entry":   st.column_config.NumberColumn(format="%.8f",
+                          help="Price when the scanner signal fired"),
+    "Fill $":         st.column_config.NumberColumn(format="%.8f",
+                          help="Actual market fill price (may differ from signal entry)"),
+    "TP":             st.column_config.NumberColumn(format="%.8f"),
+    "TP $":           st.column_config.TextColumn(width="small"),
+    "SL":             st.column_config.NumberColumn(format="%.8f"),
+    "SL $":           st.column_config.TextColumn(width="small"),
+    "Duration":       st.column_config.TextColumn(width="small"),
+    "Close Time":     st.column_config.TextColumn(width="small"),
+    "Max Lev":        st.column_config.TextColumn(width="small"),
+    "Order":          st.column_config.TextColumn(width="medium"),
+    "Order ID":       st.column_config.TextColumn(width="medium"),
+    "Algo ID":        st.column_config.TextColumn(width="medium"),
+    "Entry Criteria": st.column_config.TextColumn(width="medium"),
+    "⚠️ SL Reason":  st.column_config.TextColumn(width="medium"),
+}
+
+def _render_sig_table(sig_list: list, header: str, empty_msg: str):
+    rows = [_build_signal_row(s) for s in sig_list]
+    st.markdown(f"### {header} ({len(rows)})")
+    if rows:
+        st.dataframe(rows, use_container_width=True, hide_index=True,
+                     column_config=_SIG_COL_CFG)
+    else:
+        st.info(empty_msg)
+
+# ── Filter by sector then split into four status buckets ───────────────────────
+filtered = signals if selected_sector == "All" else \
+           [s for s in signals if s.get("sector") == selected_sector]
+filtered_sorted = sorted(filtered, key=lambda x: x.get("timestamp", ""), reverse=True)
+
+_open_sigs  = [s for s in filtered_sorted if s.get("status") == "open"]
+_tp_sigs    = [s for s in filtered_sorted if s.get("status") == "tp_hit"]
+_sl_sigs    = [s for s in filtered_sorted if s.get("status") == "sl_hit"]
+_queue_sigs = [s for s in filtered_sorted if s.get("status") == "queue_limit"]
+
+# ── Table 1: Open Signals ───────────────────────────────────────────────────────
+_render_sig_table(_open_sigs,  "🔵 Open Signals",  "No open signals right now.")
+st.divider()
+
+# ── Table 2: TP Hit ─────────────────────────────────────────────────────────────
+_render_sig_table(_tp_sigs,    "✅ TP Hit",         "No TP hits yet.")
+st.divider()
+
+# ── Table 3: SL Hit ─────────────────────────────────────────────────────────────
+_render_sig_table(_sl_sigs,    "❌ SL Hit",         "No SL hits yet.")
+st.divider()
+
+# ── Table 4: Queue Limit ────────────────────────────────────────────────────────
+_render_sig_table(_queue_sigs, "⏳ Queue Limit",    "No queued signals.")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Manual Trade Panel
