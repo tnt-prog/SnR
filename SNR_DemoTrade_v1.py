@@ -1654,7 +1654,7 @@ def scan(cfg: dict):
 # ─────────────────────────────────────────────────────────────────────────────
 # Open signal tracker
 # ─────────────────────────────────────────────────────────────────────────────
-_PRICE_ALERT_PCT = 5.0   # alert when current price is this % or more below entry
+_PRICE_ALERT_PCT = 3.0   # alert when current price is this % or more below entry
 
 def update_open_signals(signals):
     for sig in signals:
@@ -2503,23 +2503,15 @@ if filtered_sorted:
             "sl_hit":      "❌ SL Hit",
             "queue_limit": "⏳ Queue Limit",
         }.get(status, status)
-        # Column 2 — quick visual alert
-        # For OPEN trades: turns 🔴 red when current price is ≥5% below entry.
-        # For closed/queued trades: shows their final outcome colour.
-        if status == "open":
-            if s.get("price_alert", False):
-                _drop = s.get("price_alert_pct", 0.0)
-                alert_col = f"🔴 -{_drop:.1f}% ALERT"
-            else:
-                alert_col = "🔵 Open"
-        elif status == "tp_hit":
-            alert_col = "🟢 TP HIT"
-        elif status == "sl_hit":
-            alert_col = "⚫ SL HIT"
-        elif status == "queue_limit":
-            alert_col = "⏳ Queued"
+        # Column 2 — Alert flag
+        # Only shows content when actionable:
+        #   Open trade down ≥3% from entry → 🔴 DL
+        #   All other open trades           → blank (no clutter)
+        #   Closed / queued                 → blank
+        if status == "open" and s.get("price_alert", False):
+            alert_col = "🔴 DL"
         else:
-            alert_col = "—"
+            alert_col = ""
         ts_str      = fmt_dubai(s.get("timestamp",""))
         close_str   = fmt_dubai(s["close_time"]) if s.get("close_time") else "—"
         crit        = s.get("criteria",{})
@@ -2577,23 +2569,33 @@ if filtered_sorted:
             ord_status_str = f"❌ {ord_err[:80]}" if ord_err else "❌ Error"
         else:
             ord_status_str = "—"
-        # ── Duration: time from signal entry → TP/SL close ───────────────────
+        # ── Duration ──────────────────────────────────────────────────────────
+        # Closed trades  → time from entry to TP/SL close
+        # Open trades    → live elapsed time from entry to now (Dubai time)
+        # Queue / other  → "—"
+        def _fmt_secs(secs: int) -> str:
+            if secs < 0:
+                return "—"
+            if secs < 3600:
+                return f"{secs // 60}m {secs % 60}s"
+            if secs < 86400:
+                h, rem = divmod(secs, 3600)
+                return f"{h}h {rem // 60}m"
+            d, rem = divmod(secs, 86400)
+            return f"{d}d {rem // 3600}h"
+
         duration_str = "—"
-        if s.get("close_time") and s.get("timestamp"):
+        if s.get("timestamp"):
             try:
-                t_open  = datetime.fromisoformat(s["timestamp"].replace("Z", "+00:00"))
-                t_close = datetime.fromisoformat(s["close_time"].replace("Z", "+00:00"))
-                secs    = int((t_close - t_open).total_seconds())
-                if secs < 0:
-                    duration_str = "—"
-                elif secs < 3600:
-                    duration_str = f"{secs // 60}m {secs % 60}s"
-                elif secs < 86400:
-                    h, rem = divmod(secs, 3600)
-                    duration_str = f"{h}h {rem // 60}m"
-                else:
-                    d, rem = divmod(secs, 86400)
-                    duration_str = f"{d}d {rem // 3600}h"
+                t_open = datetime.fromisoformat(s["timestamp"].replace("Z", "+00:00"))
+                if status == "open":
+                    # Live elapsed time — recalculated on every dashboard refresh
+                    secs = int((dubai_now() - t_open).total_seconds())
+                    duration_str = _fmt_secs(secs)
+                elif s.get("close_time"):
+                    t_close = datetime.fromisoformat(s["close_time"].replace("Z", "+00:00"))
+                    secs = int((t_close - t_open).total_seconds())
+                    duration_str = _fmt_secs(secs)
             except Exception:
                 pass
         rows.append({
