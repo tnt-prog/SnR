@@ -2621,12 +2621,16 @@ _SIG_COL_CFG = {
     "⚠️ SL Reason":  st.column_config.TextColumn(width="medium"),
 }
 
-def _render_sig_table(sig_list: list, header: str, empty_msg: str):
+def _render_sig_table(sig_list: list, header: str, empty_msg: str,
+                      auto_height: bool = False):
     rows = [_build_signal_row(s) for s in sig_list]
     st.markdown(f"### {header} ({len(rows)})")
     if rows:
+        # auto_height=True → expand the table so ALL rows are visible without
+        # internal scrolling.  Each row ≈ 35 px, header ≈ 38 px, +10 px buffer.
+        height = (len(rows) * 35 + 48) if auto_height else None
         st.dataframe(rows, use_container_width=True, hide_index=True,
-                     column_config=_SIG_COL_CFG)
+                     height=height, column_config=_SIG_COL_CFG)
     else:
         st.info(empty_msg)
 
@@ -2641,7 +2645,8 @@ _sl_sigs    = [s for s in filtered_sorted if s.get("status") == "sl_hit"]
 _queue_sigs = [s for s in filtered_sorted if s.get("status") == "queue_limit"]
 
 # ── Table 1: Open Signals ───────────────────────────────────────────────────────
-_render_sig_table(_open_sigs,  "🔵 Open Signals",  "No open signals right now.")
+_render_sig_table(_open_sigs,  "🔵 Open Signals",  "No open signals right now.",
+                  auto_height=True)
 st.divider()
 
 # ── Table 2: TP Hit ─────────────────────────────────────────────────────────────
