@@ -92,8 +92,12 @@ DEFAULT_CONFIG: dict = {
     "ema_period_5m":      12,
     "use_ema_15m":        True,
     "ema_period_15m":     12,
-    "use_macd":           True,
-    "use_sar":            True,
+    "use_macd_3m":        True,   # F7 — MACD dark-green (3m)
+    "use_macd_5m":        True,   # F7 — MACD dark-green (5m)
+    "use_macd_15m":       True,   # F7 — MACD dark-green (15m)
+    "use_sar_3m":         True,   # F8 — Parabolic SAR (3m)
+    "use_sar_5m":         True,   # F8 — Parabolic SAR (5m)
+    "use_sar_15m":        True,   # F8 — Parabolic SAR (15m)
     "use_vol_spike":      False,
     "vol_spike_mult":     2.0,
     "vol_spike_lookback": 20,
@@ -1516,39 +1520,58 @@ def process(sym, cfg: dict):
                 return None
             ema_15m_val = _pround(ema[-1])
 
-        # ── F7: MACD dark-green ───────────────────────────────────────────────
+        # ── F7: MACD dark-green — per-timeframe independent checks ──────────
         macd_3m_val = macd_5m_val = macd_15m_val = None
-        if cfg.get("use_macd"):
-            if not (macd_bullish(closes_3m) and
-                    macd_bullish(closes_5m)  and
-                    macd_bullish(closes_15m)):
+        _macd_3m_on  = cfg.get("use_macd_3m",  True)
+        _macd_5m_on  = cfg.get("use_macd_5m",  True)
+        _macd_15m_on = cfg.get("use_macd_15m", True)
+        if _macd_3m_on or _macd_5m_on or _macd_15m_on:
+            # Check only the enabled timeframes; any failure eliminates the coin
+            _macd_fail = (
+                (_macd_3m_on  and not macd_bullish(closes_3m))  or
+                (_macd_5m_on  and not macd_bullish(closes_5m))  or
+                (_macd_15m_on and not macd_bullish(closes_15m))
+            )
+            if _macd_fail:
                 with _filter_lock:
                     _filter_counts["f7_macd"] = _filter_counts.get("f7_macd", 0) + 1
                     _filter_counts["f7_elim_syms"].append(sym)
                 return None
-            ml3,  _, _ = calc_macd(closes_3m)
-            ml5,  _, _ = calc_macd(closes_5m)
-            ml15, _, _ = calc_macd(closes_15m)
-            if ml3:  macd_3m_val  = round(ml3[-1],  8)
-            if ml5:  macd_5m_val  = round(ml5[-1],  8)
-            if ml15: macd_15m_val = round(ml15[-1], 8)
+            # Store MACD line values for criteria display
+            if _macd_3m_on:
+                ml3, _, _ = calc_macd(closes_3m)
+                if ml3: macd_3m_val = round(ml3[-1], 8)
+            if _macd_5m_on:
+                ml5, _, _ = calc_macd(closes_5m)
+                if ml5: macd_5m_val = round(ml5[-1], 8)
+            if _macd_15m_on:
+                ml15, _, _ = calc_macd(closes_15m)
+                if ml15: macd_15m_val = round(ml15[-1], 8)
 
-        # ── F8: Parabolic SAR ─────────────────────────────────────────────────
+        # ── F8: Parabolic SAR — per-timeframe independent checks ─────────────
         sar_3m_val = sar_5m_val = sar_15m_val = None
-        if cfg.get("use_sar"):
-            sar_3m  = calc_parabolic_sar(m3_candles)
-            sar_5m  = calc_parabolic_sar(m5)
-            sar_15m = calc_parabolic_sar(m15)
-            if not (sar_3m  and sar_3m[-1][1]  and
-                    sar_5m  and sar_5m[-1][1]  and
-                    sar_15m and sar_15m[-1][1]):
+        _sar_3m_on  = cfg.get("use_sar_3m",  True)
+        _sar_5m_on  = cfg.get("use_sar_5m",  True)
+        _sar_15m_on = cfg.get("use_sar_15m", True)
+        if _sar_3m_on or _sar_5m_on or _sar_15m_on:
+            # Calculate SAR only for enabled timeframes
+            sar_3m  = calc_parabolic_sar(m3_candles) if _sar_3m_on  else None
+            sar_5m  = calc_parabolic_sar(m5)         if _sar_5m_on  else None
+            sar_15m = calc_parabolic_sar(m15)        if _sar_15m_on else None
+            # Each enabled timeframe must be bullish; fail on any one
+            _sar_fail = (
+                (_sar_3m_on  and not (sar_3m  and sar_3m[-1][1]))  or
+                (_sar_5m_on  and not (sar_5m  and sar_5m[-1][1]))  or
+                (_sar_15m_on and not (sar_15m and sar_15m[-1][1]))
+            )
+            if _sar_fail:
                 with _filter_lock:
                     _filter_counts["f8_sar"] = _filter_counts.get("f8_sar", 0) + 1
                     _filter_counts["f8_elim_syms"].append(sym)
                 return None
-            sar_3m_val  = _pround(sar_3m[-1][0])
-            sar_5m_val  = _pround(sar_5m[-1][0])
-            sar_15m_val = _pround(sar_15m[-1][0])
+            if sar_3m:  sar_3m_val  = _pround(sar_3m[-1][0])
+            if sar_5m:  sar_5m_val  = _pround(sar_5m[-1][0])
+            if sar_15m: sar_15m_val = _pround(sar_15m[-1][0])
 
         # ── F9: Volume Spike ──────────────────────────────────────────────────
         vol_ratio = None
@@ -1583,12 +1606,12 @@ def process(sym, cfg: dict):
             "ema_3m":       ema_3m_val  if cfg.get("use_ema_3m")    else "—",
             "ema_5m":       ema_5m_val  if cfg.get("use_ema_5m")    else "—",
             "ema_15m":      ema_15m_val if cfg.get("use_ema_15m")   else "—",
-            "macd_3m":      macd_3m_val  if cfg.get("use_macd")     else "—",
-            "macd_5m":      macd_5m_val  if cfg.get("use_macd")     else "—",
-            "macd_15m":     macd_15m_val if cfg.get("use_macd")     else "—",
-            "sar_3m":       sar_3m_val   if cfg.get("use_sar")      else "—",
-            "sar_5m":       sar_5m_val   if cfg.get("use_sar")      else "—",
-            "sar_15m":      sar_15m_val  if cfg.get("use_sar")      else "—",
+            "macd_3m":      macd_3m_val  if cfg.get("use_macd_3m",  True) else "—",
+            "macd_5m":      macd_5m_val  if cfg.get("use_macd_5m",  True) else "—",
+            "macd_15m":     macd_15m_val if cfg.get("use_macd_15m", True) else "—",
+            "sar_3m":       sar_3m_val   if cfg.get("use_sar_3m",   True) else "—",
+            "sar_5m":       sar_5m_val   if cfg.get("use_sar_5m",   True) else "—",
+            "sar_15m":      sar_15m_val  if cfg.get("use_sar_15m",  True) else "—",
             "vol_ratio":    vol_ratio    if cfg.get("use_vol_spike") else "—",
             "pdz_zone_5m":  pdz_zone_5m  if cfg.get("use_pdz_5m",  True) else "—",
             "pdz_zone_15m": pdz_zone_15m if cfg.get("use_pdz_15m", True) else "—",
@@ -2130,34 +2153,45 @@ with st.sidebar:
     st.divider()
 
     # ── F7: MACD ───────────────────────────────────────────────────────────────
-    st.markdown("**📊 F7 — MACD** (dark 🟢 histogram, 3m·5m·15m)")
-    new_use_macd = st.checkbox(
-        "Enable F7 — MACD filter",
-        value=bool(_snap_cfg.get("use_macd",True)), key="cfg_use_macd",
-        help=(
-            "F7 — MACD Dark Green Histogram Filter\n\n"
-            "All of the following must be true on 3m, 5m, AND 15m simultaneously:\n"
-            "  • MACD line > 0\n"
-            "  • Signal line > 0\n"
-            "  • Histogram > 0 AND increasing (dark green — not fading)\n"
-            "  • Bullish crossover within the last 12 candles\n\n"
-            "Ensures strong, fresh bullish momentum across all timeframes."
-        ))
-    if new_use_macd: st.caption("✅ MACD>0 · Signal>0 · Histogram 🟢↑ · Crossover within 12 candles")
+    _macd_help = (
+        "F7 — MACD Dark Green Histogram Filter\n\n"
+        "Each timeframe is checked independently. Enable only the timeframes you want.\n\n"
+        "For each enabled timeframe ALL of the following must be true:\n"
+        "  • MACD line > 0\n"
+        "  • Signal line > 0\n"
+        "  • Histogram > 0 AND increasing (dark green — not fading)\n"
+        "  • Bullish crossover within the last 12 candles"
+    )
+    st.markdown("**📊 F7 — MACD** (dark 🟢 histogram — per timeframe)", help=_macd_help)
+    fm1, fm2, fm3 = st.columns(3)
+    new_use_macd_3m  = fm1.checkbox("3m MACD",  value=bool(_snap_cfg.get("use_macd_3m",  True)), key="cfg_use_macd_3m")
+    new_use_macd_5m  = fm2.checkbox("5m MACD",  value=bool(_snap_cfg.get("use_macd_5m",  True)), key="cfg_use_macd_5m")
+    new_use_macd_15m = fm3.checkbox("15m MACD", value=bool(_snap_cfg.get("use_macd_15m", True)), key="cfg_use_macd_15m")
+    _macd_on_tfs = [tf for tf, on in [("3m", new_use_macd_3m), ("5m", new_use_macd_5m), ("15m", new_use_macd_15m)] if on]
+    if _macd_on_tfs:
+        st.caption(f"✅ Checking MACD on: {' · '.join(_macd_on_tfs)}  |  MACD>0 · Signal>0 · Histogram 🟢↑ · Crossover ≤12")
+    else:
+        st.caption("⚫ MACD filter disabled (all timeframes off)")
     st.divider()
 
     # ── F8: Parabolic SAR ──────────────────────────────────────────────────────
-    st.markdown("**🪂 F8 — Parabolic SAR** (3m·5m·15m)")
-    new_use_sar = st.checkbox(
-        "Enable F8 — SAR filter",
-        value=bool(_snap_cfg.get("use_sar",True)), key="cfg_use_sar",
-        help=(
-            "F8 — Parabolic SAR Filter\n\n"
-            "SAR must be positioned BELOW current price on 3m, 5m, AND 15m.\n\n"
-            "SAR below price = bullish mode.\n"
-            "If any timeframe has SAR above price, the trend is bearish → coin rejected."
-        ))
-    if new_use_sar: st.caption("✅ SAR below price on 3m · 5m · 15m")
+    _sar_help = (
+        "F8 — Parabolic SAR Filter\n\n"
+        "Each timeframe is checked independently. Enable only the timeframes you want.\n\n"
+        "For each enabled timeframe:\n"
+        "  SAR must be positioned BELOW current price (bullish mode).\n"
+        "  SAR above price = bearish trend → coin rejected on that timeframe."
+    )
+    st.markdown("**🪂 F8 — Parabolic SAR** (per timeframe)", help=_sar_help)
+    fs1, fs2, fs3 = st.columns(3)
+    new_use_sar_3m  = fs1.checkbox("3m SAR",  value=bool(_snap_cfg.get("use_sar_3m",  True)), key="cfg_use_sar_3m")
+    new_use_sar_5m  = fs2.checkbox("5m SAR",  value=bool(_snap_cfg.get("use_sar_5m",  True)), key="cfg_use_sar_5m")
+    new_use_sar_15m = fs3.checkbox("15m SAR", value=bool(_snap_cfg.get("use_sar_15m", True)), key="cfg_use_sar_15m")
+    _sar_on_tfs = [tf for tf, on in [("3m", new_use_sar_3m), ("5m", new_use_sar_5m), ("15m", new_use_sar_15m)] if on]
+    if _sar_on_tfs:
+        st.caption(f"✅ Checking SAR on: {' · '.join(_sar_on_tfs)}  |  SAR must be below price (bullish)")
+    else:
+        st.caption("⚫ SAR filter disabled (all timeframes off)")
     st.divider()
 
     # ── F9: Volume Spike ───────────────────────────────────────────────────────
@@ -2285,7 +2319,12 @@ with st.sidebar:
             "use_ema_3m": bool(new_use_ema_3m), "ema_period_3m": int(new_ema_period_3m),
             "use_ema_5m": bool(new_use_ema_5m), "ema_period_5m": int(new_ema_period_5m),
             "use_ema_15m": bool(new_use_ema_15m), "ema_period_15m": int(new_ema_period_15m),
-            "use_macd": bool(new_use_macd), "use_sar": bool(new_use_sar),
+            "use_macd_3m":  bool(new_use_macd_3m),
+            "use_macd_5m":  bool(new_use_macd_5m),
+            "use_macd_15m": bool(new_use_macd_15m),
+            "use_sar_3m":   bool(new_use_sar_3m),
+            "use_sar_5m":   bool(new_use_sar_5m),
+            "use_sar_15m":  bool(new_use_sar_15m),
             "use_vol_spike": bool(new_use_vol_spike),
             "vol_spike_mult": float(new_vol_mult), "vol_spike_lookback": int(new_vol_lookback),
             "use_pdz_5m": bool(new_use_pdz_5m),
@@ -2468,8 +2507,10 @@ if _snap_cfg.get("use_rsi_1h",  True): badges.append(f"📈 F5 — 1h RSI {_snap
 if _snap_cfg.get("use_ema_3m"):    badges.append(f"📉 F6 — EMA{_snap_cfg.get('ema_period_3m',12)} 3m")
 if _snap_cfg.get("use_ema_5m"):    badges.append(f"📉 F6 — EMA{_snap_cfg.get('ema_period_5m',12)} 5m")
 if _snap_cfg.get("use_ema_15m"):   badges.append(f"📉 F6 — EMA{_snap_cfg.get('ema_period_15m',12)} 15m")
-if _snap_cfg.get("use_macd"):      badges.append("📊 F7 — MACD 🟢↑ 3m·5m·15m")
-if _snap_cfg.get("use_sar"):       badges.append("🪂 F8 — SAR 3m·5m·15m")
+_macd_tfs = [tf for tf, k in [("3m","use_macd_3m"),("5m","use_macd_5m"),("15m","use_macd_15m")] if _snap_cfg.get(k, True)]
+if _macd_tfs: badges.append(f"📊 F7 — MACD 🟢↑ {' · '.join(_macd_tfs)}")
+_sar_tfs  = [tf for tf, k in [("3m","use_sar_3m"), ("5m","use_sar_5m"), ("15m","use_sar_15m")] if _snap_cfg.get(k, True)]
+if _sar_tfs:  badges.append(f"🪂 F8 — SAR {' · '.join(_sar_tfs)}")
 if _snap_cfg.get("use_vol_spike"): badges.append(
     f"📦 F9 — Vol ≥{_snap_cfg.get('vol_spike_mult',2.0)}× / {_snap_cfg.get('vol_spike_lookback',20)} 15m")
 st.markdown("**Active Filters:**")
@@ -2503,13 +2544,28 @@ if filtered_sorted:
             "sl_hit":      "❌ SL Hit",
             "queue_limit": "⏳ Queue Limit",
         }.get(status, status)
-        # Column 2 — Alert flag
-        # Only shows content when actionable:
-        #   Open trade down ≥3% from entry → 🔴 DL
-        #   All other open trades           → blank (no clutter)
-        #   Closed / queued                 → blank
-        if status == "open" and s.get("price_alert", False):
-            alert_col = "🔴 DL"
+        # Column 2 — Alert flag (open trades only, blank otherwise)
+        #   Price down ≥3% from entry           → 🔴 DL
+        #   Trade open for ≥2 hours             → 🔴 TL
+        #   Both conditions simultaneously      → 🔴 DL / TL
+        #   Neither / closed / queued           → blank
+        if status == "open":
+            _dl = s.get("price_alert", False)
+            _tl = False
+            if s.get("timestamp"):
+                try:
+                    _t_open = datetime.fromisoformat(s["timestamp"].replace("Z", "+00:00"))
+                    _tl = (dubai_now() - _t_open).total_seconds() >= 7200  # 2 hours
+                except Exception:
+                    pass
+            if _dl and _tl:
+                alert_col = "🔴 DL / TL"
+            elif _dl:
+                alert_col = "🔴 DL"
+            elif _tl:
+                alert_col = "🔴 TL"
+            else:
+                alert_col = ""
         else:
             alert_col = ""
         ts_str      = fmt_dubai(s.get("timestamp",""))
@@ -2854,8 +2910,11 @@ if fc.get("total_watchlist", 0) > 0:
         if sc.get("use_ema_5m"):  ema_parts.append(f"5m EMA{sc.get('ema_period_5m',12)}")
         if sc.get("use_ema_15m"): ema_parts.append(f"15m EMA{sc.get('ema_period_15m',12)}")
         ema_lbl    = ("F6 — EMA (" + (" · ".join(ema_parts)) + ")") if ema_parts else "F6 — EMA (off)"
-        macd_lbl   = "F7 — MACD \U0001f7e2\u2191 3m\xb75m\xb715m" if sc.get("use_macd")      else "F7 — MACD (off)"
-        sar_lbl    = "F8 — SAR 3m\xb75m\xb715m"                    if sc.get("use_sar")       else "F8 — SAR (off)"
+        _fc_macd_tfs = [tf for tf, k in [("3m","use_macd_3m"),("5m","use_macd_5m"),("15m","use_macd_15m")] if sc.get(k, True)]
+        _dot = "\xb7"
+        macd_lbl   = ("F7 \u2014 MACD \U0001f7e2\u2191 " + _dot.join(_fc_macd_tfs)) if _fc_macd_tfs else "F7 \u2014 MACD (off)"
+        _fc_sar_tfs  = [tf for tf, k in [("3m","use_sar_3m"),("5m","use_sar_5m"),("15m","use_sar_15m")] if sc.get(k, True)]
+        sar_lbl    = ("F8 \u2014 SAR " + _dot.join(_fc_sar_tfs)) if _fc_sar_tfs else "F8 \u2014 SAR (off)"
         vol_lbl    = (f"F9 — Vol \u2265{sc.get('vol_spike_mult',2.0)}\xd7 / {sc.get('vol_spike_lookback',20)} 15m"
                       if sc.get("use_vol_spike") else "F9 — Vol (off)")
 
