@@ -1857,8 +1857,195 @@ def _ensure_scanner():
 # ─────────────────────────────────────────────────────────────────────────────
 # STREAMLIT UI
 # ─────────────────────────────────────────────────────────────────────────────
-st.set_page_config(page_title="Crypto Demo Trades", page_icon="🔍",
+st.set_page_config(page_title="S&R Crypto Intelligent Portal", page_icon="💎",
                    layout="wide", initial_sidebar_state="expanded")
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Option 2 — Dark Navy + Gold  (S&R Crypto Intelligent Portal theme)
+# ─────────────────────────────────────────────────────────────────────────────
+st.markdown("""
+<style>
+/* ── Google Fonts ─────────────────────────────────────────────────────────── */
+@import url('https://fonts.googleapis.com/css2?family=Sora:wght@300;400;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+
+/* ── Global base ──────────────────────────────────────────────────────────── */
+html, body, [class*="css"] {
+    font-family: 'Sora', sans-serif !important;
+    color: #F9FAFB !important;
+}
+
+/* ── App background ───────────────────────────────────────────────────────── */
+.stApp {
+    background-color: #0A0F1E !important;
+}
+
+/* ── Sidebar ──────────────────────────────────────────────────────────────── */
+[data-testid="stSidebar"] {
+    background-color: #0D1424 !important;
+    border-right: 1px solid #C9A84C33 !important;
+}
+[data-testid="stSidebar"] * {
+    color: #F9FAFB !important;
+}
+[data-testid="stSidebar"] .stMarkdown h2 {
+    color: #C9A84C !important;
+    font-weight: 700 !important;
+    letter-spacing: 0.04em !important;
+    border-bottom: 1px solid #C9A84C55 !important;
+    padding-bottom: 6px !important;
+}
+
+/* ── Main area headings ───────────────────────────────────────────────────── */
+h1 {
+    font-family: 'Sora', sans-serif !important;
+    font-weight: 700 !important;
+    font-size: 1.9rem !important;
+    color: #C9A84C !important;
+    letter-spacing: 0.05em !important;
+    border-bottom: 2px solid #C9A84C55 !important;
+    padding-bottom: 8px !important;
+    margin-bottom: 12px !important;
+}
+h2, h3 {
+    font-family: 'Sora', sans-serif !important;
+    font-weight: 600 !important;
+    color: #F9FAFB !important;
+    letter-spacing: 0.03em !important;
+}
+
+/* ── Metrics ──────────────────────────────────────────────────────────────── */
+[data-testid="stMetric"] {
+    background-color: #111827 !important;
+    border: 1px solid #C9A84C44 !important;
+    border-radius: 8px !important;
+    padding: 10px 14px !important;
+}
+[data-testid="stMetricLabel"] {
+    color: #C9A84C !important;
+    font-size: 0.72rem !important;
+    font-weight: 600 !important;
+    text-transform: uppercase !important;
+    letter-spacing: 0.08em !important;
+}
+[data-testid="stMetricValue"] {
+    color: #F9FAFB !important;
+    font-family: 'JetBrains Mono', monospace !important;
+    font-size: 1.4rem !important;
+    font-weight: 500 !important;
+}
+
+/* ── Dataframes ───────────────────────────────────────────────────────────── */
+[data-testid="stDataFrame"] {
+    border: 1px solid #C9A84C33 !important;
+    border-radius: 8px !important;
+    overflow: hidden !important;
+}
+[data-testid="stDataFrame"] * {
+    font-family: 'JetBrains Mono', monospace !important;
+    font-size: 0.78rem !important;
+}
+
+/* ── Buttons ──────────────────────────────────────────────────────────────── */
+.stButton > button {
+    background-color: #111827 !important;
+    color: #F9FAFB !important;
+    border: 1px solid #C9A84C66 !important;
+    border-radius: 6px !important;
+    font-family: 'Sora', sans-serif !important;
+    font-weight: 600 !important;
+    font-size: 0.78rem !important;
+    letter-spacing: 0.04em !important;
+    transition: all 0.15s ease !important;
+}
+.stButton > button:hover {
+    background-color: #C9A84C !important;
+    color: #0A0F1E !important;
+    border-color: #C9A84C !important;
+}
+.stButton > button[kind="primary"] {
+    background-color: #C9A84C !important;
+    color: #0A0F1E !important;
+    border-color: #C9A84C !important;
+    font-weight: 700 !important;
+}
+.stButton > button[kind="primary"]:hover {
+    background-color: #E0BE6A !important;
+}
+
+/* ── Expanders ────────────────────────────────────────────────────────────── */
+[data-testid="stExpander"] {
+    background-color: #111827 !important;
+    border: 1px solid #C9A84C33 !important;
+    border-radius: 8px !important;
+}
+[data-testid="stExpander"] summary {
+    color: #C9A84C !important;
+    font-weight: 600 !important;
+    font-size: 0.85rem !important;
+    letter-spacing: 0.03em !important;
+}
+
+/* ── Dividers ─────────────────────────────────────────────────────────────── */
+hr {
+    border-color: #C9A84C33 !important;
+}
+
+/* ── Captions & info boxes ────────────────────────────────────────────────── */
+[data-testid="stCaptionContainer"] {
+    color: #9CA3AF !important;
+    font-size: 0.74rem !important;
+}
+[data-testid="stInfo"] {
+    background-color: #111827 !important;
+    border-left: 3px solid #C9A84C !important;
+    color: #F9FAFB !important;
+    border-radius: 6px !important;
+}
+[data-testid="stSuccess"] {
+    background-color: #052E16 !important;
+    border-left: 3px solid #10B981 !important;
+    color: #D1FAE5 !important;
+}
+[data-testid="stWarning"] {
+    background-color: #1C1508 !important;
+    border-left: 3px solid #FBBF24 !important;
+    color: #FEF3C7 !important;
+}
+[data-testid="stError"] {
+    background-color: #2D0B0B !important;
+    border-left: 3px solid #F43F5E !important;
+    color: #FFE4E6 !important;
+}
+
+/* ── Inputs / selects / checkboxes ───────────────────────────────────────── */
+[data-testid="stTextInput"] input,
+[data-testid="stNumberInput"] input,
+[data-testid="stTextArea"] textarea,
+[data-testid="stSelectbox"] select {
+    background-color: #111827 !important;
+    color: #F9FAFB !important;
+    border: 1px solid #C9A84C44 !important;
+    border-radius: 6px !important;
+    font-family: 'JetBrains Mono', monospace !important;
+}
+[data-testid="stCheckbox"] label {
+    color: #F9FAFB !important;
+    font-size: 0.82rem !important;
+}
+
+/* ── Plotly chart backgrounds ─────────────────────────────────────────────── */
+.js-plotly-plot .plotly .bg {
+    fill: #111827 !important;
+}
+
+/* ── Scrollbar ────────────────────────────────────────────────────────────── */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: #0A0F1E; }
+::-webkit-scrollbar-thumb { background: #C9A84C55; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #C9A84C; }
+</style>
+""", unsafe_allow_html=True)
+
 _ensure_scanner()
 
 with _log_lock:    _snap_log = json.loads(json.dumps(_b._bsc_log))
@@ -2374,7 +2561,7 @@ with st.sidebar:
 # ─────────────────────────────────────────────────────────────────────────────
 # MAIN AREA
 # ─────────────────────────────────────────────────────────────────────────────
-st.title("🔍 Crypto Demo Trades")
+st.title("S&R — Crypto Intelligent Portal")
 
 last_scan = health.get("last_scan_at", "never")
 if last_scan and last_scan != "never":
