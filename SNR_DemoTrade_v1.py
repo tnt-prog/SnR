@@ -2626,11 +2626,15 @@ def _render_sig_table(sig_list: list, header: str, empty_msg: str,
     rows = [_build_signal_row(s) for s in sig_list]
     st.markdown(f"### {header} ({len(rows)})")
     if rows:
-        # auto_height=True → expand the table so ALL rows are visible without
-        # internal scrolling.  Each row ≈ 35 px, header ≈ 38 px, +10 px buffer.
-        height = (len(rows) * 35 + 48) if auto_height else None
-        st.dataframe(rows, use_container_width=True, hide_index=True,
-                     height=height, column_config=_SIG_COL_CFG)
+        if auto_height:
+            # Expand so ALL rows are visible without internal scrolling.
+            # Each row ≈ 35 px, header ≈ 38 px, +10 px buffer.
+            st.dataframe(rows, use_container_width=True, hide_index=True,
+                         height=len(rows) * 35 + 48,
+                         column_config=_SIG_COL_CFG)
+        else:
+            st.dataframe(rows, use_container_width=True, hide_index=True,
+                         column_config=_SIG_COL_CFG)
     else:
         st.info(empty_msg)
 
