@@ -1334,8 +1334,14 @@ def _reset_filter_counts():
         "f4_rsi5m":         0,   # F4 — 5m RSI
         "f5_rsi1h":         0,   # F5 — 1h RSI
         "f6_ema":           0,   # F6 — EMA
-        "f7_macd":          0,   # F7 — MACD
-        "f8_sar":           0,   # F8 — SAR
+        # F7 MACD — per timeframe
+        "f7_macd_3m":       0,
+        "f7_macd_5m":       0,
+        "f7_macd_15m":      0,
+        # F8 SAR — per timeframe
+        "f8_sar_3m":        0,
+        "f8_sar_5m":        0,
+        "f8_sar_15m":       0,
         "f9_vol":           0,   # F9 — Vol Spike
         "f_empty_data":     0,   # Stage 2 candle fetch returned empty for a timeframe
         "passed":           0,
@@ -1350,8 +1356,12 @@ def _reset_filter_counts():
         "f4_elim_syms":           [],
         "f5_elim_syms":           [],
         "f6_elim_syms":           [],
-        "f7_elim_syms":           [],
-        "f8_elim_syms":           [],
+        "f7_macd_3m_elim_syms":   [],
+        "f7_macd_5m_elim_syms":   [],
+        "f7_macd_15m_elim_syms":  [],
+        "f8_sar_3m_elim_syms":    [],
+        "f8_sar_5m_elim_syms":    [],
+        "f8_sar_15m_elim_syms":   [],
         "f9_elim_syms":           [],
         "f_empty_data_syms":      [],
         "passed_syms":            [],
@@ -1521,57 +1531,70 @@ def process(sym, cfg: dict):
             ema_15m_val = _pround(ema[-1])
 
         # ── F7: MACD dark-green — per-timeframe independent checks ──────────
+        # Each enabled timeframe is checked in order (3m → 5m → 15m).
+        # The first failure increments that timeframe's own counter and eliminates
+        # the coin — giving the funnel an accurate per-timeframe breakdown.
         macd_3m_val = macd_5m_val = macd_15m_val = None
         _macd_3m_on  = cfg.get("use_macd_3m",  True)
         _macd_5m_on  = cfg.get("use_macd_5m",  True)
         _macd_15m_on = cfg.get("use_macd_15m", True)
-        if _macd_3m_on or _macd_5m_on or _macd_15m_on:
-            # Check only the enabled timeframes; any failure eliminates the coin
-            _macd_fail = (
-                (_macd_3m_on  and not macd_bullish(closes_3m))  or
-                (_macd_5m_on  and not macd_bullish(closes_5m))  or
-                (_macd_15m_on and not macd_bullish(closes_15m))
-            )
-            if _macd_fail:
-                with _filter_lock:
-                    _filter_counts["f7_macd"] = _filter_counts.get("f7_macd", 0) + 1
-                    _filter_counts["f7_elim_syms"].append(sym)
-                return None
-            # Store MACD line values for criteria display
-            if _macd_3m_on:
-                ml3, _, _ = calc_macd(closes_3m)
-                if ml3: macd_3m_val = round(ml3[-1], 8)
-            if _macd_5m_on:
-                ml5, _, _ = calc_macd(closes_5m)
-                if ml5: macd_5m_val = round(ml5[-1], 8)
-            if _macd_15m_on:
-                ml15, _, _ = calc_macd(closes_15m)
-                if ml15: macd_15m_val = round(ml15[-1], 8)
+        if _macd_3m_on and not macd_bullish(closes_3m):
+            with _filter_lock:
+                _filter_counts["f7_macd_3m"] = _filter_counts.get("f7_macd_3m", 0) + 1
+                _filter_counts["f7_macd_3m_elim_syms"].append(sym)
+            return None
+        if _macd_5m_on and not macd_bullish(closes_5m):
+            with _filter_lock:
+                _filter_counts["f7_macd_5m"] = _filter_counts.get("f7_macd_5m", 0) + 1
+                _filter_counts["f7_macd_5m_elim_syms"].append(sym)
+            return None
+        if _macd_15m_on and not macd_bullish(closes_15m):
+            with _filter_lock:
+                _filter_counts["f7_macd_15m"] = _filter_counts.get("f7_macd_15m", 0) + 1
+                _filter_counts["f7_macd_15m_elim_syms"].append(sym)
+            return None
+        # Store MACD line values for criteria display
+        if _macd_3m_on:
+            ml3, _, _ = calc_macd(closes_3m)
+            if ml3: macd_3m_val = round(ml3[-1], 8)
+        if _macd_5m_on:
+            ml5, _, _ = calc_macd(closes_5m)
+            if ml5: macd_5m_val = round(ml5[-1], 8)
+        if _macd_15m_on:
+            ml15, _, _ = calc_macd(closes_15m)
+            if ml15: macd_15m_val = round(ml15[-1], 8)
 
         # ── F8: Parabolic SAR — per-timeframe independent checks ─────────────
+        # Each enabled timeframe checked in order (3m → 5m → 15m).
+        # First failure increments that timeframe's counter and eliminates the coin.
         sar_3m_val = sar_5m_val = sar_15m_val = None
         _sar_3m_on  = cfg.get("use_sar_3m",  True)
         _sar_5m_on  = cfg.get("use_sar_5m",  True)
         _sar_15m_on = cfg.get("use_sar_15m", True)
-        if _sar_3m_on or _sar_5m_on or _sar_15m_on:
-            # Calculate SAR only for enabled timeframes
-            sar_3m  = calc_parabolic_sar(m3_candles) if _sar_3m_on  else None
-            sar_5m  = calc_parabolic_sar(m5)         if _sar_5m_on  else None
-            sar_15m = calc_parabolic_sar(m15)        if _sar_15m_on else None
-            # Each enabled timeframe must be bullish; fail on any one
-            _sar_fail = (
-                (_sar_3m_on  and not (sar_3m  and sar_3m[-1][1]))  or
-                (_sar_5m_on  and not (sar_5m  and sar_5m[-1][1]))  or
-                (_sar_15m_on and not (sar_15m and sar_15m[-1][1]))
-            )
-            if _sar_fail:
+        if _sar_3m_on:
+            sar_3m = calc_parabolic_sar(m3_candles)
+            if not (sar_3m and sar_3m[-1][1]):
                 with _filter_lock:
-                    _filter_counts["f8_sar"] = _filter_counts.get("f8_sar", 0) + 1
-                    _filter_counts["f8_elim_syms"].append(sym)
+                    _filter_counts["f8_sar_3m"] = _filter_counts.get("f8_sar_3m", 0) + 1
+                    _filter_counts["f8_sar_3m_elim_syms"].append(sym)
                 return None
-            if sar_3m:  sar_3m_val  = _pround(sar_3m[-1][0])
-            if sar_5m:  sar_5m_val  = _pround(sar_5m[-1][0])
-            if sar_15m: sar_15m_val = _pround(sar_15m[-1][0])
+            sar_3m_val = _pround(sar_3m[-1][0])
+        if _sar_5m_on:
+            sar_5m = calc_parabolic_sar(m5)
+            if not (sar_5m and sar_5m[-1][1]):
+                with _filter_lock:
+                    _filter_counts["f8_sar_5m"] = _filter_counts.get("f8_sar_5m", 0) + 1
+                    _filter_counts["f8_sar_5m_elim_syms"].append(sym)
+                return None
+            sar_5m_val = _pround(sar_5m[-1][0])
+        if _sar_15m_on:
+            sar_15m = calc_parabolic_sar(m15)
+            if not (sar_15m and sar_15m[-1][1]):
+                with _filter_lock:
+                    _filter_counts["f8_sar_15m"] = _filter_counts.get("f8_sar_15m", 0) + 1
+                    _filter_counts["f8_sar_15m_elim_syms"].append(sym)
+                return None
+            sar_15m_val = _pround(sar_15m[-1][0])
 
         # ── F9: Volume Spike ──────────────────────────────────────────────────
         vol_ratio = None
@@ -2883,60 +2906,84 @@ if fc.get("total_watchlist", 0) > 0:
         after_f4  = after_f3  - fc.get("f4_rsi5m",  0)
         after_f5  = after_f4  - fc.get("f5_rsi1h",  0)
         after_f6  = after_f5  - fc.get("f6_ema",    0)
-        after_f7  = after_f6  - fc.get("f7_macd",   0)
-        after_f8       = after_f7  - fc.get("f8_sar",        0)
-        after_f9       = after_f8  - fc.get("f9_vol",        0)
-        after_empty    = after_f9  - fc.get("f_empty_data",  0)
+        # F7 MACD — per timeframe running totals
+        after_f7_macd_3m  = after_f6  - fc.get("f7_macd_3m",  0)
+        after_f7_macd_5m  = after_f7_macd_3m  - fc.get("f7_macd_5m",  0)
+        after_f7_macd_15m = after_f7_macd_5m  - fc.get("f7_macd_15m", 0)
+        # F8 SAR — per timeframe running totals
+        after_f8_sar_3m   = after_f7_macd_15m - fc.get("f8_sar_3m",  0)
+        after_f8_sar_5m   = after_f8_sar_3m   - fc.get("f8_sar_5m",  0)
+        after_f8_sar_15m  = after_f8_sar_5m   - fc.get("f8_sar_15m", 0)
+        after_f9           = after_f8_sar_15m  - fc.get("f9_vol",       0)
+        after_empty        = after_f9          - fc.get("f_empty_data", 0)
 
         # Use the config that was ACTIVE during the last scan for labels
-        # This ensures labels always match the counts (no mismatch after config changes)
-        sc = fc.get("scan_cfg") or _snap_cfg   # fallback to current cfg on first run
+        sc = fc.get("scan_cfg") or _snap_cfg
 
         if sc is not _snap_cfg and sc != _snap_cfg:
             st.caption("⚠️ Config changed since last scan — funnel reflects the previous settings. "
                        "Rescan is in progress with the new config.")
 
-        def _lbl(enabled, on_str, off_str="off"):
-            return on_str if enabled else f"{on_str.split('—')[0].strip()} ({off_str})"
-
         pre_lbl    = "⚡ After Bulk Pre-filter" if sc.get("use_pre_filter", True) else "⚡ Pre-filter (disabled)"
         pdz15m_lbl = "F2 — PDZ Zones (15m)" if sc.get("use_pdz_15m", True) else "F2 — PDZ 15m (off)"
         pdz5m_lbl  = "F3 — PDZ Zones (5m)"  if sc.get("use_pdz_5m",  True) else "F3 — PDZ 5m (off)"
-        f4_lbl     = f"F4 — 5m RSI ≥{sc.get('rsi_5m_min',30)}" if sc.get("use_rsi_5m", True) else "F4 — 5m RSI (off)"
-        f5_lbl     = (f"F5 — 1h RSI {sc.get('rsi_1h_min',30)}–{sc.get('rsi_1h_max',95)}"
+        f4_lbl     = f"F4 — 5m RSI \u2265{sc.get('rsi_5m_min',30)}" if sc.get("use_rsi_5m", True) else "F4 — 5m RSI (off)"
+        f5_lbl     = (f"F5 — 1h RSI {sc.get('rsi_1h_min',30)}\u2013{sc.get('rsi_1h_max',95)}"
                       if sc.get("use_rsi_1h", True) else "F5 — 1h RSI (off)")
         ema_parts = []
         if sc.get("use_ema_3m"):  ema_parts.append(f"3m EMA{sc.get('ema_period_3m',12)}")
         if sc.get("use_ema_5m"):  ema_parts.append(f"5m EMA{sc.get('ema_period_5m',12)}")
         if sc.get("use_ema_15m"): ema_parts.append(f"15m EMA{sc.get('ema_period_15m',12)}")
-        ema_lbl    = ("F6 — EMA (" + (" · ".join(ema_parts)) + ")") if ema_parts else "F6 — EMA (off)"
-        _fc_macd_tfs = [tf for tf, k in [("3m","use_macd_3m"),("5m","use_macd_5m"),("15m","use_macd_15m")] if sc.get(k, True)]
-        _dot = "\xb7"
-        macd_lbl   = ("F7 \u2014 MACD \U0001f7e2\u2191 " + _dot.join(_fc_macd_tfs)) if _fc_macd_tfs else "F7 \u2014 MACD (off)"
-        _fc_sar_tfs  = [tf for tf, k in [("3m","use_sar_3m"),("5m","use_sar_5m"),("15m","use_sar_15m")] if sc.get(k, True)]
-        sar_lbl    = ("F8 \u2014 SAR " + _dot.join(_fc_sar_tfs)) if _fc_sar_tfs else "F8 \u2014 SAR (off)"
-        vol_lbl    = (f"F9 — Vol \u2265{sc.get('vol_spike_mult',2.0)}\xd7 / {sc.get('vol_spike_lookback',20)} 15m"
-                      if sc.get("use_vol_spike") else "F9 — Vol (off)")
+        ema_lbl = ("F6 — EMA (" + (" · ".join(ema_parts)) + ")") if ema_parts else "F6 — EMA (off)"
+        vol_lbl = (f"F9 — Vol \u2265{sc.get('vol_spike_mult',2.0)}\xd7 / {sc.get('vol_spike_lookback',20)} 15m"
+                   if sc.get("use_vol_spike") else "F9 — Vol (off)")
 
+        # Build funnel rows — only include MACD/SAR timeframes that are enabled
         funnel_data = [
-            (f"Watchlist ({total})",      total),
-            (pre_lbl,                     after_pre),
-            ("Entered Deep Scan",         checked),
-            (f"After {pdz15m_lbl}",       after_f2),
-            (f"After {pdz5m_lbl}",        after_f3),
-            (f"After {f4_lbl}",           after_f4),
-            (f"After {f5_lbl}",           after_f5),
-            (f"After {ema_lbl}",          after_f6),
-            (f"After {macd_lbl}",         after_f7),
-            (f"After {sar_lbl}",          after_f8),
-            (f"After {vol_lbl}",          after_f9),
-            ("After ⚠️ Empty Candle Drop", after_empty),
+            (f"Watchlist ({total})",       total),
+            (pre_lbl,                      after_pre),
+            ("Entered Deep Scan",          checked),
+            (f"After {pdz15m_lbl}",        after_f2),
+            (f"After {pdz5m_lbl}",         after_f3),
+            (f"After {f4_lbl}",            after_f4),
+            (f"After {f5_lbl}",            after_f5),
+            (f"After {ema_lbl}",           after_f6),
         ]
+        # F7 MACD — add a row per enabled timeframe
+        _prev_macd = after_f6
+        for _tf, _key, _after in [
+            ("3m",  "use_macd_3m",  after_f7_macd_3m),
+            ("5m",  "use_macd_5m",  after_f7_macd_5m),
+            ("15m", "use_macd_15m", after_f7_macd_15m),
+        ]:
+            if sc.get(_key, True):
+                funnel_data.append((f"F7 — MACD \U0001f7e2\u2191 {_tf}", _after))
+                _prev_macd = _after
+            # If disabled keep running value the same (no row added, count unchanged)
+        # F8 SAR — add a row per enabled timeframe
+        _prev_sar = _prev_macd
+        for _tf, _key, _after in [
+            ("3m",  "use_sar_3m",  after_f8_sar_3m),
+            ("5m",  "use_sar_5m",  after_f8_sar_5m),
+            ("15m", "use_sar_15m", after_f8_sar_15m),
+        ]:
+            if sc.get(_key, True):
+                funnel_data.append((f"F8 — SAR {_tf}", _after))
+                _prev_sar = _after
+
+        funnel_data.append((f"After {vol_lbl}",           after_f9))
+        funnel_data.append(("After \u26a0\ufe0f Empty Candle Drop", after_empty))
+
+        # Colour palette — generate enough colours for variable row count
+        _palette = ["#1f6feb","#388bfd","#58a6ff","#79c0ff","#a5d6ff",
+                    "#3fb950","#56d364","#7ee787","#40c8b8","#26a69a",
+                    "#d29922","#e3b341","#f0a500","#f85149","#ff6b6b"]
+        _colours = (_palette * ((len(funnel_data) // len(_palette)) + 1))[:len(funnel_data)]
+
         fig_funnel = go.Figure(go.Funnel(
             y=[d[0] for d in funnel_data],
             x=[d[1] for d in funnel_data],
-            marker=dict(color=["#1f6feb","#388bfd","#58a6ff","#79c0ff","#a5d6ff",
-                                "#3fb950","#56d364","#7ee787","#d29922","#e3b341","#f85149"]),
+            marker=dict(color=_colours),
             textinfo="value+percent initial",
         ))
         fig_funnel.update_layout(
@@ -2955,6 +3002,9 @@ if fc.get("total_watchlist", 0) > 0:
         st.markdown("#### 🪙 Qualified Coins at Each Stage")
         st.caption("Shows which coins survived after each filter was applied in the last scan cycle.")
 
+        def _coin_str(s: set) -> str:
+            return ", ".join(sorted(s)) if s else "—"
+
         # Build remaining sets by subtracting eliminated coins stage-by-stage
         _pre  = set(fc.get("pre_filter_passed_syms", []))
         _chk  = set(fc.get("checked_syms", []))
@@ -2963,62 +3013,83 @@ if fc.get("total_watchlist", 0) > 0:
         _f4e  = set(fc.get("f4_elim_syms",  []))
         _f5e  = set(fc.get("f5_elim_syms",  []))
         _f6e  = set(fc.get("f6_elim_syms",  []))
-        _f7e  = set(fc.get("f7_elim_syms",  []))
-        _f8e  = set(fc.get("f8_elim_syms",  []))
-        _f9e    = set(fc.get("f9_elim_syms",         []))
-        # Note: f_empty_data_syms stores "SYM(no 3m,1h)" strings for readability
-        _fempty = set(fc.get("f_empty_data_syms",    []))
-        _pass   = set(fc.get("passed_syms",          []))
+        # F7 MACD — per timeframe elimination sets
+        _f7e_3m  = set(fc.get("f7_macd_3m_elim_syms",  []))
+        _f7e_5m  = set(fc.get("f7_macd_5m_elim_syms",  []))
+        _f7e_15m = set(fc.get("f7_macd_15m_elim_syms", []))
+        # F8 SAR — per timeframe elimination sets
+        _f8e_3m  = set(fc.get("f8_sar_3m_elim_syms",  []))
+        _f8e_5m  = set(fc.get("f8_sar_5m_elim_syms",  []))
+        _f8e_15m = set(fc.get("f8_sar_15m_elim_syms", []))
+        _f9e    = set(fc.get("f9_elim_syms",      []))
+        _fempty = set(fc.get("f_empty_data_syms", []))
 
-        _after_f2 = _chk      - _f2e
-        _after_f3 = _after_f2 - _f3e
-        _after_f4 = _after_f3 - _f4e
-        _after_f5 = _after_f4 - _f5e
-        _after_f6 = _after_f5 - _f6e
-        _after_f7 = _after_f6 - _f7e
-        _after_f8    = _after_f7 - _f8e
-        _after_f9    = _after_f8 - _f9e
-        # _fempty uses "SYM(no ...)" strings — extract plain symbol for set subtraction
+        _after_f2        = _chk          - _f2e
+        _after_f3        = _after_f2     - _f3e
+        _after_f4        = _after_f3     - _f4e
+        _after_f5        = _after_f4     - _f5e
+        _after_f6        = _after_f5     - _f6e
+        # MACD per timeframe — only subtract if that timeframe is enabled
+        _after_f7_macd_3m  = _after_f6          - (_f7e_3m  if sc.get("use_macd_3m",  True) else set())
+        _after_f7_macd_5m  = _after_f7_macd_3m  - (_f7e_5m  if sc.get("use_macd_5m",  True) else set())
+        _after_f7_macd_15m = _after_f7_macd_5m  - (_f7e_15m if sc.get("use_macd_15m", True) else set())
+        # SAR per timeframe
+        _after_f8_sar_3m   = _after_f7_macd_15m - (_f8e_3m  if sc.get("use_sar_3m",  True) else set())
+        _after_f8_sar_5m   = _after_f8_sar_3m   - (_f8e_5m  if sc.get("use_sar_5m",  True) else set())
+        _after_f8_sar_15m  = _after_f8_sar_5m   - (_f8e_15m if sc.get("use_sar_15m", True) else set())
+        _after_f9          = _after_f8_sar_15m  - _f9e
         _fempty_syms = {s.split("(")[0] for s in _fempty}
         _after_empty = _after_f9 - _fempty_syms
 
-        # Process errors = coins that survived all filter stages but threw an
-        # exception inside process() before returning a signal dict.
-        # Computed as: survived all eliminations - actually passed - empty data drops.
-        # Note: _pass may lag by one cycle vs _after_empty due to snapshot timing,
-        # so we cap at 0 to avoid negative display values.
         _process_err_count = max(0, fc.get("errors", 0))
-
-        def _coin_str(s: set) -> str:
-            return ", ".join(sorted(s)) if s else "—"
-
-        _new_sig_s    = set(fc.get("new_signal_syms",          []))
-        _blk_active_s = set(fc.get("blocked_by_active_syms",  []))
+        _new_sig_s    = set(fc.get("new_signal_syms",         []))
+        _blk_active_s = set(fc.get("blocked_by_active_syms", []))
         _blk_cool_s   = set(fc.get("blocked_by_cooldown_syms",[]))
-
-        # "Returned Signal" is computed from the _bg_loop side (new + blocked) —
-        # this is always internally consistent because all three lists are written
-        # in the same lock acquisition, unlike passed_syms which is written
-        # during the scan and may be from a different cycle when the UI renders.
         _returned_syms = _new_sig_s | _blk_active_s | _blk_cool_s
 
+        # Fixed opening rows
         stage_rows = [
-            ("⚡ After Bulk Pre-filter",            len(_pre),              _coin_str(_pre)),
-            ("🔬 Entered Deep Scan",                len(_chk),              _coin_str(_chk)),
-            (f"After {pdz15m_lbl}",                 len(_after_f2),         _coin_str(_after_f2)),
-            (f"After {pdz5m_lbl}",                  len(_after_f3),         _coin_str(_after_f3)),
-            (f"After {f4_lbl}",                     len(_after_f4),         _coin_str(_after_f4)),
-            (f"After {f5_lbl}",                     len(_after_f5),         _coin_str(_after_f5)),
-            (f"After {ema_lbl}",                    len(_after_f6),         _coin_str(_after_f6)),
-            (f"After {macd_lbl}",                   len(_after_f7),         _coin_str(_after_f7)),
-            (f"After {sar_lbl}",                    len(_after_f8),         _coin_str(_after_f8)),
-            (f"After {vol_lbl}",                    len(_after_f9),         _coin_str(_after_f9)),
-            ("⚠️ Dropped — Empty Candle Data",      len(_fempty),           ", ".join(sorted(_fempty)) if _fempty else "—"),
-            ("💥 Dropped — Process Error",          _process_err_count,     "See API Error Log below ↓"),
-            ("✅ Returned Signal",                  len(_returned_syms),    _coin_str(_returned_syms)),
-            ("🔵 Blocked — Open trade exists",      len(_blk_active_s),     _coin_str(_blk_active_s)),
-            ("🟡 Blocked — Cooldown active",         len(_blk_cool_s),       _coin_str(_blk_cool_s)),
-            ("🟢 New Signals Fired",                len(_new_sig_s),        _coin_str(_new_sig_s)),
+            ("⚡ After Bulk Pre-filter",  len(_pre),      _coin_str(_pre)),
+            ("🔬 Entered Deep Scan",      len(_chk),      _coin_str(_chk)),
+            (f"After {pdz15m_lbl}",       len(_after_f2), _coin_str(_after_f2)),
+            (f"After {pdz5m_lbl}",        len(_after_f3), _coin_str(_after_f3)),
+            (f"After {f4_lbl}",           len(_after_f4), _coin_str(_after_f4)),
+            (f"After {f5_lbl}",           len(_after_f5), _coin_str(_after_f5)),
+            (f"After {ema_lbl}",          len(_after_f6), _coin_str(_after_f6)),
+        ]
+        # F7 MACD — one row per enabled timeframe
+        for _tf, _key, _after_set in [
+            ("3m",  "use_macd_3m",  _after_f7_macd_3m),
+            ("5m",  "use_macd_5m",  _after_f7_macd_5m),
+            ("15m", "use_macd_15m", _after_f7_macd_15m),
+        ]:
+            if sc.get(_key, True):
+                stage_rows.append((
+                    f"F7 — MACD \U0001f7e2\u2191 {_tf}",
+                    len(_after_set),
+                    _coin_str(_after_set),
+                ))
+        # F8 SAR — one row per enabled timeframe
+        for _tf, _key, _after_set in [
+            ("3m",  "use_sar_3m",  _after_f8_sar_3m),
+            ("5m",  "use_sar_5m",  _after_f8_sar_5m),
+            ("15m", "use_sar_15m", _after_f8_sar_15m),
+        ]:
+            if sc.get(_key, True):
+                stage_rows.append((
+                    f"F8 — SAR {_tf}",
+                    len(_after_set),
+                    _coin_str(_after_set),
+                ))
+        # Fixed closing rows
+        stage_rows += [
+            (f"After {vol_lbl}",               len(_after_f9),        _coin_str(_after_f9)),
+            ("⚠️ Dropped — Empty Candle Data", len(_fempty),          ", ".join(sorted(_fempty)) if _fempty else "—"),
+            ("💥 Dropped — Process Error",     _process_err_count,    "See API Error Log below ↓"),
+            ("✅ Returned Signal",             len(_returned_syms),   _coin_str(_returned_syms)),
+            ("🔵 Blocked — Open trade exists", len(_blk_active_s),    _coin_str(_blk_active_s)),
+            ("🟡 Blocked — Cooldown active",   len(_blk_cool_s),      _coin_str(_blk_cool_s)),
+            ("🟢 New Signals Fired",           len(_new_sig_s),       _coin_str(_new_sig_s)),
         ]
 
         st.dataframe(
