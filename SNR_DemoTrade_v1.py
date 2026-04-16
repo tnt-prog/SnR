@@ -347,6 +347,7 @@ if "_scanner_initialised" not in st.session_state:
         _b._bsc_filter_lock   = threading.Lock()
         _b._bsc_last_error    = ""
         _b._bsc_rescan_event  = threading.Event()   # set to skip sleep & rescan immediately
+        _b._bsc_sl_paused     = False               # circuit breaker: True when 3 consec SL hit
         _b._bsc_api_conn_status = {          # result of last "Test Connection" call
             "status":      "untested",       # "untested" | "ok" | "error"
             "message":     "",
@@ -1752,9 +1753,21 @@ def update_open_signals(signals):
 # ─────────────────────────────────────────────────────────────────────────────
 # Background scanner thread
 # ─────────────────────────────────────────────────────────────────────────────
+def _check_sl_circuit_breaker():
+    """Return True if the last 3 closed trades are all sl_hit (triggers auto-pause)."""
+    with _log_lock:
+        _closed = sorted(
+            [s for s in _b._bsc_log["signals"]
+             if s.get("status") in ("tp_hit", "sl_hit") and s.get("close_time")],
+            key=lambda x: x.get("close_time", ""),
+        )
+    return len(_closed) >= 3 and all(s["status"] == "sl_hit" for s in _closed[-3:])
+
+
 def _bg_loop():
     while True:
-        if not _scanner_running.is_set():
+        # Pause if user manually stopped OR circuit breaker fired (3 consec SL)
+        if not _scanner_running.is_set() or getattr(_b, "_bsc_sl_paused", False):
             time.sleep(2); continue
         with _config_lock:
             cfg = dict(_b._bsc_cfg)
@@ -1762,6 +1775,13 @@ def _bg_loop():
         try:
             with _log_lock:
                 _b._bsc_log["signals"] = update_open_signals(_b._bsc_log["signals"])
+
+            # ── Circuit breaker: check AFTER updating signals so newly-closed
+            # sl_hit trades are counted immediately ─────────────────────────
+            if _check_sl_circuit_breaker():
+                _b._bsc_sl_paused = True
+                continue   # halt this cycle; UI will show the resume banner
+
             new_sigs, errors = scan(cfg)
             cutoff = dubai_now() - timedelta(minutes=cfg["cooldown_minutes"])
             with _log_lock:
@@ -2573,6 +2593,32 @@ with st.sidebar:
 # MAIN AREA
 # ─────────────────────────────────────────────────────────────────────────────
 st.title("S&R — Crypto Intelligent Portal")
+
+# ── Circuit Breaker Banner ────────────────────────────────────────────────────
+# Shown only when 3 consecutive SL hits triggered an auto-pause.
+# Resets to False on app restart (in-memory only — intentional).
+if getattr(_b, "_bsc_sl_paused", False):
+    st.markdown(
+        """
+        <div style="background:#7F1D1D;border:2px solid #F43F5E;border-radius:10px;
+                    padding:16px 20px;margin-bottom:12px;">
+          <span style="font-size:1.2rem;font-weight:700;color:#FCA5A5;">
+            🔴 Scanner Paused — 3 Consecutive Stop Losses Hit
+          </span><br>
+          <span style="color:#FCA5A5;font-size:0.9rem;">
+            The last 3 closed trades all hit Stop Loss. Scanning and new order placement
+            are suspended. Review market conditions before resuming.
+          </span>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    if st.button("▶️ Resume Scanning", key="resume_sl_circuit",
+                 type="primary", use_container_width=False):
+        _b._bsc_sl_paused = False
+        _rescan_event.set()   # wake the loop immediately after resuming
+        st.rerun()
+    st.divider()
 
 last_scan = health.get("last_scan_at", "never")
 if last_scan and last_scan != "never":
