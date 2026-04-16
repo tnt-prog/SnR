@@ -38,7 +38,9 @@ OKX_INTERVALS = {"30m": "30m", "3m": "3m", "5m": "5m", "15m": "15m", "1h": "1H"}
 # API rate-limiter  — hard cap: 8 concurrent HTTP requests at any time
 # OKX public-market limit is 20 req / 2 s.  Staying well below keeps us safe.
 # ─────────────────────────────────────────────────────────────────────────────
-_api_sem = threading.Semaphore(8)
+_api_sem = threading.Semaphore(5)  # OKX limit: 40 req/2s = 20 req/s.
+                                   # At ~300 ms avg latency: 5/0.3 = 16.7 req/s — safely under limit.
+                                   # Semaphore(8) was causing 429 throttle → 30-second sleeps → 300s scans.
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Symbol-cache TTL  (D)
@@ -566,7 +568,7 @@ def safe_get(url, params=None, _retries=4):
                 raise RuntimeError(f"OKX API error {data['code']}: {data.get('msg','')}")
             return data
         except requests.exceptions.ConnectionError:
-            if attempt < _retries - 1: time.sleep(3); continue
+            if attempt < _retries - 1: time.sleep(1); continue  # was 3s — fail faster
             raise
     msg = f"Failed after {_retries} retries: {url}"
     _append_error("http", msg, endpoint=url)
@@ -1622,26 +1624,29 @@ def process(sym, cfg: dict):
                 _filter_counts["f4_elim_syms"].append(sym)
             return None
 
-        # ── Stage 2: Full parallel fetch (EMA/MACD/SAR/RSI1h need more data) ─
-        candle_limit_5m  = 210 if (cfg.get("use_ema_5m")  or cfg.get("use_macd") or cfg.get("use_sar")) else 51
-        candle_limit_15m = 210 if (cfg.get("use_ema_15m") or cfg.get("use_macd") or cfg.get("use_sar")) else 51
-        candle_limit_3m  =  80 if (cfg.get("use_ema_3m")  or cfg.get("use_macd") or cfg.get("use_sar")) else 30
+        # ── Stage 2: Fetch ONLY new timeframes — 1h and 3m ──────────────────
+        # 5m and 15m are already in m5_quick / m15_quick from Stage 1 (300 candles
+        # each — more than enough for EMA/MACD/SAR which need ~50-210 candles).
+        # Re-fetching them was the biggest source of duplicate API calls and the
+        # main driver of OKX 429 rate-limit hits → 30-second sleeps → 300s scan time.
+        #
+        # Only 1h (RSI) and 3m (EMA/MACD/SAR) are genuinely new here.
+        # This cuts Stage 2 from 4 API calls per coin → 2 API calls per coin.
+        _need_3m_detail = (cfg.get("use_ema_3m") or cfg.get("use_macd_3m")
+                           or cfg.get("use_sar_3m"))
+        candle_limit_3m = 80 if _need_3m_detail else 30
 
-        with ThreadPoolExecutor(max_workers=4) as pool:
-            f_5m  = pool.submit(get_klines, sym, "5m",  candle_limit_5m)
-            f_15m = pool.submit(get_klines, sym, "15m", candle_limit_15m)
-            f_1h  = pool.submit(get_klines, sym, "1h",  19)
-            f_3m  = pool.submit(get_klines, sym, "3m",  candle_limit_3m)
-            m5          = f_5m.result()[:-1]
-            m15         = f_15m.result()[:-1]
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            f_1h = pool.submit(get_klines, sym, "1h", 19)
+            f_3m = pool.submit(get_klines, sym, "3m", candle_limit_3m)
             m1h_candles = f_1h.result()[:-1]
             m3_candles  = f_3m.result()[:-1]
 
-        # ── Guard: Stage 2 returned empty candles for one or more timeframes ─────
-        # OKX can return {"code":"0","data":[]} for newly listed or illiquid coins.
-        # Without this check the IndexError on m5[-1] is silently swallowed by the
-        # outer except, the coin disappears from all _fXe buckets, and the filter
-        # funnel falsely shows it as "passed all filters" while no trade is opened.
+        # Reuse Stage 1 data for 5m and 15m — no re-fetch needed
+        m5  = m5_quick
+        m15 = m15_quick
+
+        # ── Guard: check all required timeframes have data ────────────────────
         _missing_tf = [tf for tf, bars in (("5m", m5), ("15m", m15),
                                             ("1h", m1h_candles), ("3m", m3_candles))
                        if not bars]
@@ -1851,8 +1856,9 @@ def scan(cfg: dict):
           f"({'disabled' if not cfg.get('use_pre_filter', True) else _filter_counts['pre_filtered_out']} removed)")
 
     results = []
-    # 6 outer workers (reduced from 8 to stay safely under rate limit with inner parallel fetches)
-    with ThreadPoolExecutor(max_workers=6) as exe:
+    # 10 outer workers — semaphore(5) caps actual concurrent HTTP requests to 5
+    # so more workers just means less idle time between coin batches, not more API pressure.
+    with ThreadPoolExecutor(max_workers=10) as exe:
         futs = [exe.submit(process, s, cfg) for s in pre_filtered]
         for f in as_completed(futs):
             r = f.result()
@@ -1918,7 +1924,7 @@ def update_open_signals(signals):
         return signals   # nothing to do — skip thread overhead entirely
 
     # Each worker fetches 200×5m candles for one trade.  Cap at 15 workers
-    # (matches MAX_OPEN_TRADES) — well within the _api_sem(8) rate-limit window.
+    # (matches MAX_OPEN_TRADES) — well within the _api_sem(5) rate-limit window.
     with ThreadPoolExecutor(max_workers=min(len(open_sigs), 15)) as pool:
         futs = [pool.submit(_update_one_signal, s) for s in open_sigs]
         for f in as_completed(futs):
