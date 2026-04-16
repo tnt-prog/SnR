@@ -199,30 +199,186 @@ def get_max_leverage(sym: str) -> int:
 # SL reason analyzer
 # ─────────────────────────────────────────────────────────────────────────────
 def analyze_sl_reason(sig: dict) -> str:
+    """
+    Post-mortem analysis of a stopped-out trade using data captured at entry.
+    Pure computation — no API calls, no I/O. Safe to call during UI render.
+    Produces specific, actionable observations and improvement suggestions.
+    """
     criteria = sig.get("criteria", {})
-    if not criteria:
-        return "No criteria data captured"
-    reasons = []
-    # Safely convert — Super Setup signals store "—" for unused criteria
+    reasons  = []
+    improve  = []   # improvement suggestions for next release
+
+    # ── Helper: safe float conversion (criteria may store "—" strings) ────────
+    def _f(key, default=None):
+        try:
+            v = criteria.get(key, default)
+            return float(v) if v not in (None, "—", "") else default
+        except (TypeError, ValueError):
+            return default
+
+    # ── 1. Speed of loss ─────────────────────────────────────────────────────
+    # Fast SL = bad entry timing.  Slow SL = sustained trend reversal.
+    duration_mins = None
     try:
-        rsi_5m = float(criteria.get("rsi_5m", 50))
-    except (TypeError, ValueError):
-        rsi_5m = 50.0
-    try:
-        rsi_1h = float(criteria.get("rsi_1h", 50))
-    except (TypeError, ValueError):
-        rsi_1h = 50.0
-    if rsi_5m < 35:
-        reasons.append(f"RSI 5m very low at entry ({rsi_5m}) — momentum already fading")
-    elif rsi_5m < 42:
-        reasons.append(f"RSI 5m borderline ({rsi_5m}) — weak short-term momentum")
-    if rsi_1h > 82:
-        reasons.append(f"RSI 1h near overbought ({rsi_1h}) — higher-TF exhaustion risk")
-    elif rsi_1h < 40:
-        reasons.append(f"RSI 1h weak ({rsi_1h}) — no hourly uptrend support")
+        if sig.get("timestamp") and sig.get("close_time"):
+            t_open  = datetime.fromisoformat(sig["timestamp"].replace("Z", "+00:00"))
+            t_close = datetime.fromisoformat(sig["close_time"].replace("Z", "+00:00"))
+            duration_mins = int((t_close - t_open).total_seconds() / 60)
+    except Exception:
+        pass
+
+    if duration_mins is not None:
+        if duration_mins <= 5:
+            reasons.append(
+                f"SL hit in {duration_mins} min — entry was at a local price peak. "
+                f"Consider adding a 1–2 candle confirmation delay before entry.")
+            improve.append("Add 1-candle confirmation delay (wait for close above entry signal)")
+        elif duration_mins <= 15:
+            reasons.append(
+                f"SL hit in {duration_mins} min — very fast reversal. "
+                f"Momentum faded immediately after entry.")
+            improve.append("Tighten entry timing — require EMA alignment on 3m before entry")
+        elif duration_mins >= 120:
+            reasons.append(
+                f"Trade held {duration_mins} min before SL — sustained trend reversal. "
+                f"Macro / higher-TF bias likely shifted after entry.")
+            improve.append("Add 4h or daily trend filter to avoid counter-trend entries")
+
+    # ── 2. Super Setup bypass ─────────────────────────────────────────────────
+    if sig.get("is_super_setup"):
+        reasons.append(
+            "Super Setup — 15m Discount zone bypassed all filters. "
+            "No RSI / MACD / SAR confirmation was required.")
+        improve.append(
+            "Consider requiring at least RSI 5m ≥ 40 even for Super Setups "
+            "to avoid entering during momentum exhaustion")
+
+    # ── 3. PDZ zone risk ──────────────────────────────────────────────────────
+    pdz_5m  = str(criteria.get("pdz_zone_5m",  "") or "")
+    pdz_15m = str(criteria.get("pdz_zone_15m", "") or "")
+    for zone_label, zone_val in [("5m", pdz_5m), ("15m", pdz_15m)]:
+        if "BandA" in zone_val:
+            reasons.append(
+                f"PDZ {zone_label} zone was {zone_val} — price was near the Premium "
+                f"boundary. BandA entries carry higher reversal risk than Discount entries.")
+            improve.append(
+                f"Consider restricting {zone_label} PDZ to Discount + Equilibrium only "
+                f"(disable BandA/BandB) for lower-risk entries")
+        elif "BandB" in zone_val:
+            reasons.append(
+                f"PDZ {zone_label} zone was {zone_val} — borderline zone with elevated "
+                f"Premium exposure. Higher false-signal rate than Discount.")
+            improve.append(
+                f"Tighten {zone_label} PDZ to Discount / Equilibrium to reduce BandB SL rate")
+        elif "Premium" in zone_val:
+            reasons.append(
+                f"PDZ {zone_label} zone was Premium — price was in overbought territory "
+                f"at entry. This zone has the highest reversal probability.")
+
+    # ── 4. RSI analysis ───────────────────────────────────────────────────────
+    rsi_5m = _f("rsi_5m")
+    rsi_1h = _f("rsi_1h")
+
+    if rsi_5m is not None:
+        if rsi_5m < 35:
+            reasons.append(
+                f"RSI 5m was very low at entry ({rsi_5m:.1f}) — short-term momentum "
+                f"was already fading before trade opened.")
+            improve.append("Raise RSI 5m minimum threshold (e.g. 42 → 48) to avoid fading momentum")
+        elif rsi_5m < 42:
+            reasons.append(
+                f"RSI 5m borderline ({rsi_5m:.1f}) — weak short-term momentum at entry.")
+        elif rsi_5m > 75:
+            reasons.append(
+                f"RSI 5m was high at entry ({rsi_5m:.1f}) — near overbought on 5m, "
+                f"limited upside headroom.")
+            improve.append("Add RSI 5m upper cap (e.g. max 72) to avoid overbought entries")
+
+    if rsi_1h is not None:
+        if rsi_1h > 82:
+            reasons.append(
+                f"RSI 1h near overbought ({rsi_1h:.1f}) — hourly timeframe showing "
+                f"exhaustion. Higher-TF reversal likely.")
+            improve.append("Lower RSI 1h maximum threshold (e.g. 95 → 80)")
+        elif rsi_1h < 40:
+            reasons.append(
+                f"RSI 1h weak ({rsi_1h:.1f}) — no bullish higher-TF support at entry.")
+            improve.append("Raise RSI 1h minimum threshold (e.g. 30 → 45)")
+
+    # ── 5. RSI divergence (5m strong but 1h weak) ────────────────────────────
+    if rsi_5m is not None and rsi_1h is not None:
+        if rsi_5m >= 55 and rsi_1h < 45:
+            reasons.append(
+                f"RSI divergence — 5m ({rsi_5m:.1f}) was bullish but 1h ({rsi_1h:.1f}) "
+                f"was bearish. Short-term bounce against the hourly trend.")
+            improve.append(
+                "Enforce RSI 1h ≥ RSI 5m × 0.75 to reduce timeframe divergence entries")
+
+    # ── 6. MACD status at entry ───────────────────────────────────────────────
+    macd_flags = {
+        "3m":  criteria.get("macd_3m"),
+        "5m":  criteria.get("macd_5m"),
+        "15m": criteria.get("macd_15m"),
+    }
+    disabled_macd = [tf for tf, v in macd_flags.items() if v in (None, "—", "")]
+    false_macd    = [tf for tf, v in macd_flags.items()
+                     if str(v).strip().lower() in ("false", "0", "no")]
+    if disabled_macd:
+        reasons.append(
+            f"MACD was disabled for {', '.join(disabled_macd)} timeframe(s) at entry — "
+            f"no histogram confirmation on those timeframes.")
+        improve.append(
+            f"Enable MACD on {', '.join(disabled_macd)} for additional confirmation")
+    if false_macd:
+        reasons.append(
+            f"MACD was bearish on {', '.join(false_macd)} timeframe(s) at entry — "
+            f"filter was active but histogram was dark-red / declining.")
+
+    # ── 7. SAR status at entry ────────────────────────────────────────────────
+    sar_flags = {
+        "3m":  criteria.get("sar_3m"),
+        "5m":  criteria.get("sar_5m"),
+        "15m": criteria.get("sar_15m"),
+    }
+    disabled_sar = [tf for tf, v in sar_flags.items() if v in (None, "—", "")]
+    if disabled_sar:
+        reasons.append(
+            f"Parabolic SAR was disabled for {', '.join(disabled_sar)} timeframe(s) — "
+            f"no trend-direction confirmation on those timeframes.")
+        improve.append(
+            f"Enable SAR on {', '.join(disabled_sar)} as additional reversal guard")
+
+    # ── 8. Volume conviction ──────────────────────────────────────────────────
+    vol_ratio = _f("vol_ratio")
+    if vol_ratio is not None:
+        if vol_ratio < 1.5:
+            reasons.append(
+                f"Volume spike was only {vol_ratio:.1f}× average — low conviction. "
+                f"Weak volume entries have higher false-signal rate.")
+            improve.append("Raise volume spike minimum to 2.0× average for stronger conviction")
+        elif vol_ratio < 2.0:
+            reasons.append(
+                f"Volume spike was {vol_ratio:.1f}× average — moderate conviction. "
+                f"A 2×+ spike would indicate stronger participation.")
+
+    # ── Fallback if nothing specific was found ────────────────────────────────
     if not reasons:
-        reasons.append("Unexpected market reversal / macro event — filters were healthy at entry")
-    return "\n".join(f"• {r}" for r in reasons)
+        reasons.append(
+            "All entry filters were healthy — reversal was caused by an external "
+            "market event (macro news, liquidation cascade, or broader market dump) "
+            "that no technical filter can predict.")
+        improve.append(
+            "Consider adding a market-wide sentiment check (e.g. BTC dominance or "
+            "funding rate) to avoid entries during high-volatility macro windows")
+
+    # ── Build output ──────────────────────────────────────────────────────────
+    lines = [f"• {r}" for r in reasons]
+    if improve:
+        lines.append("")
+        lines.append("💡 Improvement suggestions:")
+        lines.extend(f"  → {i}" for i in improve)
+
+    return "\n".join(lines)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Config persistence
