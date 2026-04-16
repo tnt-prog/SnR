@@ -38,9 +38,27 @@ OKX_INTERVALS = {"30m": "30m", "3m": "3m", "5m": "5m", "15m": "15m", "1h": "1H"}
 # API rate-limiter  — hard cap: 8 concurrent HTTP requests at any time
 # OKX public-market limit is 20 req / 2 s.  Staying well below keeps us safe.
 # ─────────────────────────────────────────────────────────────────────────────
-_api_sem = threading.Semaphore(5)  # OKX limit: 40 req/2s = 20 req/s.
-                                   # At ~300 ms avg latency: 5/0.3 = 16.7 req/s — safely under limit.
-                                   # Semaphore(8) was causing 429 throttle → 30-second sleeps → 300s scans.
+_api_sem = threading.Semaphore(5)  # max concurrent in-flight requests
+
+# ── Token-bucket rate limiter ─────────────────────────────────────────────────
+# OKX public candle endpoint: 40 req / 2 s = 20 req/s hard limit.
+# We target 15 req/s (75 % of limit) to stay safe regardless of network latency.
+# Semaphore alone is not enough — if OKX responds in <67 ms we still exceed 20/s.
+_RATE_INTERVAL  = 1.0 / 15          # 66.7 ms minimum between token grants
+_rate_lock       = threading.Lock()
+_rate_last_grant = 0.0              # timestamp of the last granted token
+
+def _rate_wait():
+    """Block the calling thread until its turn within the 15 req/s budget."""
+    global _rate_last_grant
+    while True:
+        with _rate_lock:
+            now  = time.time()
+            wait = _rate_last_grant + _RATE_INTERVAL - now
+            if wait <= 0:
+                _rate_last_grant = now
+                return                  # token granted — proceed immediately
+        time.sleep(max(0.001, wait))    # sleep outside lock so others can check
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Symbol-cache TTL  (D)
@@ -553,10 +571,13 @@ def get_session():
 def safe_get(url, params=None, _retries=4):
     for attempt in range(_retries):
         try:
-            with _api_sem:                           # ← rate-limiter (B/D)
-                r = get_session().get(url, params=params, timeout=20)
+            _rate_wait()                            # ← token-bucket: max 15 req/s
+            with _api_sem:                          # ← concurrency cap: max 5 in-flight
+                r = get_session().get(url, params=params, timeout=10)  # was 20s
             if r.status_code == 429:
-                wait = int(r.headers.get("Retry-After", 30))
+                # Cap sleep at 5 s — Retry-After can be up to 30 s which cascades
+                # into 300-second scan times when multiple threads hit it at once.
+                wait = min(int(r.headers.get("Retry-After", 5)), 5)
                 time.sleep(wait); continue
             if r.status_code in (418, 403, 451):
                 raise RuntimeError(
@@ -568,7 +589,7 @@ def safe_get(url, params=None, _retries=4):
                 raise RuntimeError(f"OKX API error {data['code']}: {data.get('msg','')}")
             return data
         except requests.exceptions.ConnectionError:
-            if attempt < _retries - 1: time.sleep(1); continue  # was 3s — fail faster
+            if attempt < _retries - 1: time.sleep(1); continue
             raise
     msg = f"Failed after {_retries} retries: {url}"
     _append_error("http", msg, endpoint=url)
