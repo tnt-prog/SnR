@@ -2905,6 +2905,135 @@ if _queue_sigs:
         st.rerun()
 
 # ─────────────────────────────────────────────────────────────────────────────
+# OKX Live Positions Panel
+# ─────────────────────────────────────────────────────────────────────────────
+_has_api_creds = bool(
+    _snap_cfg.get("api_key") and _snap_cfg.get("api_secret")
+    and _snap_cfg.get("api_passphrase")
+)
+
+st.divider()
+with st.expander("📡 OKX Live Positions", expanded=False):
+    if not _has_api_creds:
+        st.warning("Enter API credentials in the sidebar to use this panel.")
+    else:
+        _env_label = "🟡 Demo" if _snap_cfg.get("demo_mode", True) else "🔴 Live"
+        _col_btn, _col_info = st.columns([1, 4])
+        with _col_btn:
+            _do_refresh = st.button("🔄 Refresh from OKX", key="refresh_okx_live")
+        with _col_info:
+            _last_ts = st.session_state.get("okx_pos_ts", "")
+            if _last_ts:
+                st.caption(f"Last fetched: {_last_ts}  ·  {_env_label}")
+            else:
+                st.caption(f"Press Refresh to load live data directly from OKX  ·  {_env_label}")
+
+        if _do_refresh:
+            try:
+                _pos_resp  = _trade_get("/api/v5/account/positions",
+                                        {"instType": "SWAP"}, _snap_cfg)
+                _algo_resp = _trade_get("/api/v5/trade/orders-algo-pending",
+                                        {"instType": "SWAP", "ordType": "oco"},
+                                        _snap_cfg)
+                st.session_state["okx_pos_data"]  = _pos_resp
+                st.session_state["okx_algo_data"] = _algo_resp
+                st.session_state["okx_pos_ts"]    = \
+                    dubai_now().strftime("%d %b %Y  %H:%M:%S GST")
+                st.rerun()
+            except Exception as _refresh_exc:
+                st.error(f"❌ OKX API error: {_refresh_exc}")
+
+        _pos_data  = st.session_state.get("okx_pos_data")
+        _algo_data = st.session_state.get("okx_algo_data")
+
+        if _pos_data is None:
+            st.info("No data yet — press **🔄 Refresh from OKX** above.")
+        else:
+            # ── Positions table ───────────────────────────────────────────
+            st.markdown("#### 📊 Open Positions")
+            if _pos_data.get("code") != "0":
+                st.error(f"OKX error: {_pos_data.get('msg', 'Unknown error')}")
+            else:
+                _positions = _pos_data.get("data", [])
+                if _positions:
+                    _pos_rows = []
+                    for _p in _positions:
+                        _upnl     = float(_p.get("upl",      0) or 0)
+                        _upnl_pct = float(_p.get("uplRatio", 0) or 0) * 100
+                        _liq_raw  = float(_p.get("liqPx",    0) or 0)
+                        _pos_rows.append({
+                            "Symbol":       _p.get("instId", ""),
+                            "Side":         _p.get("posSide", "net").capitalize(),
+                            "Contracts":    int(_p.get("pos", 0) or 0),
+                            "Avg Entry":    float(_p.get("avgPx",       0) or 0),
+                            "Mark Price":   float(_p.get("markPx",      0) or 0),
+                            "Unreal PnL":   round(_upnl, 4),
+                            "PnL %":        f"{_upnl_pct:+.2f}%",
+                            "Notional $":   round(float(_p.get("notionalUsd", 0) or 0), 2),
+                            "Margin $":     round(float(_p.get("margin",       0) or 0), 4),
+                            "Leverage":     f"{_p.get('lever', '')}×",
+                            "Liq Price":    _liq_raw if _liq_raw > 0 else "—",
+                        })
+                    st.dataframe(
+                        _pos_rows,
+                        use_container_width=True,
+                        hide_index=True,
+                        height=len(_pos_rows) * 35 + 48,
+                        column_config={
+                            "Avg Entry":  st.column_config.NumberColumn(format="%.6f"),
+                            "Mark Price": st.column_config.NumberColumn(format="%.6f"),
+                            "Liq Price":  st.column_config.NumberColumn(format="%.6f"),
+                            "Unreal PnL": st.column_config.NumberColumn(
+                                              "Unreal PnL $", format="%.4f"),
+                        },
+                    )
+                else:
+                    st.info("No open SWAP positions on OKX right now.")
+
+            # ── Active OCO Algo Orders table ──────────────────────────────
+            st.markdown("#### 🎯 Active TP/SL Orders (OCO)")
+            _algo_code = (_algo_data or {}).get("code", "")
+            if _algo_code and _algo_code != "0":
+                st.error(f"OKX algo error: {(_algo_data or {}).get('msg', '')}")
+            else:
+                _algos = (_algo_data or {}).get("data", [])
+                if _algos:
+                    _algo_rows = []
+                    for _a in _algos:
+                        # OKX returns cTime as Unix ms string
+                        _ct_ms = int(_a.get("cTime", 0) or 0)
+                        try:
+                            from datetime import timezone
+                            _ct_str = datetime.fromtimestamp(
+                                _ct_ms / 1000, tz=timezone.utc
+                            ).astimezone(
+                                __import__("zoneinfo").ZoneInfo("Asia/Dubai")
+                            ).strftime("%d %b %H:%M:%S")
+                        except Exception:
+                            _ct_str = str(_ct_ms)
+                        _algo_rows.append({
+                            "Symbol":     _a.get("instId", ""),
+                            "Algo ID":    _a.get("algoId", ""),
+                            "Contracts":  int(_a.get("sz", 0) or 0),
+                            "TP Trigger": float(_a.get("tpTriggerPx", 0) or 0) or "—",
+                            "SL Trigger": float(_a.get("slTriggerPx", 0) or 0) or "—",
+                            "State":      _a.get("state", ""),
+                            "Created":    _ct_str,
+                        })
+                    st.dataframe(
+                        _algo_rows,
+                        use_container_width=True,
+                        hide_index=True,
+                        height=len(_algo_rows) * 35 + 48,
+                        column_config={
+                            "TP Trigger": st.column_config.NumberColumn(format="%.6f"),
+                            "SL Trigger": st.column_config.NumberColumn(format="%.6f"),
+                        },
+                    )
+                else:
+                    st.info("No active OCO algo orders on OKX right now.")
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Manual Trade Panel
 # ─────────────────────────────────────────────────────────────────────────────
 _mt_has_creds = bool(
