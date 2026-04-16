@@ -661,9 +661,12 @@ def get_symbols(watchlist: list) -> tuple:
             sym = _from_okx(inst_id)
             active.add(sym)
             try:
-                ct_vals[sym] = float(s.get("ctVal", 1) or 1)
+                _cv = float(s.get("ctVal") or 0)
+                ct_vals[sym] = _cv if _cv > 0 else 0.0
+                # Store 0 on parse failure so _get_ct_val treats it as a cache
+                # miss and forces a re-fetch rather than silently using 1.0.
             except (TypeError, ValueError):
-                ct_vals[sym] = 1.0
+                ct_vals[sym] = 0.0
     skipped = [s for s in watchlist if s not in active]
     if skipped:
         print(f"  [Symbol cache] {len(skipped)} watchlist coins not on OKX: {skipped[:5]}...")
@@ -826,21 +829,37 @@ def _get_ct_val(sym: str) -> float:
     Return contract size (ctVal) for a symbol.
     Uses the symbol cache populated at each scan cycle.
     Falls back to a live API call if the cache is cold.
+
+    IMPORTANT: Never falls back to 1.0.  If ctVal cannot be confirmed from
+    OKX, raises ValueError so the caller can refuse the order.  Using 1.0 as
+    a fallback for a token whose real ctVal is e.g. 10 would send 10× the
+    intended position size.
     """
     ct = _b._bsc_symbol_cache.get("ct_val", {}).get(sym)
-    if ct:
+    if ct and ct > 0:
         return ct
     # Cache miss — fetch on-demand (rare, e.g. first run before any scan)
     try:
         data = safe_get(f"{BASE}/api/v5/public/instruments",
                         {"instType": "SWAP", "instId": _to_okx(sym)})
         for s in data.get("data", []):
-            val = float(s.get("ctVal", 1) or 1)
-            _b._bsc_symbol_cache.setdefault("ct_val", {})[sym] = val
-            return val
-    except Exception:
-        pass
-    return 1.0
+            raw = s.get("ctVal", "")
+            val = float(raw) if raw not in ("", None) else 0.0
+            if val > 0:
+                _b._bsc_symbol_cache.setdefault("ct_val", {})[sym] = val
+                _append_error("info",
+                    f"ctVal for {_to_okx(sym)} fetched on-demand: {val} "
+                    f"(cache was cold — populated now)")
+                return val
+    except Exception as _e:
+        raise ValueError(
+            f"ctVal for {_to_okx(sym)} could not be fetched from OKX "
+            f"({_e}) — order refused to prevent wrong position sizing"
+        ) from _e
+    raise ValueError(
+        f"ctVal for {_to_okx(sym)} not found in OKX instruments response "
+        f"— order refused to prevent wrong position sizing"
+    )
 
 def _set_leverage_okx(sym: str, cfg: dict) -> None:
     """Set leverage for a symbol before placing an order."""
@@ -921,7 +940,14 @@ def place_okx_order(sig: dict, cfg: dict) -> dict:
             _append_error("trade", err, symbol=sym)
             return {"ordId": "", "algoId": "", "sz": 0, "status": "error", "error": err}
 
-        ct_val = _get_ct_val(sym)
+        try:
+            ct_val = _get_ct_val(sym)
+        except ValueError as _ctv_err:
+            _err = str(_ctv_err)
+            _append_error("trade", _err, symbol=sym)
+            return {"ordId": "", "algoId": "", "sz": 0, "status": "error",
+                    "error": _err,
+                    "ct_val": 0, "notional": 0, "tdMode": mode, "is_hedge": False}
         notional  = usdt * lev
         _base_info = {"ct_val": ct_val, "notional": notional,
                       "tdMode": mode, "is_hedge": False}
@@ -1102,7 +1128,12 @@ def place_okx_manual_order(sym: str, entry: float, tp: float, sl: float,
             return {"ordId": "", "algoId": "", "sz": 0,
                     "status": "error", "error": err}
 
-        ct_val = _get_ct_val(sym)
+        try:
+            ct_val = _get_ct_val(sym)
+        except ValueError as _ctv_err:
+            _err = str(_ctv_err)
+            _append_error("trade", _err, symbol=sym)
+            return {"ordId": "", "algoId": "", "sz": 0, "status": "error", "error": _err}
         ref_price = entry if entry > 0 else None
 
         # If no entry price given, fetch live market price for sizing
