@@ -733,9 +733,12 @@ def place_okx_order(sig: dict, cfg: dict) -> dict:
 
         ct_val = _get_ct_val(sym)
         notional  = usdt * lev
+        _base_info = {"ct_val": ct_val, "notional": notional,
+                      "tdMode": mode, "is_hedge": False}
         if ct_val <= 0 or entry <= 0:
             return {"ordId": "", "algoId": "", "sz": 0, "status": "error",
-                    "error": f"Bad ct_val ({ct_val}) or entry ({entry}) — cannot size position"}
+                    "error": f"Bad ct_val ({ct_val}) or entry ({entry}) — cannot size position",
+                    **_base_info}
         raw_contracts = notional / (ct_val * entry)
         contracts     = max(1, int(raw_contracts))
         # Guard against absurdly large values (e.g. micro-priced tokens with wrong ct_val)
@@ -743,7 +746,8 @@ def place_okx_order(sig: dict, cfg: dict) -> dict:
             return {"ordId": "", "algoId": "", "sz": contracts, "status": "error",
                     "error": (f"Contract count too large ({contracts}) — "
                               f"ct_val={ct_val}, entry={entry}, notional={notional}. "
-                              f"Check ctVal for {sym}.")}
+                              f"Check ctVal for {sym}."),
+                    **_base_info}
 
         # ── Fetch position mode LIVE from OKX (not from cached conn status) ──
         # Caching pos_mode is unreliable: builtins reset on process restart and
@@ -764,6 +768,7 @@ def place_okx_order(sig: dict, cfg: dict) -> dict:
                         .get("pos_mode", "net_mode") == "long_short_mode")
             _append_error("trade", f"posMode fetch failed: {_pm_exc}",
                           symbol=sym, endpoint="/api/v5/account/config")
+        _base_info["is_hedge"] = is_hedge
 
         # ── Step 1: Set leverage ──────────────────────────────────────────────
         try:
@@ -802,14 +807,14 @@ def place_okx_order(sig: dict, cfg: dict) -> dict:
                           f"{err} | body={json.dumps(order_body)} | resp={json.dumps(resp)[:300]}",
                           symbol=sym, endpoint="/api/v5/trade/order")
             return {"ordId": "", "algoId": "", "sz": contracts,
-                    "status": "error", "error": err}
+                    "status": "error", "error": err, **_base_info}
         if d0.get("sCode", "0") != "0":
             err = f"Entry order: {d0.get('sCode')}: {d0.get('sMsg','')}"
             _append_error("trade",
                           f"{err} | body={json.dumps(order_body)}",
                           symbol=sym, endpoint="/api/v5/trade/order")
             return {"ordId": ord_id, "algoId": "", "sz": contracts,
-                    "status": "error", "error": err}
+                    "status": "error", "error": err, **_base_info}
 
         # ── Step 3: Fetch actual fill price (avgPx) ───────────────────────────
         # Market orders fill at the live market price, which differs from the
@@ -866,12 +871,14 @@ def place_okx_order(sig: dict, cfg: dict) -> dict:
             return {"ordId": ord_id, "algoId": "", "sz": contracts,
                     "status": "partial", "error": f"Entry ✅ · TP/SL ❌ {algo_err}",
                     "actual_entry": actual_entry,
-                    "actual_tp": actual_tp, "actual_sl": actual_sl}
+                    "actual_tp": actual_tp, "actual_sl": actual_sl,
+                    **_base_info}
 
         return {"ordId": ord_id, "algoId": algo_id, "sz": contracts,
                 "status": "placed", "error": "",
                 "actual_entry": actual_entry,
-                "actual_tp": actual_tp, "actual_sl": actual_sl}
+                "actual_tp": actual_tp, "actual_sl": actual_sl,
+                **_base_info}
 
     except Exception as exc:
         _append_error("trade", str(exc), symbol=sig.get("symbol", ""),
@@ -1821,14 +1828,18 @@ def _bg_loop():
             if sigs_to_trade:
                 for sig in sigs_to_trade:
                     result = place_okx_order(sig, cfg)
-                    sig["order_id"]     = result.get("ordId", "")
-                    sig["algo_id"]      = result.get("algoId", "")
-                    sig["order_sz"]     = result.get("sz", 0)
-                    sig["order_status"] = result.get("status", "")
-                    sig["order_error"]  = result.get("error", "")
-                    sig["trade_usdt"]   = float(cfg.get("trade_usdt_amount", 0))
-                    sig["trade_lev"]    = int(cfg.get("trade_leverage", 10))
-                    sig["demo_mode"]    = bool(cfg.get("demo_mode", True))
+                    sig["order_id"]          = result.get("ordId", "")
+                    sig["algo_id"]           = result.get("algoId", "")
+                    sig["order_sz"]          = result.get("sz", 0)
+                    sig["order_status"]      = result.get("status", "")
+                    sig["order_error"]       = result.get("error", "")
+                    sig["trade_usdt"]        = float(cfg.get("trade_usdt_amount", 0))
+                    sig["trade_lev"]         = int(cfg.get("trade_leverage", 10))
+                    sig["demo_mode"]         = bool(cfg.get("demo_mode", True))
+                    sig["order_ct_val"]      = float(result.get("ct_val", 0) or 0)
+                    sig["order_notional"]    = float(result.get("notional", 0) or 0)
+                    sig["order_margin_mode"] = result.get("tdMode", "cross")
+                    sig["order_is_hedge"]    = bool(result.get("is_hedge", False))
                     # Overwrite entry/TP/SL with actual fill values if available.
                     # Market orders fill at the live price, not the signal price —
                     # the OCO algo order was placed using these corrected levels.
@@ -2748,6 +2759,30 @@ def _build_signal_row(s: dict) -> dict:
     elif ord_status == "error":   ord_status_str = f"❌ {ord_err[:80]}" if ord_err else "❌ Error"
     else:                         ord_status_str = "—"
 
+    # ── OKX Command column — shows exact parameters sent to OKX ──────────────
+    _ord_sz      = int(s.get("order_sz", 0) or 0)
+    _ct_val      = float(s.get("order_ct_val", 0) or 0)
+    _notional    = float(s.get("order_notional", 0) or 0)
+    _margin_mode = s.get("order_margin_mode", "") or "cross"
+    _is_hedge    = bool(s.get("order_is_hedge", False))
+    if not _notional and _usdt > 0 and _lev > 0:
+        _notional = _usdt * _lev   # reconstruct for older signals without stored notional
+    if status == "queue_limit":
+        okx_cmd_str = "No order placed — Queue Limit"
+    elif _usdt > 0 or _ord_sz > 0:
+        _sym_okx = _to_okx(s.get("symbol", ""))
+        _ps_part = " | posSide: long" if _is_hedge else ""
+        _ct_part = f" | ctVal: {_ct_val}" if _ct_val else ""
+        okx_cmd_str = (
+            f"instId: {_sym_okx} | ordType: market"
+            f" | tdMode: {_margin_mode}{_ps_part}"
+            f" | sz: {_ord_sz} contracts"
+            f" | collateral: ${_usdt:.2f} | lev: {_lev}×"
+            f" | notional: ${_notional:.2f}{_ct_part}"
+        )
+    else:
+        okx_cmd_str = "—"
+
     duration_str = "—"
     if s.get("timestamp"):
         try:
@@ -2778,6 +2813,7 @@ def _build_signal_row(s: dict) -> dict:
         "Close $":        s.get("close_price") or "—",
         "Max Lev":        f"{max_lev}×",
         "Order":          ord_status_str,
+        "OKX Command":    okx_cmd_str,
         "Order ID":       ord_id_str,
         "Algo ID":        algo_id_str,
         "Entry Criteria": crit_str,
@@ -2802,6 +2838,12 @@ _SIG_COL_CFG = {
     "Close Time":     st.column_config.TextColumn(width="small"),
     "Max Lev":        st.column_config.TextColumn(width="small"),
     "Order":          st.column_config.TextColumn(width="medium"),
+    "OKX Command":    st.column_config.TextColumn(
+                          "OKX Command",
+                          width="large",
+                          help="Exact parameters sent to OKX when the order was placed. "
+                               "Collateral = your USDT setting. "
+                               "Notional = collateral × leverage (this is what OKX shows as position size)."),
     "Order ID":       st.column_config.TextColumn(width="medium"),
     "Algo ID":        st.column_config.TextColumn(width="medium"),
     "Entry Criteria": st.column_config.TextColumn(width="medium"),
@@ -2850,6 +2892,17 @@ st.divider()
 
 # ── Table 4: Queue Limit ────────────────────────────────────────────────────────
 _render_sig_table(_queue_sigs, "⏳ Queue Limit",    "No queued signals.")
+
+if _queue_sigs:
+    if st.button("🗑️ Clear Queue Limit Records", key="clear_queue_limit"):
+        with _log_lock:
+            _b._bsc_log["signals"] = [
+                s for s in _b._bsc_log["signals"]
+                if s.get("status") != "queue_limit"
+            ]
+            save_log(_b._bsc_log)
+        st.success("✅ Queue Limit records cleared.")
+        st.rerun()
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Manual Trade Panel
