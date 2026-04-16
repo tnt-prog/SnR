@@ -38,7 +38,10 @@ OKX_INTERVALS = {"30m": "30m", "3m": "3m", "5m": "5m", "15m": "15m", "1h": "1H"}
 # API rate-limiter  — hard cap: 8 concurrent HTTP requests at any time
 # OKX public-market limit is 20 req / 2 s.  Staying well below keeps us safe.
 # ─────────────────────────────────────────────────────────────────────────────
-_api_sem = threading.Semaphore(5)  # max concurrent in-flight requests
+_api_sem = threading.Semaphore(20)  # max concurrent in-flight requests
+# Rate limiter (_rate_wait) already caps at 15 req/s; semaphore just needs to
+# allow enough concurrent in-flight so the pipeline stays full at any latency.
+# Formula: slots = target_rps × round_trip_latency → 15 × 1.3s ≈ 20 slots.
 
 # ── Token-bucket rate limiter ─────────────────────────────────────────────────
 # OKX public candle endpoint: 40 req / 2 s = 20 req/s hard limit.
@@ -565,6 +568,13 @@ def get_session():
     if not hasattr(_local, "session"):
         s = requests.Session()
         s.headers.update(HEADERS)
+        # Increase connection pool to match semaphore concurrency (20 slots).
+        # Default pool_maxsize=10 would cause urllib3 to queue connections,
+        # adding extra latency on top of the network round-trip.
+        from requests.adapters import HTTPAdapter
+        adapter = HTTPAdapter(pool_connections=4, pool_maxsize=25, max_retries=0)
+        s.mount("https://", adapter)
+        s.mount("http://",  adapter)
         _local.session = s
     return _local.session
 
@@ -572,7 +582,7 @@ def safe_get(url, params=None, _retries=4):
     for attempt in range(_retries):
         try:
             _rate_wait()                            # ← token-bucket: max 15 req/s
-            with _api_sem:                          # ← concurrency cap: max 5 in-flight
+            with _api_sem:                          # ← concurrency cap: max 20 in-flight
                 r = get_session().get(url, params=params, timeout=10)  # was 20s
             if r.status_code == 429:
                 # Cap sleep at 5 s — Retry-After can be up to 30 s which cascades
@@ -1945,7 +1955,7 @@ def update_open_signals(signals):
         return signals   # nothing to do — skip thread overhead entirely
 
     # Each worker fetches 200×5m candles for one trade.  Cap at 15 workers
-    # (matches MAX_OPEN_TRADES) — well within the _api_sem(5) rate-limit window.
+    # (matches MAX_OPEN_TRADES) — well within the _api_sem(20) concurrency window.
     with ThreadPoolExecutor(max_workers=min(len(open_sigs), 15)) as pool:
         futs = [pool.submit(_update_one_signal, s) for s in open_sigs]
         for f in as_completed(futs):
