@@ -2961,18 +2961,26 @@ with st.expander("📡 OKX Live Positions", expanded=False):
                         _upnl     = float(_p.get("upl",      0) or 0)
                         _upnl_pct = float(_p.get("uplRatio", 0) or 0) * 100
                         _liq_raw  = float(_p.get("liqPx",    0) or 0)
+                        # OKX: 'margin' is only populated in Isolated mode.
+                        # In Cross mode use 'imr' (Initial Margin Requirement).
+                        _margin_isolated = float(_p.get("margin", 0) or 0)
+                        _margin_imr      = float(_p.get("imr",    0) or 0)
+                        _margin_display  = _margin_isolated if _margin_isolated > 0 else _margin_imr
+                        _mgn_mode        = _p.get("mgnMode", "cross")
+                        _margin_label    = f"{'IMR' if _mgn_mode == 'cross' else 'Margin'} $"
                         _pos_rows.append({
-                            "Symbol":       _p.get("instId", ""),
-                            "Side":         _p.get("posSide", "net").capitalize(),
-                            "Contracts":    int(_p.get("pos", 0) or 0),
-                            "Avg Entry":    float(_p.get("avgPx",       0) or 0),
-                            "Mark Price":   float(_p.get("markPx",      0) or 0),
-                            "Unreal PnL":   round(_upnl, 4),
-                            "PnL %":        f"{_upnl_pct:+.2f}%",
-                            "Notional $":   round(float(_p.get("notionalUsd", 0) or 0), 2),
-                            "Margin $":     round(float(_p.get("margin",       0) or 0), 4),
-                            "Leverage":     f"{_p.get('lever', '')}×",
-                            "Liq Price":    _liq_raw if _liq_raw > 0 else "—",
+                            "Symbol":        _p.get("instId", ""),
+                            "Side":          _p.get("posSide", "net").capitalize(),
+                            "Mode":          _mgn_mode.capitalize(),
+                            "Contracts":     int(_p.get("pos", 0) or 0),
+                            "Avg Entry":     float(_p.get("avgPx",       0) or 0),
+                            "Mark Price":    float(_p.get("markPx",      0) or 0),
+                            "Unreal PnL":    round(_upnl, 4),
+                            "PnL %":         f"{_upnl_pct:+.2f}%",
+                            "Notional $":    round(float(_p.get("notionalUsd", 0) or 0), 2),
+                            "IMR / Margin $": round(_margin_display, 4),
+                            "Leverage":      f"{_p.get('lever', '')}×",
+                            "Liq Price":     _liq_raw if _liq_raw > 0 else "—",
                         })
                     st.dataframe(
                         _pos_rows,
@@ -2980,11 +2988,15 @@ with st.expander("📡 OKX Live Positions", expanded=False):
                         hide_index=True,
                         height=len(_pos_rows) * 35 + 48,
                         column_config={
-                            "Avg Entry":  st.column_config.NumberColumn(format="%.6f"),
-                            "Mark Price": st.column_config.NumberColumn(format="%.6f"),
-                            "Liq Price":  st.column_config.NumberColumn(format="%.6f"),
-                            "Unreal PnL": st.column_config.NumberColumn(
-                                              "Unreal PnL $", format="%.4f"),
+                            "Avg Entry":       st.column_config.NumberColumn(format="%.6f"),
+                            "Mark Price":      st.column_config.NumberColumn(format="%.6f"),
+                            "Liq Price":       st.column_config.NumberColumn(format="%.6f"),
+                            "Unreal PnL":      st.column_config.NumberColumn(
+                                                   "Unreal PnL $", format="%.4f"),
+                            "IMR / Margin $":  st.column_config.NumberColumn(
+                                                   "IMR / Margin $", format="%.4f",
+                                                   help="Cross margin → IMR (Initial Margin Requirement). "
+                                                        "Isolated margin → Margin held per position."),
                         },
                     )
                 else:
