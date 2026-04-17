@@ -2355,6 +2355,8 @@ with st.sidebar:
             _b._bsc_sl_paused = False
             _rescan_event.set()
             st.rerun()
+    else:
+        st.success("✅ **Circuit Breaker: OK**  —  No consecutive SL pause", icon=None)
     st.divider()
 
     # ── Auto-Trading ───────────────────────────────────────────────────────────
