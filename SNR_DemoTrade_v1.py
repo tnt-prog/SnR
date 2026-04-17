@@ -2341,6 +2341,20 @@ with st.sidebar:
         else:       _scanner_running.set()
         st.rerun()
     st.caption(f"{'🟢' if running else '🔴'}  Scanner {'running' if running else 'stopped'}")
+
+    # ── Circuit Breaker Status ─────────────────────────────────────────────────
+    _sl_paused = getattr(_b, "_bsc_sl_paused", False)
+    if _sl_paused:
+        st.warning(
+            "🔴 **Paused — 3 consecutive SL hit**\n\n"
+            "Review market conditions before resuming.",
+            icon=None,
+        )
+        if st.button("▶️ Resume Scanning", key="resume_sl_circuit",
+                     type="primary", use_container_width=True):
+            _b._bsc_sl_paused = False
+            _rescan_event.set()
+            st.rerun()
     st.divider()
 
     # ── Auto-Trading ───────────────────────────────────────────────────────────
@@ -2837,32 +2851,6 @@ with st.sidebar:
 # MAIN AREA
 # ─────────────────────────────────────────────────────────────────────────────
 st.title("S&R — Crypto Intelligent Portal")
-
-# ── Circuit Breaker Banner ────────────────────────────────────────────────────
-# Shown only when 3 consecutive SL hits triggered an auto-pause.
-# Resets to False on app restart (in-memory only — intentional).
-if getattr(_b, "_bsc_sl_paused", False):
-    st.markdown(
-        """
-        <div style="background:#7F1D1D;border:2px solid #F43F5E;border-radius:10px;
-                    padding:16px 20px;margin-bottom:12px;">
-          <span style="font-size:1.2rem;font-weight:700;color:#FCA5A5;">
-            🔴 Scanner Paused — 3 Consecutive Stop Losses Hit
-          </span><br>
-          <span style="color:#FCA5A5;font-size:0.9rem;">
-            The last 3 closed trades all hit Stop Loss. Scanning and new order placement
-            are suspended. Review market conditions before resuming.
-          </span>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-    if st.button("▶️ Resume Scanning", key="resume_sl_circuit",
-                 type="primary", use_container_width=False):
-        _b._bsc_sl_paused = False
-        _rescan_event.set()   # wake the loop immediately after resuming
-        st.rerun()
-    st.divider()
 
 last_scan = health.get("last_scan_at", "never")
 if last_scan and last_scan != "never":
