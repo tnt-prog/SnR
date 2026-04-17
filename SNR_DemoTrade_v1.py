@@ -134,7 +134,7 @@ DEFAULT_CONFIG: dict = {
     "api_passphrase":        "",
     "trade_usdt_amount":     10.0,   # USDT collateral per trade (before leverage)
     "trade_leverage":        10,     # leverage applied (capped by MAX_LEVERAGE)
-    "trade_margin_mode":     "cross",# "cross" or "isolated"
+    "trade_margin_mode":     "isolated",  # "cross" or "isolated"
         "watchlist": [
         "XPDUSDT","WIFUSDT","PIUSDT","EDGEUSDT","RECALLUSDT","SUSHIUSDT","RAVEUSDT","XLMUSDT","DASHUSDT","TRUSTUSDT",
         "GPSUSDT","CROUSDT","ACUUSDT","UNIUSDT","STRKUSDT","NEIROUSDT","ZKPUSDT","APEUSDT","MSTRUSDT","ENJUSDT",
@@ -1054,11 +1054,16 @@ def place_okx_order(sig: dict, cfg: dict) -> dict:
                           f"Could not fetch fill price, using signal entry: {fill_exc}",
                           symbol=sym, endpoint="/api/v5/trade/order[GET]")
 
-        # Recalculate TP and SL from the actual fill price
-        tp_pct   = float(cfg.get("tp_pct", 1.5)) / 100
-        sl_pct   = float(cfg.get("sl_pct", 3.0)) / 100
+        # Recalculate TP and SL from the actual fill price.
+        # Isolated mode: SL = liquidation price (entry × (1 − 1/leverage)).
+        # Cross mode:    SL = entry × (1 − sl_pct%).
+        tp_pct    = float(cfg.get("tp_pct", 1.5)) / 100
         actual_tp = _pround(actual_entry * (1 + tp_pct))
-        actual_sl = _pround(actual_entry * (1 - sl_pct))
+        if mode == "isolated":
+            actual_sl = _pround(actual_entry * (1 - 1 / lev))
+        else:
+            sl_pct    = float(cfg.get("sl_pct", 3.0)) / 100
+            actual_sl = _pround(actual_entry * (1 - sl_pct))
 
         # ── Step 4: Place OCO algo (TP + SL) using actual fill price ─────────
         # In hedge mode, closing a long requires posSide="long" on the sell too.
@@ -1636,7 +1641,10 @@ def process(sym, cfg: dict):
         # ── SUPER SETUP — 15m Discount → instant trade, no further checks ─────
         if is_super_setup:
             tp      = _pround(entry_q * (1 + cfg["tp_pct"] / 100))
-            sl      = _pround(entry_q * (1 - cfg["sl_pct"] / 100))
+            _ss_lev = max(1, int(cfg.get("trade_leverage", 10)))
+            sl      = (_pround(entry_q * (1 - 1 / _ss_lev))
+                       if cfg.get("trade_margin_mode", "isolated") == "isolated"
+                       else _pround(entry_q * (1 - cfg["sl_pct"] / 100)))
             sec     = SECTORS.get(sym, "Other")
             max_lev = get_max_leverage(sym)
             with _filter_lock:
@@ -1845,7 +1853,10 @@ def process(sym, cfg: dict):
 
         # ── All filters passed ────────────────────────────────────────────────
         tp      = _pround(entry * (1 + cfg["tp_pct"] / 100))
-        sl      = _pround(entry * (1 - cfg["sl_pct"] / 100))
+        _lev_sl = max(1, int(cfg.get("trade_leverage", 10)))
+        sl      = (_pround(entry * (1 - 1 / _lev_sl))
+                   if cfg.get("trade_margin_mode", "isolated") == "isolated"
+                   else _pround(entry * (1 - cfg["sl_pct"] / 100)))
         sec     = SECTORS.get(sym, "Other")
         max_lev = get_max_leverage(sym)
 
@@ -2400,15 +2411,19 @@ with st.sidebar:
         key="cfg_trade_lev", disabled=not new_trade_enabled,
         help="Leverage applied (capped by OKX max for each coin)")
     new_margin_mode = st.selectbox(
-        "Margin Mode", ["cross", "isolated"],
-        index=0 if _snap_cfg.get("trade_margin_mode", "cross") == "cross" else 1,
+        "Margin Mode", ["isolated", "cross"],
+        index=0 if _snap_cfg.get("trade_margin_mode", "isolated") == "isolated" else 1,
         key="cfg_margin_mode", disabled=not new_trade_enabled)
 
     if new_trade_enabled:
         notional_usdt = new_trade_usdt * new_trade_lev
+        _liq_pct_cap  = round(100 / new_trade_lev, 2)
+        _sl_caption   = (f"SL @ liq ~{_liq_pct_cap:.1f}% below entry"
+                         if new_margin_mode == "isolated"
+                         else f"SL -${notional_usdt * _snap_cfg.get('sl_pct',3.0)/100:.2f}")
         st.caption(f"📐 Notional per trade: ~${notional_usdt:,.0f} USDT   "
                    f"| TP +${notional_usdt * _snap_cfg.get('tp_pct',1.5)/100:.2f}   "
-                   f"| SL -${notional_usdt * _snap_cfg.get('sl_pct',3.0)/100:.2f}")
+                   f"| {_sl_caption}")
         st.caption("🔒 Credentials stored in scanner_config.json. "
                    "Use a trade-only API key — never withdrawal permissions.")
 
@@ -2533,7 +2548,15 @@ with st.sidebar:
     st.markdown("**📊 Trade Settings**")
     c1, c2 = st.columns(2)
     new_tp = c1.number_input("TP %", min_value=0.1, max_value=20.0, step=0.1, value=float(_snap_cfg["tp_pct"]),    key="cfg_tp")
-    new_sl = c2.number_input("SL %", min_value=0.1, max_value=20.0, step=0.1, value=float(_snap_cfg["sl_pct"]),    key="cfg_sl")
+    _isolated_active = _snap_cfg.get("trade_margin_mode", "isolated") == "isolated"
+    new_sl = c2.number_input(
+        "SL %", min_value=0.1, max_value=20.0, step=0.1,
+        value=float(_snap_cfg["sl_pct"]), key="cfg_sl",
+        disabled=_isolated_active,
+        help=("SL is the liquidation price in isolated mode (entry × (1 − 1/leverage)). "
+              "Switch to Cross mode to use a custom SL %.")
+        if _isolated_active else "Stop-loss as % below entry."
+    )
     st.divider()
 
     # ── F1: Bulk Pre-filter ────────────────────────────────────────────────────
@@ -3353,8 +3376,8 @@ with st.expander("🤖 Manual Trade", expanded=False):
             index=_all_syms.index(_mt_default) if _mt_default in _all_syms else 0,
             key="mt_sym")
         mt_mode = mt_col2.selectbox(
-            "Margin mode", ["cross", "isolated"],
-            index=0 if _snap_cfg.get("trade_margin_mode","cross") == "cross" else 1,
+            "Margin mode", ["isolated", "cross"],
+            index=0 if _snap_cfg.get("trade_margin_mode","isolated") == "isolated" else 1,
             key="mt_mode")
 
         # ── Auto-fill from existing open signal if available ──────────────────
@@ -3391,7 +3414,9 @@ with st.expander("🤖 Manual Trade", expanded=False):
         # Hint: if TP/SL are 0, show what will be calculated
         if mt_entry > 0:
             _mt_tp_hint = mt_tp if mt_tp > 0 else mt_entry * (1 + _snap_cfg.get("tp_pct",1.5)/100)
-            _mt_sl_hint = mt_sl if mt_sl > 0 else mt_entry * (1 - _snap_cfg.get("sl_pct",3.0)/100)
+            _mt_sl_hint = (mt_sl if mt_sl > 0
+                           else mt_entry * (1 - 1/max(1,mt_lev)) if mt_mode == "isolated"
+                           else mt_entry * (1 - _snap_cfg.get("sl_pct",3.0)/100))
             st.caption(f"📋 Will place **LIMIT** buy at {mt_entry} "
                        f"· TP: {_pround(_mt_tp_hint)} · SL: {_pround(_mt_sl_hint)}")
         else:
@@ -3408,7 +3433,10 @@ with st.expander("🤖 Manual Trade", expanded=False):
             # (only relevant when entry == 0, i.e. market order)
             _ref = mt_entry if mt_entry > 0 else 0
             _mt_tp_use = mt_tp if mt_tp > 0 else (_ref * (1 + _snap_cfg.get("tp_pct",1.5)/100) if _ref else 0)
-            _mt_sl_use = mt_sl if mt_sl > 0 else (_ref * (1 - _snap_cfg.get("sl_pct",3.0)/100) if _ref else 0)
+            _mt_sl_use = (mt_sl if mt_sl > 0
+                          else (_ref * (1 - 1/max(1,mt_lev)) if mt_mode == "isolated"
+                                else _ref * (1 - _snap_cfg.get("sl_pct",3.0)/100))
+                          if _ref else 0)
 
             with st.spinner(f"Placing {'LIMIT' if mt_entry > 0 else 'MARKET'} order for {mt_sym}…"):
                 _mt_result = place_okx_manual_order(
