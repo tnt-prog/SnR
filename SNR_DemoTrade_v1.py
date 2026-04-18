@@ -3111,7 +3111,7 @@ def _build_signal_row(s: dict, is_open_table: bool = False) -> dict:
     """Convert one signal dict into a table row dict (all columns).
 
     When `is_open_table` is True, three extra open-only columns are inserted:
-      • "Risk Manager" (3rd column) — signed % change of current price vs.
+      • "Current Drop" (3rd column) — signed % change of current price vs.
         entry. Populated only for rows already flagged with DL / TL / DL-TL.
       • "Est. Liq." (4th column) — estimated liquidation price for isolated
         trades, with % distance from entry in parentheses. Cross trades
@@ -3145,9 +3145,9 @@ def _build_signal_row(s: dict, is_open_table: bool = False) -> dict:
         elif _dl:          alert_col = "🔴 DL"
         elif _tl:          alert_col = "🔴 TL"
 
-    # Risk Manager column — signed % change from entry, populated only when
+    # Current Drop column — signed % change from entry, populated only when
     # there is an active DL / TL / DL-TL alert on an open trade.
-    risk_mgr_col = "—"
+    current_drop_col = "—"
     if status == "open" and alert_col:
         _entry_rm = float(s.get("entry", 0) or 0)
         _pa_pct   = s.get("price_alert_pct")
@@ -3156,9 +3156,9 @@ def _build_signal_row(s: dict, is_open_table: bool = False) -> dict:
             # Flip sign: negative = drop, positive = rise — reads intuitively.
             try:
                 _change = -float(_pa_pct)
-                risk_mgr_col = f"{_change:+.2f}%"
+                current_drop_col = f"{_change:+.2f}%"
             except (TypeError, ValueError):
-                risk_mgr_col = "—"
+                current_drop_col = "—"
 
     # ── Est. Liq. column ─────────────────────────────────────────────────────
     # Estimated liquidation price + % distance from entry (negative, since liq
@@ -3306,8 +3306,8 @@ def _build_signal_row(s: dict, is_open_table: bool = False) -> dict:
 
     # Build row dict in order. The following columns appear ONLY in the Open
     # Signals table (inserted via the `is_open_table` flag):
-    #   • "Risk Manager"  → 3rd column (right after Alert)
-    #   • "Est. Liq."     → 4th column (right after Risk Manager)
+    #   • "Current Drop" → 3rd column (right after Alert)
+    #   • "Est. Liq."    → 4th column (right after Current Drop)
     #   • "PnL $"         → right after Sector
     # TP Hit / SL Hit / Queue Limit tables omit all three.
     row: dict = {
@@ -3315,7 +3315,7 @@ def _build_signal_row(s: dict, is_open_table: bool = False) -> dict:
         "Alert":          alert_col,
     }
     if is_open_table:
-        row["Risk Manager"] = risk_mgr_col
+        row["Current Drop"] = current_drop_col
         row["Est. Liq."]    = est_liq_col
     row["Symbol"] = s.get("symbol", "")
     row["Setup"]  = setup_type
@@ -3348,8 +3348,8 @@ _SIG_COL_CFG = {
     "Alert":          st.column_config.TextColumn(
                           "🚨 Alert", width="small",
                           help="🔴 DL = price ≥3% below entry  |  🔴 TL = open ≥2 hours"),
-    "Risk Manager":   st.column_config.TextColumn(
-                          "⚠️ Risk Manager", width="small",
+    "Current Drop":   st.column_config.TextColumn(
+                          "⚠️ Current Drop", width="small",
                           help="Signed % change of current price vs. entry — "
                                "negative = drop, positive = rise. Shown only "
                                "for open trades flagged DL / TL / DL-TL."),
