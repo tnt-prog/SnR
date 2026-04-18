@@ -3107,20 +3107,30 @@ def _fmt_secs(secs: int) -> str:
         h, rem = divmod(secs, 3600); return f"{h}h {rem // 60}m"
     d, rem = divmod(secs, 86400);   return f"{d}d {rem // 3600}h"
 
-def _build_signal_row(s: dict, is_open_table: bool = False) -> dict:
+def _build_signal_row(s: dict, is_open_table: bool = False,
+                      show_pnl: bool = False) -> dict:
     """Convert one signal dict into a table row dict (all columns).
 
-    When `is_open_table` is True, three extra open-only columns are inserted:
-      • "Current Drop" (3rd column) — signed % change of current price vs.
-        entry. Populated only for rows already flagged with DL / TL / DL-TL.
-      • "Est. Liq." (4th column) — estimated liquidation price for isolated
-        trades, with % distance from entry in parentheses. Cross trades
-        show "—".
-      • "PnL $" (after Sector) — live unrealized PnL in dollars, formatted
-        like "-2.76 $" / "+1.34 $". Populated only for open trades; closed
-        and queue rows show "—".
+    Flags control which optional columns appear:
+      • `is_open_table=True` adds two open-only columns:
+          - "Current Drop" (3rd column) — signed % change of current price vs.
+            entry. Populated only for rows already flagged with DL / TL / DL-TL.
+          - "Est. Liq." (4th column) — estimated liquidation price for isolated
+            trades, with % distance from entry in parentheses. Cross trades
+            show "—".
 
-    TP Hit / SL Hit / Queue Limit tables omit these columns entirely.
+      • `show_pnl=True` adds the PnL column (after Sector):
+          - "PnL $" — dollar PnL, formatted like "-2.76 $" / "+1.34 $".
+            • Open trades    → live unrealized PnL (uses latest_price)
+            • TP Hit trades  → realized gain   (uses close_price = TP)
+            • SL Hit trades  → realized loss   (uses close_price = SL)
+            • Queue Limit    → "—" (no trade was ever opened)
+
+    Typical usage:
+      Open Signals table  → is_open_table=True, show_pnl=True
+      TP Hit table        → is_open_table=False, show_pnl=True
+      SL Hit table        → is_open_table=False, show_pnl=True
+      Queue Limit table   → both False
     """
     status      = s.get("status", "open")
     status_icon = {
@@ -3189,31 +3199,41 @@ def _build_signal_row(s: dict, is_open_table: bool = False) -> dict:
             est_liq_col = f"{_liq_str} ({_liq_pct:+.2f}%)"
 
     # ── PnL $ column ─────────────────────────────────────────────────────────
-    # Live unrealized PnL in dollars for open trades only. Uses the per-signal
-    # trade_usdt and trade_lev stored at entry (so PnL reflects actual position
-    # size, unaffected by later config changes).
+    # Dollar PnL. Uses the per-signal trade_usdt and trade_lev stored at entry
+    # (so PnL reflects actual position size, unaffected by later config changes).
     #   notional = trade_usdt × trade_lev
     #   qty      = notional / entry
-    #   PnL $    = (current − entry) × qty  =  (current/entry − 1) × notional
+    #   PnL $    = (ref_price − entry) × qty  =  (ref_price/entry − 1) × notional
+    #
+    # Reference price per status:
+    #   • open    → sig["latest_price"] (live unrealized PnL)
+    #   • tp_hit  → sig["close_price"] (= TP level — realized gain)
+    #   • sl_hit  → sig["close_price"] (= SL level — realized loss)
+    #   • queue   → "—" (no trade was ever opened)
     pnl_col = "—"
-    if status == "open":
+    if status in ("open", "tp_hit", "sl_hit"):
         _entry_pnl = float(s.get("entry", 0) or 0)
         _usdt_pnl  = float(s.get("trade_usdt", _snap_cfg.get("trade_usdt_amount", 0)) or 0)
         _lev_pnl   = int(s.get("trade_lev", _snap_cfg.get("trade_leverage", 10)) or 0)
-        _latest_pnl = s.get("latest_price")
-        if _latest_pnl is None:
-            # Fall back to deriving from price_alert_pct if latest_price not stored yet
-            _pa = s.get("price_alert_pct")
-            if _pa is not None and _entry_pnl > 0:
-                try:
-                    _latest_pnl = _entry_pnl * (1.0 - float(_pa) / 100.0)
-                except (TypeError, ValueError):
-                    _latest_pnl = None
+        if status == "open":
+            _ref_pnl = s.get("latest_price")
+            if _ref_pnl is None:
+                # Fall back to deriving from price_alert_pct if latest_price
+                # not stored yet (first cycle, before update_open_signals ran)
+                _pa = s.get("price_alert_pct")
+                if _pa is not None and _entry_pnl > 0:
+                    try:
+                        _ref_pnl = _entry_pnl * (1.0 - float(_pa) / 100.0)
+                    except (TypeError, ValueError):
+                        _ref_pnl = None
+        else:
+            # tp_hit or sl_hit — close_price is the realized exit level
+            _ref_pnl = s.get("close_price")
         if (_entry_pnl > 0 and _usdt_pnl > 0 and _lev_pnl > 0
-                and _latest_pnl is not None):
+                and _ref_pnl is not None):
             try:
                 _notional_pnl = _usdt_pnl * _lev_pnl
-                _pnl_val = (float(_latest_pnl) / _entry_pnl - 1.0) * _notional_pnl
+                _pnl_val = (float(_ref_pnl) / _entry_pnl - 1.0) * _notional_pnl
                 pnl_col = f"{_pnl_val:+.2f} $"
             except (TypeError, ValueError, ZeroDivisionError):
                 pnl_col = "—"
@@ -3304,12 +3324,12 @@ def _build_signal_row(s: dict, is_open_table: bool = False) -> dict:
         except Exception:
             pass
 
-    # Build row dict in order. The following columns appear ONLY in the Open
-    # Signals table (inserted via the `is_open_table` flag):
-    #   • "Current Drop" → 3rd column (right after Alert)
-    #   • "Est. Liq."    → 4th column (right after Current Drop)
-    #   • "PnL $"         → right after Sector
-    # TP Hit / SL Hit / Queue Limit tables omit all three.
+    # Build row dict in order. Optional columns (inserted via the flags):
+    #   • "Current Drop" → 3rd column — only when is_open_table=True
+    #   • "Est. Liq."    → 4th column — only when is_open_table=True
+    #   • "PnL $"        → right after Sector — only when show_pnl=True
+    #                       (Open, TP Hit, and SL Hit tables set show_pnl=True;
+    #                        Queue Limit table leaves it False.)
     row: dict = {
         "Time (GST)":     ts_str,
         "Alert":          alert_col,
@@ -3320,7 +3340,7 @@ def _build_signal_row(s: dict, is_open_table: bool = False) -> dict:
     row["Symbol"] = s.get("symbol", "")
     row["Setup"]  = setup_type
     row["Sector"] = s.get("sector", "Other")
-    if is_open_table:
+    if show_pnl:
         row["PnL $"] = pnl_col
     row.update({
         "Signal Entry":   s.get("signal_entry", s.get("entry", "")),
@@ -3366,12 +3386,16 @@ _SIG_COL_CFG = {
     "Setup":          st.column_config.TextColumn(width="small"),
     "PnL $":          st.column_config.TextColumn(
                           "💰 PnL $", width="small",
-                          help="Live unrealized PnL in dollars for open trades.\n\n"
-                               "Formula: (current / entry − 1) × (trade_usdt × leverage).\n"
-                               "Uses the collateral and leverage stored on the signal "
-                               "at entry time — changing global settings later does "
-                               "not affect the PnL of already-open trades.\n\n"
-                               "Only populated for open trades."),
+                          help="Dollar PnL based on the collateral and leverage "
+                               "stored on the signal at entry time.\n\n"
+                               "Formula: (ref_price / entry − 1) × (trade_usdt × leverage).\n\n"
+                               "Reference price by status:\n"
+                               "  • Open    → live latest price (unrealized PnL)\n"
+                               "  • TP Hit  → TP level (realized gain)\n"
+                               "  • SL Hit  → SL level (realized loss)\n"
+                               "  • Queue   → — (no trade opened)\n\n"
+                               "Changing global settings later does not affect "
+                               "the PnL of already-opened trades."),
     "Signal Entry":   st.column_config.NumberColumn(format="%.8f",
                           help="Price when the scanner signal fired"),
     "Fill $":         st.column_config.NumberColumn(format="%.8f",
@@ -3397,8 +3421,10 @@ _SIG_COL_CFG = {
 }
 
 def _render_sig_table(sig_list: list, header: str, empty_msg: str,
-                      auto_height: bool = False, is_open_table: bool = False):
-    rows = [_build_signal_row(s, is_open_table=is_open_table) for s in sig_list]
+                      auto_height: bool = False, is_open_table: bool = False,
+                      show_pnl: bool = False):
+    rows = [_build_signal_row(s, is_open_table=is_open_table, show_pnl=show_pnl)
+            for s in sig_list]
     st.markdown(f"### {header} ({len(rows)})")
     if rows:
         if auto_height:
@@ -3425,18 +3451,23 @@ _queue_sigs = [s for s in filtered_sorted if s.get("status") == "queue_limit"]
 
 # ── Table 1: Open Signals ───────────────────────────────────────────────────────
 _render_sig_table(_open_sigs,  "🔵 Open Signals",  "No open signals right now.",
-                  auto_height=True, is_open_table=True)
+                  auto_height=True, is_open_table=True, show_pnl=True)
 st.divider()
 
 # ── Table 2: TP Hit ─────────────────────────────────────────────────────────────
-_render_sig_table(_tp_sigs,    "✅ TP Hit",         "No TP hits yet.")
+# show_pnl=True → realized gain column, using close_price (= TP level).
+_render_sig_table(_tp_sigs,    "✅ TP Hit",         "No TP hits yet.",
+                  show_pnl=True)
 st.divider()
 
 # ── Table 3: SL Hit ─────────────────────────────────────────────────────────────
-_render_sig_table(_sl_sigs,    "❌ SL Hit",         "No SL hits yet.")
+# show_pnl=True → realized loss column, using close_price (= SL level).
+_render_sig_table(_sl_sigs,    "❌ SL Hit",         "No SL hits yet.",
+                  show_pnl=True)
 st.divider()
 
 # ── Table 4: Queue Limit ────────────────────────────────────────────────────────
+# No PnL shown — queue_limit signals never opened a real trade.
 _render_sig_table(_queue_sigs, "⏳ Queue Limit",    "No queued signals.")
 
 if _queue_sigs:
