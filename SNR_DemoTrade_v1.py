@@ -9,10 +9,13 @@ Performance improvements:
   + API semaphore             — hard cap of 8 concurrent HTTP requests (no exchange blocking)
 
 v2 additions:
-  E. 15-trade Queue Limit     — when 15 open trades exist, new signals are logged as
-                                 status="queue_limit" (no order placed). The coin is NOT
-                                 blocked by active or cooldown filters — it is freely
-                                 re-scanned every cycle until a slot opens.
+  E. N-trade Queue Limit      — when the max open-trade cap (cfg "max_open_trades",
+                                 default 15, adjustable from sidebar) is reached, new
+                                 signals are logged as status="queue_limit" (no order
+                                 placed). The coin is NOT blocked by active or cooldown
+                                 filters — it is freely re-scanned every cycle until a
+                                 slot opens. Lowering the cap does NOT close existing
+                                 trades; overflow simply routes to queue_limit.
   F. Alert column (col 2)     — signals table column 2 shows a quick visual status flag;
                                  turns 🔴 red when an open trade's latest price has dropped
                                  ≥5% below its entry price (early warning, before SL is hit).
@@ -129,6 +132,12 @@ DEFAULT_CONFIG: dict = {
     "use_ema_cross_15m":     True,   # F10 — 15m EMA crossover (fast > slow)
     "ema_cross_fast_15m":    12,
     "ema_cross_slow_15m":    21,
+    # ── Queue limit (max concurrent open trades) ──────────────────────────────
+    "max_open_trades":       15,     # Hard cap on concurrent open trades.
+                                     # Lowering this does NOT close existing
+                                     # trades — new signals during overflow are
+                                     # logged as queue_limit until natural TP/SL
+                                     # closures bring the count down.
     # ── Auto-trading (OKX Demo / Live) ────────────────────────────────────────
     "trade_enabled":         False,
     "demo_mode":             True,   # True = Demo API, False = Live API
@@ -529,7 +538,13 @@ if "_scanner_initialised" not in st.session_state:
         _b._bsc_filter_lock   = threading.Lock()
         _b._bsc_last_error    = ""
         _b._bsc_rescan_event  = threading.Event()   # set to skip sleep & rescan immediately
-        _b._bsc_sl_paused     = False               # circuit breaker: True when 3 consec SL hit
+        # ── Circuit-breaker halt flag ─────────────────────────────────────────
+        # Set to True by the background loop when the last 3 closed trades are
+        # all sl_hit. CONTRACT: once True, ONLY the manual "▶️ Resume Scanning"
+        # button (in the sidebar) may set this back to False. No TP hit, no
+        # cycle, no other event — manual resume only. Do not add any code path
+        # that clears this flag automatically.
+        _b._bsc_sl_paused     = False
         _b._bsc_api_conn_status = {          # result of last "Test Connection" call
             "status":      "untested",       # "untested" | "ok" | "error"
             "message":     "",
@@ -2002,6 +2017,9 @@ def _update_one_signal(sig: dict) -> None:
             if candles:
                 latest_price = candles[-1]["close"]
                 entry_price  = float(sig.get("entry", 0) or 0)
+                # Store raw latest close — used by PnL $ column (avoids the
+                # precision loss of deriving from rounded price_alert_pct).
+                sig["latest_price"] = float(latest_price)
                 if entry_price > 0:
                     drop_pct = (entry_price - latest_price) / entry_price * 100
                     sig["price_alert"]     = drop_pct >= _PRICE_ALERT_PCT
@@ -2048,7 +2066,11 @@ def _check_sl_circuit_breaker():
 
 def _bg_loop():
     while True:
-        # Pause if user manually stopped OR circuit breaker fired (3 consec SL)
+        # Pause if user manually stopped OR circuit breaker fired (3 consec SL).
+        # NOTE: When _bsc_sl_paused is True, the loop is fully idle — no
+        # open-signal updates, no scans, no cycle logic. The flag is cleared
+        # ONLY by the manual "▶️ Resume Scanning" button (see sidebar UI). TP
+        # hits do NOT auto-resume the scanner.
         if not _scanner_running.is_set() or getattr(_b, "_bsc_sl_paused", False):
             time.sleep(2); continue
         with _config_lock:
@@ -2076,8 +2098,13 @@ def _bg_loop():
                 # ── Queue-limit check ─────────────────────────────────────────
                 # Count only genuinely OPEN trades (queue_limit entries are NOT
                 # real open positions — no order was placed for them).
+                # The cap is adjustable via sidebar (config key: max_open_trades).
+                # Graceful reduction: if user lowers the limit below current
+                # open count, existing trades are NOT force-closed. New signals
+                # during the overflow period are logged as queue_limit until
+                # natural TP/SL closures bring the count down to the new limit.
                 open_trade_count = len(active)
-                MAX_OPEN_TRADES  = 15
+                MAX_OPEN_TRADES  = max(1, int(cfg.get("max_open_trades", 15)))
                 _new_sig_syms      = [s["symbol"] for s in new_sigs]
                 _blocked_active    = sorted(active  & set(_new_sig_syms))
                 _blocked_cooldown  = sorted(cooled  & set(_new_sig_syms))
@@ -2390,6 +2417,10 @@ with st.sidebar:
         )
         if st.button("▶️ Resume Scanning", key="resume_sl_circuit",
                      type="primary", use_container_width=True):
+            # ONLY place in the codebase where _bsc_sl_paused is cleared back
+            # to False (apart from fresh process startup). Auto-resume on TP
+            # hit is intentionally disabled — the halt sticks until a human
+            # reviews market conditions and clicks this button.
             _b._bsc_sl_paused = False
             _rescan_event.set()
             st.rerun()
@@ -2791,6 +2822,25 @@ with st.sidebar:
         st.caption(f"✅ EMA{new_ema_cross_fast_15m} > EMA{new_ema_cross_slow_15m} on 15m required")
     st.divider()
 
+    # ── Queue Size (max concurrent open trades) ──────────────────────────────
+    st.markdown("**📊 Queue Size** (max concurrent open trades)")
+    new_max_open_trades = st.number_input(
+        "Max Open Trades", min_value=1, max_value=50, step=1,
+        value=int(_snap_cfg.get("max_open_trades", 15)),
+        key="cfg_max_open_trades",
+        help=(
+            "Hard cap on the number of concurrent open trades.\n\n"
+            "When the limit is reached, new signals are logged as "
+            "status='queue_limit' (no order placed) and the coin remains "
+            "freely re-scannable on every future cycle.\n\n"
+            "⚠️ Graceful reduction: Lowering this value does NOT force-close "
+            "any currently open trades. If you reduce it below the current "
+            "open count, overflow signals route to queue_limit until natural "
+            "TP/SL closures bring the count down to the new cap."
+        ))
+    st.caption(f"🔒 Current cap: {int(new_max_open_trades)} open trade(s)")
+    st.divider()
+
     st.markdown("**⏱ Execution**")
     c5, c6 = st.columns(2)
     new_loop = c5.number_input("Loop (min)", min_value=1, max_value=60, step=1, value=int(_snap_cfg["loop_minutes"]),    key="cfg_loop")
@@ -2908,6 +2958,7 @@ with st.sidebar:
             "use_ema_cross_15m":  bool(new_use_ema_cross_15m),
             "ema_cross_fast_15m": int(new_ema_cross_fast_15m),
             "ema_cross_slow_15m": int(new_ema_cross_slow_15m),
+            "max_open_trades":    max(1, int(new_max_open_trades)),
             "watchlist": new_wl,
             # ── Auto-trading ─────────────────────────────────────────────────
             "trade_enabled":     bool(new_trade_enabled),
@@ -2973,14 +3024,16 @@ tp_count    = sum(1 for s in signals if s["status"]=="tp_hit")
 sl_count    = sum(1 for s in signals if s["status"]=="sl_hit")
 queue_count = sum(1 for s in signals if s["status"]=="queue_limit")
 
-# ── Warn if log loaded from a previous session already exceeds the 15-trade cap
-# (e.g. migrating from v1 which had no limit).  No new trades will fire until
-# open_count drops below 15 via TP or SL hits.
-if open_count > 15:
+# ── Warn if log loaded from a previous session already exceeds the cap
+# (e.g. migrating from v1 which had no limit). No new trades will fire until
+# open_count drops below the cap via TP or SL hits.
+_max_open_cap = max(1, int(_snap_cfg.get("max_open_trades", 15)))
+if open_count > _max_open_cap:
     st.warning(
-        f"⚠️ **{open_count} open trades detected** — this exceeds the 15-trade limit "
-        f"(likely loaded from a log created before the queue-limit was enforced). "
-        f"No new trades will be opened until the open count drops below 15 via TP or SL hits. "
+        f"⚠️ **{open_count} open trades detected** — this exceeds the {_max_open_cap}-trade limit "
+        f"(likely loaded from a log created before the queue-limit was enforced, or the limit was "
+        f"recently lowered). No new trades will be opened until the open count drops to ≤{_max_open_cap} "
+        f"via TP or SL hits. Existing trades will NOT be force-closed. "
         f"You can also use **Clear History** in the sidebar to reset the log."
     )
 pre_out     = health.get("pre_filtered_out", 0)
@@ -2992,10 +3045,10 @@ m2.metric("Scan Time",     f"{health.get('last_scan_duration_s',0)}s")
 m3.metric("API Errors",    health.get("total_api_errors",0))
 m4.metric("Pre-filtered ⚡", pre_out, help="Coins removed by bulk ticker pre-filter (saves API calls)")
 m5c.metric("Deep Scanned", deep_sc, help="Coins that passed pre-filter and received full candle analysis")
-m6.metric("Open",          open_count,  help="Active open trades (max 15 allowed simultaneously)")
+m6.metric("Open",          open_count,  help=f"Active open trades (max {_max_open_cap} allowed simultaneously — configurable in sidebar)")
 m7.metric("TP Hit ✅",     tp_count)
 m8.metric("SL Hit ❌",     sl_count)
-m9.metric("⏳ Queued",     queue_count, help="Signals detected while 15-trade limit was reached — no order placed, coin rescanned each cycle")
+m9.metric("⏳ Queued",     queue_count, help=f"Signals detected while the {_max_open_cap}-trade limit was reached — no order placed, coin rescanned each cycle")
 
 if getattr(_b, "_bsc_last_error", ""):
     st.warning(f"⚠️ {_b._bsc_last_error}")
@@ -3019,6 +3072,14 @@ if _snap_cfg.get("use_ema_cross_15m", True):
     badges.append(f"📉 F10 — EMA{_snap_cfg.get('ema_cross_fast_15m',12)}>EMA{_snap_cfg.get('ema_cross_slow_15m',21)} 15m")
 st.markdown("**Active Filters:**")
 st.caption("  |  ".join(badges) if badges else "No advanced filters enabled")
+# ── Queue Size (current / max) ─────────────────────────────────────────────
+_queue_indicator = f"📊 **Queue Size:** {open_count} / {_max_open_cap}"
+if open_count >= _max_open_cap:
+    _queue_indicator += "  🔒 *full — new signals will be queued*"
+elif open_count > 0:
+    _slots_left = _max_open_cap - open_count
+    _queue_indicator += f"  ({_slots_left} slot{'s' if _slots_left != 1 else ''} free)"
+st.markdown(_queue_indicator)
 st.divider()
 
 # ── Sector filter ──────────────────────────────────────────────────────────────
@@ -3049,11 +3110,17 @@ def _fmt_secs(secs: int) -> str:
 def _build_signal_row(s: dict, is_open_table: bool = False) -> dict:
     """Convert one signal dict into a table row dict (all columns).
 
-    When `is_open_table` is True, an extra "Risk Manager" column is inserted
-    as the 3rd column. It shows the signed % change of current price vs. entry
-    (negative = drop, positive = rise) — but only for rows that already carry
-    a DL / TL / DL-TL alert. Other rows (including all TP/SL/Queue rows) show
-    "—" or have the column omitted entirely.
+    When `is_open_table` is True, three extra open-only columns are inserted:
+      • "Risk Manager" (3rd column) — signed % change of current price vs.
+        entry. Populated only for rows already flagged with DL / TL / DL-TL.
+      • "Est. Liq." (4th column) — estimated liquidation price for isolated
+        trades, with % distance from entry in parentheses. Cross trades
+        show "—".
+      • "PnL $" (after Sector) — live unrealized PnL in dollars, formatted
+        like "-2.76 $" / "+1.34 $". Populated only for open trades; closed
+        and queue rows show "—".
+
+    TP Hit / SL Hit / Queue Limit tables omit these columns entirely.
     """
     status      = s.get("status", "open")
     status_icon = {
@@ -3092,6 +3159,64 @@ def _build_signal_row(s: dict, is_open_table: bool = False) -> dict:
                 risk_mgr_col = f"{_change:+.2f}%"
             except (TypeError, ValueError):
                 risk_mgr_col = "—"
+
+    # ── Est. Liq. column ─────────────────────────────────────────────────────
+    # Estimated liquidation price + % distance from entry (negative, since liq
+    # is below entry for LONG). Shown only for isolated trades. Cross-margin
+    # trades show "—" because their liquidation depends on account-wide equity
+    # and cannot be computed from per-trade info alone.
+    #
+    # Formula (LONG isolated, approximate):
+    #     liq ≈ entry × (1 − 1/leverage)
+    #     liq% from entry = -100 / leverage  (e.g. 10× → -10%, 20× → -5%)
+    est_liq_col = "—"
+    if status == "open":
+        _margin_mode_rm = (s.get("order_margin_mode") or
+                           _snap_cfg.get("trade_margin_mode", "isolated") or
+                           "isolated").lower()
+        _entry_liq = float(s.get("entry", 0) or 0)
+        _lev_liq   = int(s.get("trade_lev", _snap_cfg.get("trade_leverage", 10)) or 0)
+        if _margin_mode_rm == "isolated" and _entry_liq > 0 and _lev_liq > 0:
+            _liq_price = _entry_liq * (1.0 - 1.0 / _lev_liq)
+            _liq_pct   = -100.0 / _lev_liq
+            # Format liq price with enough precision for low-value coins
+            if _liq_price >= 1:
+                _liq_str = f"{_liq_price:.4f}"
+            elif _liq_price >= 0.01:
+                _liq_str = f"{_liq_price:.6f}"
+            else:
+                _liq_str = f"{_liq_price:.8f}"
+            est_liq_col = f"{_liq_str} ({_liq_pct:+.2f}%)"
+
+    # ── PnL $ column ─────────────────────────────────────────────────────────
+    # Live unrealized PnL in dollars for open trades only. Uses the per-signal
+    # trade_usdt and trade_lev stored at entry (so PnL reflects actual position
+    # size, unaffected by later config changes).
+    #   notional = trade_usdt × trade_lev
+    #   qty      = notional / entry
+    #   PnL $    = (current − entry) × qty  =  (current/entry − 1) × notional
+    pnl_col = "—"
+    if status == "open":
+        _entry_pnl = float(s.get("entry", 0) or 0)
+        _usdt_pnl  = float(s.get("trade_usdt", _snap_cfg.get("trade_usdt_amount", 0)) or 0)
+        _lev_pnl   = int(s.get("trade_lev", _snap_cfg.get("trade_leverage", 10)) or 0)
+        _latest_pnl = s.get("latest_price")
+        if _latest_pnl is None:
+            # Fall back to deriving from price_alert_pct if latest_price not stored yet
+            _pa = s.get("price_alert_pct")
+            if _pa is not None and _entry_pnl > 0:
+                try:
+                    _latest_pnl = _entry_pnl * (1.0 - float(_pa) / 100.0)
+                except (TypeError, ValueError):
+                    _latest_pnl = None
+        if (_entry_pnl > 0 and _usdt_pnl > 0 and _lev_pnl > 0
+                and _latest_pnl is not None):
+            try:
+                _notional_pnl = _usdt_pnl * _lev_pnl
+                _pnl_val = (float(_latest_pnl) / _entry_pnl - 1.0) * _notional_pnl
+                pnl_col = f"{_pnl_val:+.2f} $"
+            except (TypeError, ValueError, ZeroDivisionError):
+                pnl_col = "—"
 
     ts_str    = fmt_dubai(s.get("timestamp", ""))
     close_str = fmt_dubai(s["close_time"]) if s.get("close_time") else "—"
@@ -3179,18 +3304,25 @@ def _build_signal_row(s: dict, is_open_table: bool = False) -> dict:
         except Exception:
             pass
 
-    # Build row dict in order — Risk Manager is inserted as the 3rd column
-    # ONLY for the Open Signals table. Other tables (TP/SL/Queue) omit it entirely.
+    # Build row dict in order. The following columns appear ONLY in the Open
+    # Signals table (inserted via the `is_open_table` flag):
+    #   • "Risk Manager"  → 3rd column (right after Alert)
+    #   • "Est. Liq."     → 4th column (right after Risk Manager)
+    #   • "PnL $"         → right after Sector
+    # TP Hit / SL Hit / Queue Limit tables omit all three.
     row: dict = {
         "Time (GST)":     ts_str,
         "Alert":          alert_col,
     }
     if is_open_table:
         row["Risk Manager"] = risk_mgr_col
+        row["Est. Liq."]    = est_liq_col
+    row["Symbol"] = s.get("symbol", "")
+    row["Setup"]  = setup_type
+    row["Sector"] = s.get("sector", "Other")
+    if is_open_table:
+        row["PnL $"] = pnl_col
     row.update({
-        "Symbol":         s.get("symbol", ""),
-        "Setup":          setup_type,
-        "Sector":         s.get("sector", "Other"),
         "Signal Entry":   s.get("signal_entry", s.get("entry", "")),
         "Fill $":         s.get("entry", "") if s.get("signal_entry") else "—",
         "TP":             s.get("tp", ""),
@@ -3221,7 +3353,25 @@ _SIG_COL_CFG = {
                           help="Signed % change of current price vs. entry — "
                                "negative = drop, positive = rise. Shown only "
                                "for open trades flagged DL / TL / DL-TL."),
+    "Est. Liq.":      st.column_config.TextColumn(
+                          "💥 Est. Liq.", width="medium",
+                          help="Estimated liquidation price for isolated trades, "
+                               "with % distance from entry in parentheses.\n\n"
+                               "Formula (LONG isolated, approximate): "
+                               "liq ≈ entry × (1 − 1/leverage).\n"
+                               "Distance from entry = -100 / leverage "
+                               "(e.g. 10× → -10%, 20× → -5%).\n\n"
+                               "Cross-margin trades show \"—\" because liquidation "
+                               "depends on account-wide equity, not per-trade info."),
     "Setup":          st.column_config.TextColumn(width="small"),
+    "PnL $":          st.column_config.TextColumn(
+                          "💰 PnL $", width="small",
+                          help="Live unrealized PnL in dollars for open trades.\n\n"
+                               "Formula: (current / entry − 1) × (trade_usdt × leverage).\n"
+                               "Uses the collateral and leverage stored on the signal "
+                               "at entry time — changing global settings later does "
+                               "not affect the PnL of already-open trades.\n\n"
+                               "Only populated for open trades."),
     "Signal Entry":   st.column_config.NumberColumn(format="%.8f",
                           help="Price when the scanner signal fired"),
     "Fill $":         st.column_config.NumberColumn(format="%.8f",
