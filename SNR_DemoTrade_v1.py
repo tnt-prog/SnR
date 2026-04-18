@@ -126,6 +126,9 @@ DEFAULT_CONFIG: dict = {
     "vol_spike_lookback": 20,
     "use_pdz_5m":            True,   # F3 — PDZ (5m)
     "use_pdz_15m":           True,   # F2 — PDZ (15m)
+    "use_ema_cross_15m":     True,   # F10 — 15m EMA crossover (fast > slow)
+    "ema_cross_fast_15m":    12,
+    "ema_cross_slow_15m":    21,
     # ── Auto-trading (OKX Demo / Live) ────────────────────────────────────────
     "trade_enabled":         False,
     "demo_mode":             True,   # True = Demo API, False = Live API
@@ -1576,6 +1579,7 @@ def _reset_filter_counts():
         "f8_sar_5m":        0,
         "f8_sar_15m":       0,
         "f9_vol":           0,   # F9 — Vol Spike
+        "f10_ema_cross":    0,   # F10 — 15m EMA crossover (fast > slow)
         "f_empty_data":     0,   # Stage 2 candle fetch returned empty for a timeframe
         "passed":           0,
         "super_setup":      0,   # subset of passed — 15m Discount instant buys
@@ -1596,6 +1600,7 @@ def _reset_filter_counts():
         "f8_sar_5m_elim_syms":    [],
         "f8_sar_15m_elim_syms":   [],
         "f9_elim_syms":           [],
+        "f10_elim_syms":          [],
         "f_empty_data_syms":      [],
         "passed_syms":            [],
         "super_setup_syms":       [],
@@ -1673,6 +1678,8 @@ def process(sym, cfg: dict):
                     "vol_ratio": "—",
                     "pdz_zone_5m":  "—",
                     "pdz_zone_15m": pdz_zone_15m,
+                    "ema_cross_12_15m": "—",
+                    "ema_cross_21_15m": "—",
                 },
             }
 
@@ -1851,6 +1858,24 @@ def process(sym, cfg: dict):
                     return None
                 vol_ratio = round(vols_15m[-1] / avg_vol, 2) if avg_vol > 0 else None
 
+        # ── F10: 15m EMA Crossover (fast > slow) ─────────────────────────────
+        # Uses 15m candles already fetched in Stage 1 (m15/closes_15m).
+        # Coin passes only when EMA(fast) is strictly greater than EMA(slow).
+        ema_cross_12_15m_val = ema_cross_21_15m_val = None
+        if cfg.get("use_ema_cross_15m", True):
+            _fast_p = max(2, int(cfg.get("ema_cross_fast_15m", 12)))
+            _slow_p = max(_fast_p + 1, int(cfg.get("ema_cross_slow_15m", 21)))
+            ema_fast_15m = calc_ema(closes_15m, _fast_p)
+            ema_slow_15m = calc_ema(closes_15m, _slow_p)
+            if not ema_fast_15m or not ema_slow_15m or \
+                    ema_fast_15m[-1] <= ema_slow_15m[-1]:
+                with _filter_lock:
+                    _filter_counts["f10_ema_cross"] = _filter_counts.get("f10_ema_cross", 0) + 1
+                    _filter_counts["f10_elim_syms"].append(sym)
+                return None
+            ema_cross_12_15m_val = _pround(ema_fast_15m[-1])
+            ema_cross_21_15m_val = _pround(ema_slow_15m[-1])
+
         # ── All filters passed ────────────────────────────────────────────────
         tp      = _pround(entry * (1 + cfg["tp_pct"] / 100))
         _lev_sl = max(1, int(cfg.get("trade_leverage", 10)))
@@ -1880,6 +1905,8 @@ def process(sym, cfg: dict):
             "vol_ratio":    vol_ratio    if cfg.get("use_vol_spike") else "—",
             "pdz_zone_5m":  pdz_zone_5m  if cfg.get("use_pdz_5m",  True) else "—",
             "pdz_zone_15m": pdz_zone_15m if cfg.get("use_pdz_15m", True) else "—",
+            "ema_cross_12_15m": ema_cross_12_15m_val if cfg.get("use_ema_cross_15m", True) else "—",
+            "ema_cross_21_15m": ema_cross_21_15m_val if cfg.get("use_ema_cross_15m", True) else "—",
         }
 
         return {
@@ -2739,6 +2766,31 @@ with st.sidebar:
                                          disabled=not new_use_vol_spike)
     st.divider()
 
+    # ── F10: 15m EMA Crossover ───────────────────────────────────────────────
+    st.markdown("**📉 F10 — 15m EMA Crossover** (fast > slow)")
+    new_use_ema_cross_15m = st.checkbox(
+        "Enable F10 — 15m EMA Crossover",
+        value=bool(_snap_cfg.get("use_ema_cross_15m", True)), key="cfg_use_ema_cross_15m",
+        help=(
+            "F10 — 15m EMA Crossover Filter\n\n"
+            "On the 15m timeframe, the FAST EMA must be ABOVE the SLOW EMA.\n"
+            "This confirms short-to-medium term bullish alignment before entry.\n\n"
+            "Default: fast=12, slow=21 (both configurable below).\n"
+            "Uses 15m candles already fetched — no extra API call."
+        ))
+    ex1, ex2 = st.columns(2)
+    new_ema_cross_fast_15m = ex1.number_input(
+        "Fast EMA (15m)", min_value=2, max_value=500, step=1,
+        value=int(_snap_cfg.get("ema_cross_fast_15m", 12)),
+        key="cfg_ema_cross_fast_15m", disabled=not new_use_ema_cross_15m)
+    new_ema_cross_slow_15m = ex2.number_input(
+        "Slow EMA (15m)", min_value=2, max_value=500, step=1,
+        value=int(_snap_cfg.get("ema_cross_slow_15m", 21)),
+        key="cfg_ema_cross_slow_15m", disabled=not new_use_ema_cross_15m)
+    if new_use_ema_cross_15m:
+        st.caption(f"✅ EMA{new_ema_cross_fast_15m} > EMA{new_ema_cross_slow_15m} on 15m required")
+    st.divider()
+
     st.markdown("**⏱ Execution**")
     c5, c6 = st.columns(2)
     new_loop = c5.number_input("Loop (min)", min_value=1, max_value=60, step=1, value=int(_snap_cfg["loop_minutes"]),    key="cfg_loop")
@@ -2853,6 +2905,9 @@ with st.sidebar:
             "vol_spike_mult": float(new_vol_mult), "vol_spike_lookback": int(new_vol_lookback),
             "use_pdz_5m": bool(new_use_pdz_5m),
             "use_pdz_15m": bool(new_use_pdz_15m),
+            "use_ema_cross_15m":  bool(new_use_ema_cross_15m),
+            "ema_cross_fast_15m": int(new_ema_cross_fast_15m),
+            "ema_cross_slow_15m": int(new_ema_cross_slow_15m),
             "watchlist": new_wl,
             # ── Auto-trading ─────────────────────────────────────────────────
             "trade_enabled":     bool(new_trade_enabled),
@@ -2960,6 +3015,8 @@ _sar_tfs  = [tf for tf, k in [("3m","use_sar_3m"), ("5m","use_sar_5m"), ("15m","
 if _sar_tfs:  badges.append(f"🪂 F8 — SAR {' · '.join(_sar_tfs)}")
 if _snap_cfg.get("use_vol_spike"): badges.append(
     f"📦 F9 — Vol ≥{_snap_cfg.get('vol_spike_mult',2.0)}× / {_snap_cfg.get('vol_spike_lookback',20)} 15m")
+if _snap_cfg.get("use_ema_cross_15m", True):
+    badges.append(f"📉 F10 — EMA{_snap_cfg.get('ema_cross_fast_15m',12)}>EMA{_snap_cfg.get('ema_cross_slow_15m',21)} 15m")
 st.markdown("**Active Filters:**")
 st.caption("  |  ".join(badges) if badges else "No advanced filters enabled")
 st.divider()
@@ -2989,8 +3046,15 @@ def _fmt_secs(secs: int) -> str:
         h, rem = divmod(secs, 3600); return f"{h}h {rem // 60}m"
     d, rem = divmod(secs, 86400);   return f"{d}d {rem // 3600}h"
 
-def _build_signal_row(s: dict) -> dict:
-    """Convert one signal dict into a table row dict (all columns)."""
+def _build_signal_row(s: dict, is_open_table: bool = False) -> dict:
+    """Convert one signal dict into a table row dict (all columns).
+
+    When `is_open_table` is True, an extra "Risk Manager" column is inserted
+    as the 3rd column. It shows the signed % change of current price vs. entry
+    (negative = drop, positive = rise) — but only for rows that already carry
+    a DL / TL / DL-TL alert. Other rows (including all TP/SL/Queue rows) show
+    "—" or have the column omitted entirely.
+    """
     status      = s.get("status", "open")
     status_icon = {
         "open":        "🔵 Open",
@@ -3014,6 +3078,21 @@ def _build_signal_row(s: dict) -> dict:
         elif _dl:          alert_col = "🔴 DL"
         elif _tl:          alert_col = "🔴 TL"
 
+    # Risk Manager column — signed % change from entry, populated only when
+    # there is an active DL / TL / DL-TL alert on an open trade.
+    risk_mgr_col = "—"
+    if status == "open" and alert_col:
+        _entry_rm = float(s.get("entry", 0) or 0)
+        _pa_pct   = s.get("price_alert_pct")
+        if _pa_pct is not None and _entry_rm > 0:
+            # price_alert_pct = (entry - latest) / entry * 100 (positive = drop)
+            # Flip sign: negative = drop, positive = rise — reads intuitively.
+            try:
+                _change = -float(_pa_pct)
+                risk_mgr_col = f"{_change:+.2f}%"
+            except (TypeError, ValueError):
+                risk_mgr_col = "—"
+
     ts_str    = fmt_dubai(s.get("timestamp", ""))
     close_str = fmt_dubai(s["close_time"]) if s.get("close_time") else "—"
     crit      = s.get("criteria", {})
@@ -3033,7 +3112,9 @@ def _build_signal_row(s: dict) -> dict:
         f"• SAR 15m   : {_cv(crit.get('sar_15m'))}\n"
         f"• Vol ×avg  : {_cv(crit.get('vol_ratio'))}\n"
         f"• PDZ 5m    : {pdz_5m_val}\n"
-        f"• PDZ 15m   : {pdz_15m_val}"
+        f"• PDZ 15m   : {pdz_15m_val}\n"
+        f"• EMA12 15m : {_cv(crit.get('ema_cross_12_15m'))}\n"
+        f"• EMA21 15m : {_cv(crit.get('ema_cross_21_15m'))}"
     ) if crit else "—"
 
     max_lev   = s.get("max_lev", get_max_leverage(s.get("symbol", "")))
@@ -3098,9 +3179,15 @@ def _build_signal_row(s: dict) -> dict:
         except Exception:
             pass
 
-    return {
+    # Build row dict in order — Risk Manager is inserted as the 3rd column
+    # ONLY for the Open Signals table. Other tables (TP/SL/Queue) omit it entirely.
+    row: dict = {
         "Time (GST)":     ts_str,
         "Alert":          alert_col,
+    }
+    if is_open_table:
+        row["Risk Manager"] = risk_mgr_col
+    row.update({
         "Symbol":         s.get("symbol", ""),
         "Setup":          setup_type,
         "Sector":         s.get("sector", "Other"),
@@ -3121,13 +3208,19 @@ def _build_signal_row(s: dict) -> dict:
         "Algo ID":        algo_id_str,
         "Entry Criteria": crit_str,
         "⚠️ SL Reason":  sl_reason,
-    }
+    })
+    return row
 
 # Shared column_config used by all four tables
 _SIG_COL_CFG = {
     "Alert":          st.column_config.TextColumn(
                           "🚨 Alert", width="small",
                           help="🔴 DL = price ≥3% below entry  |  🔴 TL = open ≥2 hours"),
+    "Risk Manager":   st.column_config.TextColumn(
+                          "⚠️ Risk Manager", width="small",
+                          help="Signed % change of current price vs. entry — "
+                               "negative = drop, positive = rise. Shown only "
+                               "for open trades flagged DL / TL / DL-TL."),
     "Setup":          st.column_config.TextColumn(width="small"),
     "Signal Entry":   st.column_config.NumberColumn(format="%.8f",
                           help="Price when the scanner signal fired"),
@@ -3154,8 +3247,8 @@ _SIG_COL_CFG = {
 }
 
 def _render_sig_table(sig_list: list, header: str, empty_msg: str,
-                      auto_height: bool = False):
-    rows = [_build_signal_row(s) for s in sig_list]
+                      auto_height: bool = False, is_open_table: bool = False):
+    rows = [_build_signal_row(s, is_open_table=is_open_table) for s in sig_list]
     st.markdown(f"### {header} ({len(rows)})")
     if rows:
         if auto_height:
@@ -3182,7 +3275,7 @@ _queue_sigs = [s for s in filtered_sorted if s.get("status") == "queue_limit"]
 
 # ── Table 1: Open Signals ───────────────────────────────────────────────────────
 _render_sig_table(_open_sigs,  "🔵 Open Signals",  "No open signals right now.",
-                  auto_height=True)
+                  auto_height=True, is_open_table=True)
 st.divider()
 
 # ── Table 2: TP Hit ─────────────────────────────────────────────────────────────
@@ -3541,7 +3634,8 @@ if fc.get("total_watchlist", 0) > 0:
         after_f8_sar_5m   = after_f8_sar_3m   - fc.get("f8_sar_5m",  0)
         after_f8_sar_15m  = after_f8_sar_5m   - fc.get("f8_sar_15m", 0)
         after_f9           = after_f8_sar_15m  - fc.get("f9_vol",       0)
-        after_empty        = after_f9          - fc.get("f_empty_data", 0)
+        after_f10          = after_f9          - fc.get("f10_ema_cross", 0)
+        after_empty        = after_f10         - fc.get("f_empty_data", 0)
 
         # Use the config that was ACTIVE during the last scan for labels
         sc = fc.get("scan_cfg") or _snap_cfg
@@ -3563,6 +3657,8 @@ if fc.get("total_watchlist", 0) > 0:
         ema_lbl = ("F6 — EMA (" + (" · ".join(ema_parts)) + ")") if ema_parts else "F6 — EMA (off)"
         vol_lbl = (f"F9 — Vol \u2265{sc.get('vol_spike_mult',2.0)}\xd7 / {sc.get('vol_spike_lookback',20)} 15m"
                    if sc.get("use_vol_spike") else "F9 — Vol (off)")
+        ema_cross_lbl = (f"F10 — EMA{sc.get('ema_cross_fast_15m',12)}>EMA{sc.get('ema_cross_slow_15m',21)} 15m"
+                          if sc.get("use_ema_cross_15m", True) else "F10 — EMA Cross (off)")
 
         # Build funnel rows — only include MACD/SAR timeframes that are enabled
         funnel_data = [
@@ -3598,6 +3694,7 @@ if fc.get("total_watchlist", 0) > 0:
                 _prev_sar = _after
 
         funnel_data.append((f"After {vol_lbl}",           after_f9))
+        funnel_data.append((f"After {ema_cross_lbl}",     after_f10))
         funnel_data.append(("After \u26a0\ufe0f Empty Candle Drop", after_empty))
 
         # Colour palette — generate enough colours for variable row count
@@ -3648,6 +3745,7 @@ if fc.get("total_watchlist", 0) > 0:
         _f8e_5m  = set(fc.get("f8_sar_5m_elim_syms",  []))
         _f8e_15m = set(fc.get("f8_sar_15m_elim_syms", []))
         _f9e    = set(fc.get("f9_elim_syms",      []))
+        _f10e   = set(fc.get("f10_elim_syms",     []))
         _fempty = set(fc.get("f_empty_data_syms", []))
 
         _after_f2        = _chk          - _f2e
@@ -3664,8 +3762,9 @@ if fc.get("total_watchlist", 0) > 0:
         _after_f8_sar_5m   = _after_f8_sar_3m   - (_f8e_5m  if sc.get("use_sar_5m",  True) else set())
         _after_f8_sar_15m  = _after_f8_sar_5m   - (_f8e_15m if sc.get("use_sar_15m", True) else set())
         _after_f9          = _after_f8_sar_15m  - _f9e
+        _after_f10         = _after_f9          - (_f10e if sc.get("use_ema_cross_15m", True) else set())
         _fempty_syms = {s.split("(")[0] for s in _fempty}
-        _after_empty = _after_f9 - _fempty_syms
+        _after_empty = _after_f10 - _fempty_syms
 
         _process_err_count = max(0, fc.get("errors", 0))
         _new_sig_s    = set(fc.get("new_signal_syms",         []))
@@ -3710,6 +3809,7 @@ if fc.get("total_watchlist", 0) > 0:
         # Fixed closing rows
         stage_rows += [
             (f"After {vol_lbl}",               len(_after_f9),        _coin_str(_after_f9)),
+            (f"After {ema_cross_lbl}",         len(_after_f10),       _coin_str(_after_f10)),
             ("⚠️ Dropped — Empty Candle Data", len(_fempty),          ", ".join(sorted(_fempty)) if _fempty else "—"),
             ("💥 Dropped — Process Error",     _process_err_count,    "See API Error Log below ↓"),
             ("✅ Returned Signal",             len(_returned_syms),   _coin_str(_returned_syms)),
