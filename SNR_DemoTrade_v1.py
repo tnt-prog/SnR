@@ -138,6 +138,15 @@ DEFAULT_CONFIG: dict = {
                                      # trades — new signals during overflow are
                                      # logged as queue_limit until natural TP/SL
                                      # closures bring the count down.
+    # ── Super Setup cap (max concurrent Super trades) ─────────────────────────
+    "max_super_trades":      5,      # Hard cap on concurrent open Super trades.
+                                     # When cap is reached, Super-eligible coins
+                                     # fall through to the normal F3–F10 pipeline
+                                     # and open as regular trades if they pass.
+    # ── SL cooldown (per-coin blackout after SL hit) ──────────────────────────
+    "sl_cooldown_hours":     24,     # Hours to skip a coin after an SL hit.
+                                     # Applies UNIVERSALLY — even to Super Setups.
+                                     # Separate from TP cooldown (cooldown_minutes).
     # ── Auto-trading (OKX Demo / Live) ────────────────────────────────────────
     "trade_enabled":         False,
     "demo_mode":             True,   # True = Demo API, False = Live API
@@ -1597,7 +1606,9 @@ def _reset_filter_counts():
         "f10_ema_cross":    0,   # F10 — 15m EMA crossover (fast > slow)
         "f_empty_data":     0,   # Stage 2 candle fetch returned empty for a timeframe
         "passed":           0,
-        "super_setup":      0,   # subset of passed — 15m Discount instant buys
+        "super_setup":      0,   # subset of passed — 15m+1h Discount instant buys
+        "super_cap_demoted":0,   # Super-eligible coins demoted to F3-F10 pipeline
+        "f_sl_cooldown":    0,   # coins blocked by 24h SL blackout this cycle
         "errors":           0,
         "scan_cfg":         {},
         # ── per-stage symbol lists ─────────────────────────────────────────────
@@ -1619,6 +1630,9 @@ def _reset_filter_counts():
         "f_empty_data_syms":      [],
         "passed_syms":            [],
         "super_setup_syms":       [],
+        "super_cap_demoted_syms": [],
+        "f_sl_cooldown_syms":     [],
+        "blocked_by_sl_cooldown_syms": [],
     }
     with _filter_lock:
         _filter_counts.clear()
@@ -1628,29 +1642,52 @@ def _reset_filter_counts():
 # ─────────────────────────────────────────────────────────────────────────────
 # Per-coin processing
 # ─────────────────────────────────────────────────────────────────────────────
-def process(sym, cfg: dict):
+def process(sym, cfg: dict, super_counter: dict = None, super_lock=None):
+    """Per-coin pipeline.
+
+    super_counter / super_lock — shared atomic slot tracker for Super-cap
+    coordination across concurrent scan threads. When the Super slot count
+    reaches zero, any Super-eligible coin falls through to the F3–F10
+    pipeline and opens as a normal (non-super) trade if it passes.
+    If these args are None (e.g. unit test, standalone call), behave as if
+    unlimited Super slots are available.
+    """
     try:
         with _filter_lock:
             _filter_counts["checked"] = _filter_counts.get("checked", 0) + 1
             _filter_counts["checked_syms"].append(sym)
 
-        # ── Stage 1: Quick parallel fetch — 5m (entry/RSI) + 15m (PDZ) ───────
-        with ThreadPoolExecutor(max_workers=2) as pool:
+        # ── Stage 1: Quick parallel fetch — 5m + 15m (PDZ) + 1h (PDZ+RSI) ────
+        # 1h is fetched here (not Stage 2) because Super Setup requires 1h
+        # to be in Discount zone — without 1h we can't decide Super vs normal.
+        # The same 1h candles are reused later for F5 (1h RSI) so no extra
+        # API call is introduced by moving the fetch earlier.
+        with ThreadPoolExecutor(max_workers=3) as pool:
             f_5m_q  = pool.submit(get_klines, sym, "5m",  300)
             f_15m_q = pool.submit(get_klines, sym, "15m", 300)
-            m5_quick  = f_5m_q.result()[:-1]
-            m15_quick = f_15m_q.result()[:-1]
+            f_1h_q  = pool.submit(get_klines, sym, "1h",  60)
+            m5_quick   = f_5m_q.result()[:-1]
+            m15_quick  = f_15m_q.result()[:-1]
+            m1h_quick  = f_1h_q.result()[:-1]
 
         closes_5m_q = [c["close"] for c in m5_quick]
         entry_q     = _pround(m5_quick[-1]["close"])
 
-        # ── F2: PDZ 15m — checked FIRST (Super Setup possible) ───────────────
-        pdz_zone_15m   = "—"
-        is_super_setup = False
+        # ── F2: PDZ 15m — Super Setup requires 15m Discount ──────────────────
+        pdz_zone_15m       = "—"
+        pdz_zone_1h        = "—"
+        is_super_eligible  = False
         if cfg.get("use_pdz_15m", True):
             pdz_pass_15m, pdz_zone_15m = calc_pdz_zone(m15_quick, entry_q)
             if pdz_zone_15m == "Discount":
-                is_super_setup = True          # ⭐ skip all remaining filters
+                # 15m is Discount — now we need 1h also in Discount for Super
+                # (if 1h fetch failed, can't verify → treat as not-super, fall
+                # through to F3-F10 rather than blocking entry).
+                if m1h_quick:
+                    _, pdz_zone_1h = calc_pdz_zone(m1h_quick, entry_q)
+                if pdz_zone_1h == "Discount":
+                    is_super_eligible = True      # ⭐ BOTH 15m and 1h Discount
+                # else: only 15m Discount (not 1h) → fall through to F3-F10
             elif not pdz_pass_15m:
                 with _filter_lock:
                     _filter_counts["f2_pdz15m"] = _filter_counts.get("f2_pdz15m", 0) + 1
@@ -1658,45 +1695,61 @@ def process(sym, cfg: dict):
                 return None
             # else Band A/B passes — continue to F3
 
-        # ── SUPER SETUP — 15m Discount → instant trade, no further checks ─────
-        if is_super_setup:
-            tp      = _pround(entry_q * (1 + cfg["tp_pct"] / 100))
-            _ss_lev = max(1, int(cfg.get("trade_leverage", 10)))
-            sl      = (_pround(entry_q * (1 - 1 / _ss_lev))
-                       if cfg.get("trade_margin_mode", "isolated") == "isolated"
-                       else _pround(entry_q * (1 - cfg["sl_pct"] / 100)))
-            sec     = SECTORS.get(sym, "Other")
-            max_lev = get_max_leverage(sym)
+        # ── SUPER SETUP — BOTH 15m AND 1h Discount → instant trade ───────────
+        # Atomic slot check: only take the Super shortcut if slots remain.
+        # If the cap is exhausted, fall through to F3-F10 and open as normal.
+        if is_super_eligible:
+            _take_super_slot = True
+            if super_counter is not None and super_lock is not None:
+                with super_lock:
+                    if super_counter.get("slots", 0) > 0:
+                        super_counter["slots"] -= 1
+                    else:
+                        _take_super_slot = False
+            if _take_super_slot:
+                tp      = _pround(entry_q * (1 + cfg["tp_pct"] / 100))
+                _ss_lev = max(1, int(cfg.get("trade_leverage", 10)))
+                sl      = (_pround(entry_q * (1 - 1 / _ss_lev))
+                           if cfg.get("trade_margin_mode", "isolated") == "isolated"
+                           else _pround(entry_q * (1 - cfg["sl_pct"] / 100)))
+                sec     = SECTORS.get(sym, "Other")
+                max_lev = get_max_leverage(sym)
+                with _filter_lock:
+                    _filter_counts["passed"]           = _filter_counts.get("passed", 0) + 1
+                    _filter_counts["super_setup"]      = _filter_counts.get("super_setup", 0) + 1
+                    _filter_counts["passed_syms"].append(sym)
+                    _filter_counts["super_setup_syms"].append(sym)
+                return {
+                    "id":             str(uuid.uuid4())[:8],
+                    "timestamp":      dubai_now().isoformat(),
+                    "symbol":         sym,
+                    "entry":          entry_q,
+                    "tp":             tp,
+                    "sl":             sl,
+                    "sector":         sec,
+                    "status":         "open",
+                    "close_price":    None,
+                    "close_time":     None,
+                    "max_lev":        max_lev,
+                    "is_super_setup": True,
+                    "criteria": {
+                        "rsi_5m": "—", "rsi_1h": "—",
+                        "ema_3m": "—", "ema_5m": "—", "ema_15m": "—",
+                        "macd_3m": "—", "macd_5m": "—", "macd_15m": "—",
+                        "sar_3m": "—", "sar_5m": "—", "sar_15m": "—",
+                        "vol_ratio": "—",
+                        "pdz_zone_5m":  "—",
+                        "pdz_zone_15m": pdz_zone_15m,
+                        "pdz_zone_1h":  pdz_zone_1h,
+                        "ema_cross_12_15m": "—",
+                        "ema_cross_21_15m": "—",
+                    },
+                }
+            # else: super cap exhausted — demote and fall through to F3-F10
             with _filter_lock:
-                _filter_counts["passed"]           = _filter_counts.get("passed", 0) + 1
-                _filter_counts["super_setup"]      = _filter_counts.get("super_setup", 0) + 1
-                _filter_counts["passed_syms"].append(sym)
-                _filter_counts["super_setup_syms"].append(sym)
-            return {
-                "id":             str(uuid.uuid4())[:8],
-                "timestamp":      dubai_now().isoformat(),
-                "symbol":         sym,
-                "entry":          entry_q,
-                "tp":             tp,
-                "sl":             sl,
-                "sector":         sec,
-                "status":         "open",
-                "close_price":    None,
-                "close_time":     None,
-                "max_lev":        max_lev,
-                "is_super_setup": True,
-                "criteria": {
-                    "rsi_5m": "—", "rsi_1h": "—",
-                    "ema_3m": "—", "ema_5m": "—", "ema_15m": "—",
-                    "macd_3m": "—", "macd_5m": "—", "macd_15m": "—",
-                    "sar_3m": "—", "sar_5m": "—", "sar_15m": "—",
-                    "vol_ratio": "—",
-                    "pdz_zone_5m":  "—",
-                    "pdz_zone_15m": pdz_zone_15m,
-                    "ema_cross_12_15m": "—",
-                    "ema_cross_21_15m": "—",
-                },
-            }
+                _filter_counts["super_cap_demoted"] = (
+                    _filter_counts.get("super_cap_demoted", 0) + 1)
+                _filter_counts["super_cap_demoted_syms"].append(sym)
 
         # ── F3: PDZ 5m ────────────────────────────────────────────────────────
         pdz_zone_5m = "—"
@@ -1716,27 +1769,24 @@ def process(sym, cfg: dict):
                 _filter_counts["f4_elim_syms"].append(sym)
             return None
 
-        # ── Stage 2: Fetch ONLY new timeframes — 1h and 3m ──────────────────
-        # 5m and 15m are already in m5_quick / m15_quick from Stage 1 (300 candles
-        # each — more than enough for EMA/MACD/SAR which need ~50-210 candles).
-        # Re-fetching them was the biggest source of duplicate API calls and the
-        # main driver of OKX 429 rate-limit hits → 30-second sleeps → 300s scan time.
+        # ── Stage 2: Fetch ONLY new timeframes — 3m ──────────────────────────
+        # 5m, 15m, and 1h are already fetched in Stage 1 (m5_quick, m15_quick,
+        # m1h_quick). 1h was moved to Stage 1 so Super Setup can verify the
+        # 1h Discount requirement before committing. Here we reuse that 1h
+        # data for F5 (1h RSI) — no re-fetch needed.
         #
-        # Only 1h (RSI) and 3m (EMA/MACD/SAR) are genuinely new here.
-        # This cuts Stage 2 from 4 API calls per coin → 2 API calls per coin.
+        # Only 3m (EMA/MACD/SAR) is genuinely new at this stage.
+        # This cuts Stage 2 from 2 API calls per coin → 1 API call per coin.
         _need_3m_detail = (cfg.get("use_ema_3m") or cfg.get("use_macd_3m")
                            or cfg.get("use_sar_3m"))
         candle_limit_3m = 80 if _need_3m_detail else 30
 
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            f_1h = pool.submit(get_klines, sym, "1h", 19)
-            f_3m = pool.submit(get_klines, sym, "3m", candle_limit_3m)
-            m1h_candles = f_1h.result()[:-1]
-            m3_candles  = f_3m.result()[:-1]
+        m3_candles = get_klines(sym, "3m", candle_limit_3m)[:-1]
 
-        # Reuse Stage 1 data for 5m and 15m — no re-fetch needed
-        m5  = m5_quick
-        m15 = m15_quick
+        # Reuse Stage 1 data for 5m / 15m / 1h — no re-fetch needed
+        m5          = m5_quick
+        m15         = m15_quick
+        m1h_candles = m1h_quick
 
         # ── Guard: check all required timeframes have data ────────────────────
         _missing_tf = [tf for tf, bars in (("5m", m5), ("15m", m15),
@@ -1920,6 +1970,7 @@ def process(sym, cfg: dict):
             "vol_ratio":    vol_ratio    if cfg.get("use_vol_spike") else "—",
             "pdz_zone_5m":  pdz_zone_5m  if cfg.get("use_pdz_5m",  True) else "—",
             "pdz_zone_15m": pdz_zone_15m if cfg.get("use_pdz_15m", True) else "—",
+            "pdz_zone_1h":  pdz_zone_1h  if cfg.get("use_pdz_15m", True) else "—",
             "ema_cross_12_15m": ema_cross_12_15m_val if cfg.get("use_ema_cross_15m", True) else "—",
             "ema_cross_21_15m": ema_cross_21_15m_val if cfg.get("use_ema_cross_15m", True) else "—",
         }
@@ -1946,7 +1997,14 @@ def process(sym, cfg: dict):
         _append_error("scan", str(_proc_exc), symbol=sym)
         return "error"
 
-def scan(cfg: dict):
+def scan(cfg: dict, super_slots_remaining: int = None):
+    """Full watchlist scan. Returns (sorted_results, error_count).
+
+    super_slots_remaining — number of additional Super Setup trades this cycle
+    may open before the cap (cfg['max_super_trades']) is reached. Computed by
+    the caller (bg loop) by subtracting currently-open Super trades from the
+    configured cap. If None, defaults to the full cap (fresh state).
+    """
     _reset_filter_counts()
     with _filter_lock:                          # store config used for this scan
         _filter_counts["scan_cfg"] = dict(cfg)
@@ -1970,11 +2028,22 @@ def scan(cfg: dict):
           f"{len(pre_filtered)} after bulk pre-filter "
           f"({'disabled' if not cfg.get('use_pre_filter', True) else _filter_counts['pre_filtered_out']} removed)")
 
+    # ── Super Setup cap coordination ─────────────────────────────────────────
+    # Shared atomic counter + lock — used by process() to decide whether a
+    # Super-eligible coin takes the shortcut or falls through to F3-F10.
+    # When slots hit 0, any further Super-eligible coin is demoted and must
+    # qualify through the normal pipeline to open as a regular trade.
+    if super_slots_remaining is None:
+        super_slots_remaining = max(0, int(cfg.get("max_super_trades", 5)))
+    super_counter = {"slots": max(0, int(super_slots_remaining))}
+    super_lock    = threading.Lock()
+
     results = []
     # 10 outer workers — semaphore(5) caps actual concurrent HTTP requests to 5
     # so more workers just means less idle time between coin batches, not more API pressure.
     with ThreadPoolExecutor(max_workers=10) as exe:
-        futs = [exe.submit(process, s, cfg) for s in pre_filtered]
+        futs = [exe.submit(process, s, cfg, super_counter, super_lock)
+                for s in pre_filtered]
         for f in as_completed(futs):
             r = f.result()
             if r and r != "error":
@@ -2086,14 +2155,41 @@ def _bg_loop():
                 _b._bsc_sl_paused = True
                 continue   # halt this cycle; UI will show the resume banner
 
-            new_sigs, errors = scan(cfg)
-            cutoff = dubai_now() - timedelta(minutes=cfg["cooldown_minutes"])
+            # ── Super Setup cap: count currently-open Super trades ───────────
+            # and compute how many additional Super slots are available this cycle.
             with _log_lock:
-                # Cooldown measured from close_time of last closed trade (TP/SL hit)
-                cooled = {s["symbol"] for s in _b._bsc_log["signals"]
-                          if s.get("close_time")
-                          and s.get("status") in ("tp_hit", "sl_hit")
-                          and datetime.fromisoformat(s["close_time"].replace("Z","+00:00")) >= cutoff}
+                _current_supers = sum(
+                    1 for s in _b._bsc_log["signals"]
+                    if s.get("status") == "open" and s.get("is_super_setup")
+                )
+            _super_cap        = max(0, int(cfg.get("max_super_trades", 5)))
+            _super_slots_left = max(0, _super_cap - _current_supers)
+
+            new_sigs, errors = scan(cfg, super_slots_remaining=_super_slots_left)
+
+            # ── Cooldown windows (TP — minutes; SL — hours, universal blackout) ─
+            now_dubai   = dubai_now()
+            tp_cutoff   = now_dubai - timedelta(minutes=int(cfg["cooldown_minutes"]))
+            sl_cd_hours = max(1, int(cfg.get("sl_cooldown_hours", 24)))
+            sl_cutoff   = now_dubai - timedelta(hours=sl_cd_hours)
+
+            with _log_lock:
+                # TP cooldown — short (minutes), blocks re-entry after a TP close
+                cooled_tp = {s["symbol"] for s in _b._bsc_log["signals"]
+                             if s.get("close_time")
+                             and s.get("status") == "tp_hit"
+                             and datetime.fromisoformat(
+                                 s["close_time"].replace("Z","+00:00")) >= tp_cutoff}
+                # SL cooldown — long (hours, default 24), applies UNIVERSALLY
+                # including to Super Setups. A stopped-out coin is blacklisted
+                # for the full sl_cooldown_hours window regardless of what new
+                # setup it might qualify for.
+                cooled_sl = {s["symbol"] for s in _b._bsc_log["signals"]
+                             if s.get("close_time")
+                             and s.get("status") == "sl_hit"
+                             and datetime.fromisoformat(
+                                 s["close_time"].replace("Z","+00:00")) >= sl_cutoff}
+                cooled = cooled_tp | cooled_sl
                 active = {s["symbol"] for s in _b._bsc_log["signals"] if s["status"]=="open"}
                 # ── Queue-limit check ─────────────────────────────────────────
                 # Count only genuinely OPEN trades (queue_limit entries are NOT
@@ -2106,8 +2202,15 @@ def _bg_loop():
                 open_trade_count = len(active)
                 MAX_OPEN_TRADES  = max(1, int(cfg.get("max_open_trades", 15)))
                 _new_sig_syms      = [s["symbol"] for s in new_sigs]
-                _blocked_active    = sorted(active  & set(_new_sig_syms))
-                _blocked_cooldown  = sorted(cooled  & set(_new_sig_syms))
+                _blocked_active    = sorted(active    & set(_new_sig_syms))
+                _blocked_cooldown  = sorted(cooled_tp & set(_new_sig_syms))
+                _blocked_sl_cooldown = sorted(cooled_sl & set(_new_sig_syms))
+                # Record the per-cycle SL-cooldown block count for the funnel.
+                # (process() counter `f_sl_cooldown` is populated here — the
+                # scanner's filter chain doesn't see the trade history; the
+                # blackout is enforced at placement time in _bg_loop.)
+                _filter_counts["f_sl_cooldown"] = len(_blocked_sl_cooldown)
+                _filter_counts["f_sl_cooldown_syms"] = list(_blocked_sl_cooldown)
                 skip         = cooled | active
                 _added_syms  = []
                 _queued_syms = []           # symbols logged as queue_limit this cycle
@@ -2139,6 +2242,7 @@ def _bg_loop():
                 _filter_counts["queued_syms"]             = _queued_syms
                 _filter_counts["blocked_by_active_syms"]  = _blocked_active
                 _filter_counts["blocked_by_cooldown_syms"]= _blocked_cooldown
+                _filter_counts["blocked_by_sl_cooldown_syms"] = _blocked_sl_cooldown
                 elapsed = time.time() - t0
                 _b._bsc_log["health"].update(
                     total_cycles         = _b._bsc_log["health"].get("total_cycles",0)+1,
@@ -2824,7 +2928,8 @@ with st.sidebar:
 
     # ── Queue Size (max concurrent open trades) ──────────────────────────────
     st.markdown("**📊 Queue Size** (max concurrent open trades)")
-    new_max_open_trades = st.number_input(
+    qs1, qs2 = st.columns(2)
+    new_max_open_trades = qs1.number_input(
         "Max Open Trades", min_value=1, max_value=50, step=1,
         value=int(_snap_cfg.get("max_open_trades", 15)),
         key="cfg_max_open_trades",
@@ -2838,13 +2943,66 @@ with st.sidebar:
             "open count, overflow signals route to queue_limit until natural "
             "TP/SL closures bring the count down to the new cap."
         ))
-    st.caption(f"🔒 Current cap: {int(new_max_open_trades)} open trade(s)")
+    new_max_super_trades = qs2.number_input(
+        "Max Super Trades", min_value=1, max_value=20, step=1,
+        value=int(_snap_cfg.get("max_super_trades", 5)),
+        key="cfg_max_super_trades",
+        help=(
+            "Hard cap on the number of concurrent open **Super Setup** trades "
+            "(trades that bypass the F3–F10 filter chain because BOTH 15m and "
+            "1h are in Discount zone).\n\n"
+            "When this cap is reached, any new Super-eligible coin is NOT "
+            "skipped — it falls through to the normal F3–F10 pipeline and is "
+            "opened as a regular (non-super) trade if it passes all remaining "
+            "filters. If it fails any filter, it is rejected like any other "
+            "coin.\n\n"
+            "This cap is independent of 'Max Open Trades' — Super trades still "
+            "count toward that overall queue limit."
+        ))
+    st.caption(
+        f"🔒 Open cap: {int(new_max_open_trades)} total · "
+        f"⭐ Super cap: {int(new_max_super_trades)}"
+    )
     st.divider()
 
     st.markdown("**⏱ Execution**")
     c5, c6 = st.columns(2)
-    new_loop = c5.number_input("Loop (min)", min_value=1, max_value=60, step=1, value=int(_snap_cfg["loop_minutes"]),    key="cfg_loop")
-    new_cool = c6.number_input("Cooldown (min)", min_value=1, max_value=120, step=1, value=int(_snap_cfg["cooldown_minutes"]), key="cfg_cool")
+    new_loop = c5.number_input(
+        "Loop (min)", min_value=1, max_value=60, step=1,
+        value=int(_snap_cfg["loop_minutes"]), key="cfg_loop",
+        help=(
+            "How often the scanner runs a full watchlist cycle.\n\n"
+            "Every N minutes the scanner will:\n"
+            "  1. Update all open signals (check TP/SL hits)\n"
+            "  2. Re-scan the entire watchlist for new setups\n"
+            "  3. Place orders for any passing signals\n\n"
+            "Lower = more responsive but more API load. "
+            "Higher = gentler on OKX rate limits."
+        ))
+    new_cool = c6.number_input(
+        "Cooldown (TP, min)", min_value=1, max_value=120, step=1,
+        value=int(_snap_cfg["cooldown_minutes"]), key="cfg_cool",
+        help=(
+            "After a TP or SL close, skip this coin for N minutes before "
+            "allowing re-entry.\n\n"
+            "⚠️ Note: This is the **short TP cooldown**. SL losses have a "
+            "separate, longer cooldown ('SL Cooldown (hrs)') so a freshly "
+            "stopped-out coin is not re-entered too quickly."
+        ))
+    # ── SL-specific cooldown (per-coin blackout after SL hit) ────────────────
+    new_sl_cooldown_hours = st.number_input(
+        "SL Cooldown (hrs)", min_value=1, max_value=720, step=1,
+        value=int(_snap_cfg.get("sl_cooldown_hours", 24)),
+        key="cfg_sl_cooldown_hours",
+        help=(
+            "After an SL hit, block the same coin from re-entry for N hours.\n\n"
+            "Default: 24 hours.\n\n"
+            "⚠️ Applies **universally** — even to Super Setups. A coin that "
+            "just lost on SL is blacklisted for this entire window regardless "
+            "of how good the new setup looks.\n\n"
+            "This is separate from the short TP cooldown (Cooldown (TP, min)) "
+            "and only triggers on SL closes, not TP closes."
+        ))
     st.divider()
 
     st.markdown("**📋 Watchlist** (one symbol per line)")
@@ -2959,6 +3117,8 @@ with st.sidebar:
             "ema_cross_fast_15m": int(new_ema_cross_fast_15m),
             "ema_cross_slow_15m": int(new_ema_cross_slow_15m),
             "max_open_trades":    max(1, int(new_max_open_trades)),
+            "max_super_trades":   max(1, int(new_max_super_trades)),
+            "sl_cooldown_hours":  max(1, int(new_sl_cooldown_hours)),
             "watchlist": new_wl,
             # ── Auto-trading ─────────────────────────────────────────────────
             "trade_enabled":     bool(new_trade_enabled),
@@ -3080,6 +3240,24 @@ elif open_count > 0:
     _slots_left = _max_open_cap - open_count
     _queue_indicator += f"  ({_slots_left} slot{'s' if _slots_left != 1 else ''} free)"
 st.markdown(_queue_indicator)
+
+# ── Super Setup cap indicator (current Super trades / max) ─────────────────
+_max_super_cap = max(0, int(_snap_cfg.get("max_super_trades", 5)))
+_open_super_count = sum(
+    1 for s in signals
+    if s.get("status") == "open" and s.get("is_super_setup")
+)
+_super_indicator = f"⭐ **Super Cap:** {_open_super_count} / {_max_super_cap}"
+if _max_super_cap > 0 and _open_super_count >= _max_super_cap:
+    _super_indicator += "  *— new Super-eligible coins will fall through to F3-F10*"
+st.caption(_super_indicator)
+
+# ── SL Cooldown indicator ──────────────────────────────────────────────────
+_sl_cd_hours_display = int(_snap_cfg.get("sl_cooldown_hours", 24))
+st.caption(
+    f"🔴 **SL Cooldown:** {_sl_cd_hours_display} h "
+    f"*(per-coin blackout after SL hit — applies to all setups including Super)*"
+)
 st.divider()
 
 # ── Sector filter ──────────────────────────────────────────────────────────────
@@ -3951,7 +4129,9 @@ if fc.get("total_watchlist", 0) > 0:
         _new_sig_s    = set(fc.get("new_signal_syms",         []))
         _blk_active_s = set(fc.get("blocked_by_active_syms", []))
         _blk_cool_s   = set(fc.get("blocked_by_cooldown_syms",[]))
-        _returned_syms = _new_sig_s | _blk_active_s | _blk_cool_s
+        _blk_sl_cool_s = set(fc.get("blocked_by_sl_cooldown_syms", []))
+        _super_demoted_s = set(fc.get("super_cap_demoted_syms", []))
+        _returned_syms = _new_sig_s | _blk_active_s | _blk_cool_s | _blk_sl_cool_s
 
         # Fixed opening rows
         stage_rows = [
@@ -3994,8 +4174,10 @@ if fc.get("total_watchlist", 0) > 0:
             ("⚠️ Dropped — Empty Candle Data", len(_fempty),          ", ".join(sorted(_fempty)) if _fempty else "—"),
             ("💥 Dropped — Process Error",     _process_err_count,    "See API Error Log below ↓"),
             ("✅ Returned Signal",             len(_returned_syms),   _coin_str(_returned_syms)),
+            ("⭐ Super cap demoted → F3-F10",  len(_super_demoted_s), _coin_str(_super_demoted_s)),
             ("🔵 Blocked — Open trade exists", len(_blk_active_s),    _coin_str(_blk_active_s)),
-            ("🟡 Blocked — Cooldown active",   len(_blk_cool_s),      _coin_str(_blk_cool_s)),
+            ("🟡 Blocked — TP Cooldown",       len(_blk_cool_s),      _coin_str(_blk_cool_s)),
+            ("🔴 Blocked — SL Cooldown (24h)", len(_blk_sl_cool_s),   _coin_str(_blk_sl_cool_s)),
             ("🟢 New Signals Fired",           len(_new_sig_s),       _coin_str(_new_sig_s)),
         ]
 
