@@ -1662,10 +1662,18 @@ def process(sym, cfg: dict, super_counter: dict = None, super_lock=None):
         # to be in Discount zone — without 1h we can't decide Super vs normal.
         # The same 1h candles are reused later for F5 (1h RSI) so no extra
         # API call is introduced by moving the fetch earlier.
+        #
+        # Candle counts (all single API call — OKX cap is 300/call):
+        #   • 5m  = 300 → 25 hours of 5m structure
+        #   • 15m = 300 → 75 hours of 15m structure (PDZ uses last 290)
+        #   • 1h  = 300 → 12.5 days of 1h structure (PDZ uses last 290,
+        #                 giving ~12 days of 1h swing pivots for Discount-zone
+        #                 detection — matches the 290-candle internal cap of
+        #                 calc_pdz_zone which mirrors the DZSAFM indicator).
         with ThreadPoolExecutor(max_workers=3) as pool:
             f_5m_q  = pool.submit(get_klines, sym, "5m",  300)
             f_15m_q = pool.submit(get_klines, sym, "15m", 300)
-            f_1h_q  = pool.submit(get_klines, sym, "1h",  60)
+            f_1h_q  = pool.submit(get_klines, sym, "1h",  300)
             m5_quick   = f_5m_q.result()[:-1]
             m15_quick  = f_15m_q.result()[:-1]
             m1h_quick  = f_1h_q.result()[:-1]
@@ -2561,31 +2569,67 @@ with st.sidebar:
         key="cfg_api_passphrase", type="password", disabled=not new_trade_enabled,
         placeholder="Your OKX API passphrase")
 
+    # ── Size / Leverage / Margin Mode ────────────────────────────────────────
+    # These fields are EDITABLE even when Auto-Trading is OFF, because they
+    # drive display-only calculations too:
+    #   • Est. Liq. column    — uses leverage + margin mode
+    #   • PnL $ column        — uses size × leverage as notional
+    #   • Super / normal SL   — uses leverage to derive isolated SL (1 / lev)
+    # The user needs to be able to tune these to preview what a live trade
+    # would look like without having to enable live trading first.
     ta1, ta2 = st.columns(2)
     new_trade_usdt = ta1.number_input(
         "Size (USDT)", min_value=1.0, max_value=100000.0, step=1.0,
         value=float(_snap_cfg.get("trade_usdt_amount", 10.0)),
-        key="cfg_trade_usdt", disabled=not new_trade_enabled,
-        help="Collateral per trade in USDT (before leverage)")
+        key="cfg_trade_usdt",
+        help=(
+            "Collateral per trade in USDT (before leverage).\n\n"
+            "Used by:\n"
+            "  • Live order size (when Auto-Trading is enabled)\n"
+            "  • PnL $ column — notional = Size × Leverage\n"
+            "  • Notional preview below\n\n"
+            "Editable whether or not Auto-Trading is enabled."
+        ))
     new_trade_lev = ta2.number_input(
         "Leverage ×", min_value=1, max_value=125, step=1,
         value=int(_snap_cfg.get("trade_leverage", 10)),
-        key="cfg_trade_lev", disabled=not new_trade_enabled,
-        help="Leverage applied (capped by OKX max for each coin)")
+        key="cfg_trade_lev",
+        help=(
+            "Leverage applied (capped by OKX max for each coin).\n\n"
+            "Used by:\n"
+            "  • Live order leverage (when Auto-Trading is enabled)\n"
+            "  • Est. Liq. column — isolated liq ≈ entry × (1 − 1/lev)\n"
+            "  • PnL $ column — notional = Size × Leverage\n"
+            "  • Isolated SL level — SL = entry × (1 − 1/lev)\n\n"
+            "Editable whether or not Auto-Trading is enabled."
+        ))
     new_margin_mode = st.selectbox(
         "Margin Mode", ["isolated", "cross"],
         index=0 if _snap_cfg.get("trade_margin_mode", "isolated") == "isolated" else 1,
-        key="cfg_margin_mode", disabled=not new_trade_enabled)
+        key="cfg_margin_mode",
+        help=(
+            "Margin mode for futures positions.\n\n"
+            "  • isolated — each position uses its own collateral; SL is "
+            "pinned at the liquidation price (1/leverage below entry). "
+            "Est. Liq. column shows the per-trade liq price.\n"
+            "  • cross    — positions share account equity as collateral; SL "
+            "uses the configured SL %. Est. Liq. column shows '—'.\n\n"
+            "Editable whether or not Auto-Trading is enabled — affects display "
+            "columns (Est. Liq.) and SL placement logic."
+        ))
 
+    # Notional preview — always shown (even when Auto-Trading is off) so the
+    # user can see the effective trade size driven by Size × Leverage.
+    notional_usdt = new_trade_usdt * new_trade_lev
+    _liq_pct_cap  = round(100 / new_trade_lev, 2) if new_trade_lev > 0 else 0
+    _sl_caption   = (f"SL @ liq ~{_liq_pct_cap:.1f}% below entry"
+                     if new_margin_mode == "isolated"
+                     else f"SL -${notional_usdt * _snap_cfg.get('sl_pct',3.0)/100:.2f}")
+    _preview_prefix = "📐" if new_trade_enabled else "📐 *(preview)*"
+    st.caption(f"{_preview_prefix} Notional per trade: ~${notional_usdt:,.0f} USDT   "
+               f"| TP +${notional_usdt * _snap_cfg.get('tp_pct',1.5)/100:.2f}   "
+               f"| {_sl_caption}")
     if new_trade_enabled:
-        notional_usdt = new_trade_usdt * new_trade_lev
-        _liq_pct_cap  = round(100 / new_trade_lev, 2)
-        _sl_caption   = (f"SL @ liq ~{_liq_pct_cap:.1f}% below entry"
-                         if new_margin_mode == "isolated"
-                         else f"SL -${notional_usdt * _snap_cfg.get('sl_pct',3.0)/100:.2f}")
-        st.caption(f"📐 Notional per trade: ~${notional_usdt:,.0f} USDT   "
-                   f"| TP +${notional_usdt * _snap_cfg.get('tp_pct',1.5)/100:.2f}   "
-                   f"| {_sl_caption}")
         st.caption("🔒 Credentials stored in scanner_config.json. "
                    "Use a trade-only API key — never withdrawal permissions.")
 
