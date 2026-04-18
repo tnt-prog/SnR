@@ -3276,6 +3276,71 @@ if _snap_cfg.get("use_ema_cross_15m", True):
     badges.append(f"📉 F10 — EMA{_snap_cfg.get('ema_cross_fast_15m',12)}>EMA{_snap_cfg.get('ema_cross_slow_15m',21)} 15m")
 st.markdown("**Active Filters:**")
 st.caption("  |  ".join(badges) if badges else "No advanced filters enabled")
+
+# ── 24-hour realized PnL ($) ───────────────────────────────────────────────
+# Sum realized PnL for all TP and SL closes in the last 24 hours. Uses the
+# same formula as the per-row "PnL $" column: (close_price / entry - 1) ×
+# (trade_usdt × trade_lev). Falls back to current config if the signal
+# pre-dates the stored trade_usdt / trade_lev fields.
+_pnl_cutoff_24h = dubai_now() - timedelta(hours=24)
+_pnl_24h_total = 0.0
+_pnl_24h_wins  = 0.0
+_pnl_24h_loss  = 0.0
+_pnl_24h_tp_ct = 0
+_pnl_24h_sl_ct = 0
+_cfg_usdt_fallback = float(_snap_cfg.get("trade_usdt_amount", 0) or 0)
+_cfg_lev_fallback  = int(_snap_cfg.get("trade_leverage", 10) or 0)
+for _s in signals:
+    if _s.get("status") not in ("tp_hit", "sl_hit"):
+        continue
+    _ct_raw = _s.get("close_time")
+    if not _ct_raw:
+        continue
+    try:
+        _ct = datetime.fromisoformat(str(_ct_raw).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        continue
+    if _ct < _pnl_cutoff_24h:
+        continue
+    try:
+        _entry_val = float(_s.get("entry", 0) or 0)
+        _close_val = float(_s.get("close_price", 0) or 0)
+        _usdt_val  = float(_s.get("trade_usdt", _cfg_usdt_fallback) or 0)
+        _lev_val   = int(_s.get("trade_lev",  _cfg_lev_fallback)   or 0)
+    except (TypeError, ValueError):
+        continue
+    if _entry_val <= 0 or _close_val <= 0 or _usdt_val <= 0 or _lev_val <= 0:
+        continue
+    _notional_val = _usdt_val * _lev_val
+    _pnl_val      = (_close_val / _entry_val - 1.0) * _notional_val
+    _pnl_24h_total += _pnl_val
+    if _s["status"] == "tp_hit":
+        _pnl_24h_wins  += _pnl_val
+        _pnl_24h_tp_ct += 1
+    else:
+        _pnl_24h_loss  += _pnl_val      # negative for SL hits
+        _pnl_24h_sl_ct += 1
+
+# Color based on sign: green for gain, red for loss, grey for exact zero / empty
+if _pnl_24h_tp_ct == 0 and _pnl_24h_sl_ct == 0:
+    _pnl_color   = "#9CA3AF"  # grey
+    _pnl_prefix  = "💰"
+    _pnl_summary = "no closed trades in the last 24 h"
+else:
+    _pnl_color   = "#22C55E" if _pnl_24h_total >= 0 else "#EF4444"
+    _pnl_prefix  = "💰" if _pnl_24h_total >= 0 else "📉"
+    _pnl_summary = (
+        f"{_pnl_24h_tp_ct} TP (+${_pnl_24h_wins:,.2f})  |  "
+        f"{_pnl_24h_sl_ct} SL (${_pnl_24h_loss:,.2f})"
+    )
+st.markdown(
+    f"{_pnl_prefix} **24h Realized PnL:** "
+    f"<span style='color:{_pnl_color}; font-weight:600;'>"
+    f"{_pnl_24h_total:+,.2f} $</span>  "
+    f"<span style='opacity:0.7; font-size:0.85em;'>({_pnl_summary})</span>",
+    unsafe_allow_html=True,
+)
+
 # ── Queue Size (current / max) ─────────────────────────────────────────────
 _queue_indicator = f"📊 **Queue Size:** {open_count} / {_max_open_cap}"
 if open_count >= _max_open_cap:
