@@ -3671,14 +3671,17 @@ if _pnl_24h_tp_ct == 0 and _pnl_24h_sl_ct == 0:
 else:
     _pnl_color   = "#22C55E" if _pnl_24h_total >= 0 else "#EF4444"
     _pnl_prefix  = "💰" if _pnl_24h_total >= 0 else "📉"
+    # Use backslash-escaped $ so Streamlit's markdown engine doesn't treat
+    # pairs of dollar signs as LaTeX math delimiters (which would otherwise
+    # swallow the inline <span> HTML between them).
     _pnl_summary = (
-        f"{_pnl_24h_tp_ct} TP (+${_pnl_24h_wins:,.2f})  |  "
-        f"{_pnl_24h_sl_ct} SL (${_pnl_24h_loss:,.2f})"
+        f"{_pnl_24h_tp_ct} TP (+\\${_pnl_24h_wins:,.2f})  |  "
+        f"{_pnl_24h_sl_ct} SL (\\${_pnl_24h_loss:,.2f})"
     )
 st.markdown(
     f"{_pnl_prefix} **24h Realized PnL:** "
     f"<span style='color:{_pnl_color}; font-weight:600;'>"
-    f"{_pnl_24h_total:+,.2f} $</span>  "
+    f"{_pnl_24h_total:+,.2f} \\$</span>  "
     f"<span style='opacity:0.7; font-size:0.85em;'>({_pnl_summary})</span>",
     unsafe_allow_html=True,
 )
