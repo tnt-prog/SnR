@@ -464,21 +464,78 @@ LOG_FILE     = _SCRIPT_DIR / "scanner_log.json"
 _config_lock = threading.Lock()
 
 def load_config() -> dict:
+    """Load persisted config, applying env-var overrides for API credentials.
+
+    Environment variables (preferred — never written back to disk):
+      • OKX_API_KEY
+      • OKX_API_SECRET
+      • OKX_API_PASSPHRASE
+    These take precedence over the plaintext values in scanner_config.json.
+    If the user has set them, the on-disk credentials can stay blank.
+    """
+    cfg = dict(DEFAULT_CONFIG)
     if CONFIG_FILE.exists():
         try:
             saved = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-            cfg   = dict(DEFAULT_CONFIG)
             for k in DEFAULT_CONFIG:
                 if k in saved:
                     cfg[k] = saved[k]
-            return cfg
-        except Exception:
-            pass
-    return dict(DEFAULT_CONFIG)
+        except (json.JSONDecodeError, OSError, UnicodeDecodeError) as _e:
+            # Corrupt/unreadable config — log if error-logger is live, fall back to defaults.
+            _log_fn = globals().get("_append_error")
+            if callable(_log_fn):
+                try:
+                    _log_fn("io", f"load_config: {type(_e).__name__}: {_e}")
+                except Exception:
+                    pass
+            else:
+                print(f"[Config] WARNING — failed to parse {CONFIG_FILE}: {type(_e).__name__}: {_e}")
+
+    # Env-var overrides (credentials only — never persisted)
+    import os as _os
+    for _cfg_k, _env_k in (("api_key",        "OKX_API_KEY"),
+                           ("api_secret",     "OKX_API_SECRET"),
+                           ("api_passphrase", "OKX_API_PASSPHRASE")):
+        _v = _os.environ.get(_env_k, "").strip()
+        if _v:
+            cfg[_cfg_k] = _v
+    return cfg
 
 def save_config(cfg: dict):
-    with _config_lock:
-        CONFIG_FILE.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+    """Persist config to disk. Strips env-var-sourced credentials so they are
+    never written in plaintext. Sets 0o600 permissions on POSIX (best effort).
+    Errors are logged, not raised, so a failed save never crashes the loop.
+    """
+    import os as _os
+    # If the user supplied credentials via env vars, do NOT write them back
+    # to the JSON file — keep the stored values blank so the secrets never
+    # land on disk from the env-var path.
+    _cfg_to_save = dict(cfg)
+    for _cfg_k, _env_k in (("api_key",        "OKX_API_KEY"),
+                           ("api_secret",     "OKX_API_SECRET"),
+                           ("api_passphrase", "OKX_API_PASSPHRASE")):
+        if _os.environ.get(_env_k, "").strip():
+            # Preserve whatever the user previously typed into the UI by leaving
+            # the key blank if env is the active source.
+            _cfg_to_save[_cfg_k] = ""
+    try:
+        with _config_lock:
+            CONFIG_FILE.write_text(json.dumps(_cfg_to_save, indent=2), encoding="utf-8")
+            # Best-effort: restrict to owner-only read/write (POSIX).
+            # On Windows, os.chmod only toggles the read-only bit — harmless.
+            try:
+                _os.chmod(CONFIG_FILE, 0o600)
+            except (OSError, NotImplementedError):
+                pass
+    except (OSError, TypeError, ValueError) as _e:
+        _log_fn = globals().get("_append_error")
+        if callable(_log_fn):
+            try:
+                _log_fn("io", f"save_config: {type(_e).__name__}: {_e}")
+            except Exception:
+                pass
+        else:
+            print(f"[Config] WARNING — failed to save {CONFIG_FILE}: {type(_e).__name__}: {_e}")
 
 def _migrate_criteria(crit: dict) -> dict:
     """
@@ -517,8 +574,16 @@ def load_log():
                 if "criteria" in sig:
                     sig["criteria"] = _migrate_criteria(sig["criteria"])
             return data
-        except Exception:
-            pass
+        except (json.JSONDecodeError, OSError, UnicodeDecodeError) as _e:
+            # Corrupt log — don't crash the app; log and fall back to empty.
+            _log_fn = globals().get("_append_error")
+            if callable(_log_fn):
+                try:
+                    _log_fn("io", f"load_log: {type(_e).__name__}: {_e}")
+                except Exception:
+                    pass
+            else:
+                print(f"[Log] WARNING — failed to parse {LOG_FILE}: {type(_e).__name__}: {_e}")
     return {"health": {"total_cycles": 0, "last_scan_at": None,
                         "last_scan_duration_s": 0.0, "total_api_errors": 0,
                         "watchlist_size": 0, "pre_filtered_out": 0,
@@ -526,8 +591,21 @@ def load_log():
             "signals": []}
 
 def save_log(log):
-    LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
-    LOG_FILE.write_text(json.dumps(log, indent=2), encoding="utf-8")
+    """Atomic-ish write of the log JSON. All errors are logged, never raised —
+    a failed save must not abort the scanner loop.
+    """
+    try:
+        LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        LOG_FILE.write_text(json.dumps(log, indent=2), encoding="utf-8")
+    except (OSError, TypeError, ValueError) as _e:
+        _log_fn = globals().get("_append_error")
+        if callable(_log_fn):
+            try:
+                _log_fn("io", f"save_log: {type(_e).__name__}: {_e}")
+            except Exception:
+                pass
+        else:
+            print(f"[Log] WARNING — failed to save {LOG_FILE}: {type(_e).__name__}: {_e}")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Module-level shared state
@@ -754,7 +832,17 @@ def _trade_post(path: str, body: dict, cfg: dict) -> dict:
         r = sess.post(f"{BASE}{path}", headers=merged,
                       data=body_str, timeout=20)
     r.raise_for_status()
-    return r.json()
+    try:
+        return r.json()
+    except (json.JSONDecodeError, ValueError) as _je:
+        # OKX returned non-JSON (e.g. an HTML 503 page during an outage).
+        # Surface a structured error instead of propagating a cryptic
+        # JSONDecodeError up to the background loop.
+        _snippet = r.text[:200].replace("\n", " ") if r.text else ""
+        raise RuntimeError(
+            f"OKX POST {path} returned non-JSON response "
+            f"(status={r.status_code}): {_snippet!r}"
+        ) from _je
 
 def _trade_get(path: str, params: dict, cfg: dict) -> dict:
     """Authenticated GET to an OKX private endpoint."""
@@ -778,7 +866,14 @@ def _trade_get(path: str, params: dict, cfg: dict) -> dict:
         r = sess.get(f"{BASE}{path}", params=params,
                      headers=merged, timeout=20)
     r.raise_for_status()
-    return r.json()
+    try:
+        return r.json()
+    except (json.JSONDecodeError, ValueError) as _je:
+        _snippet = r.text[:200].replace("\n", " ") if r.text else ""
+        raise RuntimeError(
+            f"OKX GET {path} returned non-JSON response "
+            f"(status={r.status_code}): {_snippet!r}"
+        ) from _je
 
 def test_api_connection(cfg: dict) -> dict:
     """
@@ -946,12 +1041,46 @@ def place_okx_order(sig: dict, cfg: dict) -> dict:
         status="partial" means the entry order placed but the OCO algo failed.
     """
     try:
-        sym    = sig["symbol"]
-        entry  = float(sig["entry"])
-        tp     = float(sig["tp"])
-        sl     = float(sig["sl"])
-        usdt   = float(cfg.get("trade_usdt_amount", 10))
-        lev    = min(int(cfg.get("trade_leverage", 10)), get_max_leverage(sym))
+        # ── Input validation — fail fast with a clear error, BEFORE touching
+        # any OKX endpoint. A malformed signal (missing field, None, unparseable
+        # string, or nonsensical values like tp≤entry / sl≥entry for a long)
+        # would otherwise cascade into opaque exchange rejections or silently
+        # size a position incorrectly. Catch all of that here.
+        sym = sig.get("symbol", "")
+        if not sym:
+            return {"ordId": "", "algoId": "", "sz": 0, "status": "error",
+                    "error": "Signal missing 'symbol' field — refusing to place."}
+        try:
+            entry = float(sig["entry"])
+            tp    = float(sig["tp"])
+            sl    = float(sig["sl"])
+            usdt  = float(cfg.get("trade_usdt_amount", 10))
+            _lev_cfg = int(cfg.get("trade_leverage", 10))
+        except (TypeError, ValueError, KeyError) as _valexc:
+            _err = (f"Malformed signal — cannot parse entry/tp/sl/size/lev: "
+                    f"{type(_valexc).__name__}: {_valexc}")
+            _append_error("trade", _err, symbol=sym)
+            return {"ordId": "", "algoId": "", "sz": 0,
+                    "status": "error", "error": _err}
+        if entry <= 0 or tp <= 0 or sl <= 0 or usdt <= 0 or _lev_cfg <= 0:
+            _err = (f"Invalid numeric input — entry={entry}, tp={tp}, sl={sl}, "
+                    f"usdt={usdt}, lev={_lev_cfg}. All must be > 0.")
+            _append_error("trade", _err, symbol=sym)
+            return {"ordId": "", "algoId": "", "sz": 0,
+                    "status": "error", "error": _err}
+        # LONG sanity: SL must be below entry; TP must be above entry.
+        if sl >= entry:
+            _err = f"LONG SL ({sl}) must be below entry ({entry})."
+            _append_error("trade", _err, symbol=sym)
+            return {"ordId": "", "algoId": "", "sz": 0,
+                    "status": "error", "error": _err}
+        if tp <= entry:
+            _err = f"LONG TP ({tp}) must be above entry ({entry})."
+            _append_error("trade", _err, symbol=sym)
+            return {"ordId": "", "algoId": "", "sz": 0,
+                    "status": "error", "error": _err}
+
+        lev    = min(_lev_cfg, get_max_leverage(sym))
         mode   = cfg.get("trade_margin_mode", "cross")
 
         # ── Pre-trade instrument validation ───────────────────────────────────
@@ -1464,6 +1593,32 @@ def calc_macd(closes: list, fast=12, slow=26, signal_period=9):
     histogram    = [m-s for m,s in zip(macd_aligned, sig_line)]
     return macd_aligned, sig_line, histogram
 
+def macd_bullish_and_value(closes: list, crossover_lookback: int = 12):
+    """
+    Single-pass MACD evaluation — computes MACD once and returns BOTH the
+    bullish verdict and the last MACD-line value, so callers don't need to
+    call calc_macd() a second time just to get the line value for display.
+
+    Returns (is_bullish: bool, macd_line_value: float | None).
+    """
+    macd_line, sig_line, histogram = calc_macd(closes)
+    _last_val = macd_line[-1] if macd_line else None
+    if not histogram or len(histogram) < 2:
+        return False, _last_val
+    if macd_line[-1] <= 0 or sig_line[-1] <= 0:
+        return False, _last_val
+    if histogram[-1] <= 0 or histogram[-1] <= histogram[-2]:
+        return False, _last_val
+    n = min(crossover_lookback + 1, len(macd_line))
+    for i in range(1, n):
+        prev, curr = -(i+1), -i
+        if (len(macd_line)+prev >= 0 and
+                macd_line[prev] <= sig_line[prev] and
+                macd_line[curr] >  sig_line[curr]):
+            return True, _last_val
+    return False, _last_val
+
+
 def macd_bullish(closes: list, crossover_lookback: int = 12) -> bool:
     """
     True when (all on given closes):
@@ -1471,19 +1626,12 @@ def macd_bullish(closes: list, crossover_lookback: int = 12) -> bool:
       2. Signal line > 0
       3. Histogram > 0 AND increasing  ← dark green only
       4. Bullish crossover within last crossover_lookback candles
+
+    Thin wrapper around macd_bullish_and_value — kept for any external caller
+    that only wants the bool.
     """
-    macd_line, sig_line, histogram = calc_macd(closes)
-    if not histogram or len(histogram) < 2: return False
-    if macd_line[-1] <= 0 or sig_line[-1] <= 0: return False
-    if histogram[-1] <= 0 or histogram[-1] <= histogram[-2]: return False
-    n = min(crossover_lookback + 1, len(macd_line))
-    for i in range(1, n):
-        prev, curr = -(i+1), -i
-        if (len(macd_line)+prev >= 0 and
-                macd_line[prev] <= sig_line[prev] and
-                macd_line[curr] >  sig_line[curr]):
-            return True
-    return False
+    ok, _ = macd_bullish_and_value(closes, crossover_lookback)
+    return ok
 
 def calc_parabolic_sar(candles: list, af_start=0.02, af_step=0.02, af_max=0.20):
     if not candles: return []
@@ -1536,15 +1684,25 @@ def calc_pdz_zone(candles: list, price: float) -> tuple:
 
     Returns (qualifies: bool, zone_label: str)
     """
-    if not candles or len(candles) < 2:
-        return True, "unknown"
+    # ── Empty / insufficient data → FAIL-CLOSED ──────────────────────────────
+    # Previously returned (True, "unknown") which silently qualified coins
+    # with no candle data — a serious fail-open bug. Now we fail-closed so
+    # missing data cannot accidentally pass the PDZ filter (or trigger a
+    # Super Setup on empty 1h data, for example).
+    #
+    # The DZSAFM indicator needs enough history for a meaningful swing
+    # high / swing low — use 50 as the functional minimum (matches the
+    # Pine Script's default lookback length).
+    if not candles or len(candles) < 50:
+        return False, "insufficient_data"
 
     lookback = candles[-290:]  # 290 candles — 1 OKX API call (~72 hrs on 15m, ~24 hrs on 5m)
     H = max(c["high"] for c in lookback)
     L = min(c["low"]  for c in lookback)
 
     if H <= L:
-        return True, "unknown"
+        # Degenerate range (flat or inverted) — cannot compute zones.
+        return False, "flat_range"
 
     # Boundary levels  (exact Pine Script maths from DZSAFM)
     premium_bottom = 0.95 * H + 0.05 * L    # bottom edge of Premium zone
@@ -1639,6 +1797,51 @@ def _reset_filter_counts():
         _filter_counts.update(counts)
         _b._bsc_filter_counts = _filter_counts   # keep reference in sync under lock
 
+# ─── Thread-local counter batching ──────────────────────────────────────────
+# Each process() call accumulates integer counter increments in a thread-local
+# delta dict instead of taking `_filter_lock` on every elimination. List
+# appends (e.g. *_elim_syms) are GIL-atomic on CPython so they bypass the
+# lock entirely. The delta is flushed into `_filter_counts` exactly once per
+# process() call (in the outer finally block) — collapsing 20+ lock
+# acquisitions per coin into a single brief merge, which dramatically cuts
+# contention under the 10-worker ThreadPoolExecutor.
+_tl_counts = threading.local()
+
+def _tl_delta() -> dict:
+    """Return (and lazily create) the current thread's counter delta dict."""
+    _d = getattr(_tl_counts, "delta", None)
+    if _d is None:
+        _d = {}
+        _tl_counts.delta = _d
+    return _d
+
+def _incr_filter(key: str, n: int = 1) -> None:
+    """Increment a counter in the thread-local delta (lock-free)."""
+    _d = _tl_delta()
+    _d[key] = _d.get(key, 0) + n
+
+def _record_elim(count_key: str, sym_list_key: str, sym: str) -> None:
+    """Record a filter elimination: bump counter locally + append sym to the
+    shared list (list.append is GIL-atomic — no lock required).
+    """
+    _incr_filter(count_key)
+    # list.append is atomic in CPython; safe without _filter_lock as long as
+    # the list itself exists (it's pre-initialised in _reset_filter_counts).
+    _lst = _filter_counts.get(sym_list_key)
+    if _lst is not None:
+        _lst.append(sym)
+
+def _flush_tl_counts() -> None:
+    """Merge the thread-local delta into `_filter_counts` under one lock acquisition, then reset it for the next process() call."""
+    _d = getattr(_tl_counts, "delta", None)
+    if not _d:
+        _tl_counts.delta = {}
+        return
+    with _filter_lock:
+        for _k, _v in _d.items():
+            _filter_counts[_k] = _filter_counts.get(_k, 0) + _v
+    _tl_counts.delta = {}   # reset for next call on this worker thread
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Per-coin processing
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1652,10 +1855,14 @@ def process(sym, cfg: dict, super_counter: dict = None, super_lock=None):
     If these args are None (e.g. unit test, standalone call), behave as if
     unlimited Super slots are available.
     """
+    # Reset thread-local delta at entry so the previous process() call on the
+    # same worker thread doesn't bleed into this one. Flush happens in the
+    # outer finally below.
+    _tl_counts.delta = {}
     try:
-        with _filter_lock:
-            _filter_counts["checked"] = _filter_counts.get("checked", 0) + 1
-            _filter_counts["checked_syms"].append(sym)
+        _incr_filter("checked")
+        # list.append is GIL-atomic — no lock needed.
+        _filter_counts["checked_syms"].append(sym)
 
         # ── Stage 1: Quick parallel fetch — 5m + 15m (PDZ) + 1h (PDZ+RSI) ────
         # 1h is fetched here (not Stage 2) because Super Setup requires 1h
@@ -1697,9 +1904,7 @@ def process(sym, cfg: dict, super_counter: dict = None, super_lock=None):
                     is_super_eligible = True      # ⭐ BOTH 15m and 1h Discount
                 # else: only 15m Discount (not 1h) → fall through to F3-F10
             elif not pdz_pass_15m:
-                with _filter_lock:
-                    _filter_counts["f2_pdz15m"] = _filter_counts.get("f2_pdz15m", 0) + 1
-                    _filter_counts["f2_elim_syms"].append(sym)
+                _record_elim("f2_pdz15m", "f2_elim_syms", sym)
                 return None
             # else Band A/B passes — continue to F3
 
@@ -1722,11 +1927,10 @@ def process(sym, cfg: dict, super_counter: dict = None, super_lock=None):
                            else _pround(entry_q * (1 - cfg["sl_pct"] / 100)))
                 sec     = SECTORS.get(sym, "Other")
                 max_lev = get_max_leverage(sym)
-                with _filter_lock:
-                    _filter_counts["passed"]           = _filter_counts.get("passed", 0) + 1
-                    _filter_counts["super_setup"]      = _filter_counts.get("super_setup", 0) + 1
-                    _filter_counts["passed_syms"].append(sym)
-                    _filter_counts["super_setup_syms"].append(sym)
+                _incr_filter("passed")
+                _incr_filter("super_setup")
+                _filter_counts["passed_syms"].append(sym)
+                _filter_counts["super_setup_syms"].append(sym)
                 return {
                     "id":             str(uuid.uuid4())[:8],
                     "timestamp":      dubai_now().isoformat(),
@@ -1754,27 +1958,20 @@ def process(sym, cfg: dict, super_counter: dict = None, super_lock=None):
                     },
                 }
             # else: super cap exhausted — demote and fall through to F3-F10
-            with _filter_lock:
-                _filter_counts["super_cap_demoted"] = (
-                    _filter_counts.get("super_cap_demoted", 0) + 1)
-                _filter_counts["super_cap_demoted_syms"].append(sym)
+            _record_elim("super_cap_demoted", "super_cap_demoted_syms", sym)
 
         # ── F3: PDZ 5m ────────────────────────────────────────────────────────
         pdz_zone_5m = "—"
         if cfg.get("use_pdz_5m", True):
             pdz_pass_5m, pdz_zone_5m = calc_pdz_zone(m5_quick, entry_q)
             if not pdz_pass_5m:
-                with _filter_lock:
-                    _filter_counts["f3_pdz5m"] = _filter_counts.get("f3_pdz5m", 0) + 1
-                    _filter_counts["f3_elim_syms"].append(sym)
+                _record_elim("f3_pdz5m", "f3_elim_syms", sym)
                 return None
 
         # ── F4: Quick 5m RSI (still early — before full fetch) ────────────────
         rsi5_q = (calc_rsi_series(closes_5m_q) or [0])[-1]
         if cfg.get("use_rsi_5m", True) and rsi5_q < cfg["rsi_5m_min"]:
-            with _filter_lock:
-                _filter_counts["f4_rsi5m"] = _filter_counts.get("f4_rsi5m", 0) + 1
-                _filter_counts["f4_elim_syms"].append(sym)
+            _record_elim("f4_rsi5m", "f4_elim_syms", sym)
             return None
 
         # ── Stage 2: Fetch ONLY new timeframes — 3m ──────────────────────────
@@ -1801,10 +1998,9 @@ def process(sym, cfg: dict, super_counter: dict = None, super_lock=None):
                                             ("1h", m1h_candles), ("3m", m3_candles))
                        if not bars]
         if _missing_tf:
-            with _filter_lock:
-                _filter_counts["f_empty_data"] = _filter_counts.get("f_empty_data", 0) + 1
-                _filter_counts["f_empty_data_syms"].append(
-                    f"{sym}(no {','.join(_missing_tf)})")
+            _incr_filter("f_empty_data")
+            _filter_counts["f_empty_data_syms"].append(
+                f"{sym}(no {','.join(_missing_tf)})")
             return None
 
         closes_5m  = [c["close"] for c in m5]
@@ -1817,9 +2013,7 @@ def process(sym, cfg: dict, super_counter: dict = None, super_lock=None):
         rsi1h = (calc_rsi_series(closes_1h) or [0])[-1]
         if cfg.get("use_rsi_1h", True) and \
                 not (cfg["rsi_1h_min"] <= rsi1h <= cfg["rsi_1h_max"]):
-            with _filter_lock:
-                _filter_counts["f5_rsi1h"] = _filter_counts.get("f5_rsi1h", 0) + 1
-                _filter_counts["f5_elim_syms"].append(sym)
+            _record_elim("f5_rsi1h", "f5_elim_syms", sym)
             return None
 
         # ── F6: EMA ───────────────────────────────────────────────────────────
@@ -1827,25 +2021,19 @@ def process(sym, cfg: dict, super_counter: dict = None, super_lock=None):
         if cfg.get("use_ema_3m"):
             ema = calc_ema(closes_3m, max(2, int(cfg.get("ema_period_3m", 12))))
             if not ema or entry < ema[-1]:
-                with _filter_lock:
-                    _filter_counts["f6_ema"] = _filter_counts.get("f6_ema", 0) + 1
-                    _filter_counts["f6_elim_syms"].append(sym)
+                _record_elim("f6_ema", "f6_elim_syms", sym)
                 return None
             ema_3m_val = _pround(ema[-1])
         if cfg.get("use_ema_5m"):
             ema = calc_ema(closes_5m, max(2, int(cfg.get("ema_period_5m", 12))))
             if not ema or entry < ema[-1]:
-                with _filter_lock:
-                    _filter_counts["f6_ema"] = _filter_counts.get("f6_ema", 0) + 1
-                    _filter_counts["f6_elim_syms"].append(sym)
+                _record_elim("f6_ema", "f6_elim_syms", sym)
                 return None
             ema_5m_val = _pround(ema[-1])
         if cfg.get("use_ema_15m"):
             ema = calc_ema(closes_15m, max(2, int(cfg.get("ema_period_15m", 12))))
             if not ema or entry < ema[-1]:
-                with _filter_lock:
-                    _filter_counts["f6_ema"] = _filter_counts.get("f6_ema", 0) + 1
-                    _filter_counts["f6_elim_syms"].append(sym)
+                _record_elim("f6_ema", "f6_elim_syms", sym)
                 return None
             ema_15m_val = _pround(ema[-1])
 
@@ -1853,35 +2041,34 @@ def process(sym, cfg: dict, super_counter: dict = None, super_lock=None):
         # Each enabled timeframe is checked in order (3m → 5m → 15m).
         # The first failure increments that timeframe's own counter and eliminates
         # the coin — giving the funnel an accurate per-timeframe breakdown.
+        # Uses macd_bullish_and_value so MACD is computed ONCE per timeframe
+        # — the line value for display comes back from the same call, avoiding
+        # a second calc_macd() pass that the old code did after each check.
         macd_3m_val = macd_5m_val = macd_15m_val = None
         _macd_3m_on  = cfg.get("use_macd_3m",  True)
         _macd_5m_on  = cfg.get("use_macd_5m",  True)
         _macd_15m_on = cfg.get("use_macd_15m", True)
-        if _macd_3m_on and not macd_bullish(closes_3m):
-            with _filter_lock:
-                _filter_counts["f7_macd_3m"] = _filter_counts.get("f7_macd_3m", 0) + 1
-                _filter_counts["f7_macd_3m_elim_syms"].append(sym)
-            return None
-        if _macd_5m_on and not macd_bullish(closes_5m):
-            with _filter_lock:
-                _filter_counts["f7_macd_5m"] = _filter_counts.get("f7_macd_5m", 0) + 1
-                _filter_counts["f7_macd_5m_elim_syms"].append(sym)
-            return None
-        if _macd_15m_on and not macd_bullish(closes_15m):
-            with _filter_lock:
-                _filter_counts["f7_macd_15m"] = _filter_counts.get("f7_macd_15m", 0) + 1
-                _filter_counts["f7_macd_15m_elim_syms"].append(sym)
-            return None
-        # Store MACD line values for criteria display
         if _macd_3m_on:
-            ml3, _, _ = calc_macd(closes_3m)
-            if ml3: macd_3m_val = round(ml3[-1], 8)
+            _ok_3m, _ml3 = macd_bullish_and_value(closes_3m)
+            if _ml3 is not None:
+                macd_3m_val = round(_ml3, 8)
+            if not _ok_3m:
+                _record_elim("f7_macd_3m", "f7_macd_3m_elim_syms", sym)
+                return None
         if _macd_5m_on:
-            ml5, _, _ = calc_macd(closes_5m)
-            if ml5: macd_5m_val = round(ml5[-1], 8)
+            _ok_5m, _ml5 = macd_bullish_and_value(closes_5m)
+            if _ml5 is not None:
+                macd_5m_val = round(_ml5, 8)
+            if not _ok_5m:
+                _record_elim("f7_macd_5m", "f7_macd_5m_elim_syms", sym)
+                return None
         if _macd_15m_on:
-            ml15, _, _ = calc_macd(closes_15m)
-            if ml15: macd_15m_val = round(ml15[-1], 8)
+            _ok_15m, _ml15 = macd_bullish_and_value(closes_15m)
+            if _ml15 is not None:
+                macd_15m_val = round(_ml15, 8)
+            if not _ok_15m:
+                _record_elim("f7_macd_15m", "f7_macd_15m_elim_syms", sym)
+                return None
 
         # ── F8: Parabolic SAR — per-timeframe independent checks ─────────────
         # Each enabled timeframe checked in order (3m → 5m → 15m).
@@ -1893,25 +2080,19 @@ def process(sym, cfg: dict, super_counter: dict = None, super_lock=None):
         if _sar_3m_on:
             sar_3m = calc_parabolic_sar(m3_candles)
             if not (sar_3m and sar_3m[-1][1]):
-                with _filter_lock:
-                    _filter_counts["f8_sar_3m"] = _filter_counts.get("f8_sar_3m", 0) + 1
-                    _filter_counts["f8_sar_3m_elim_syms"].append(sym)
+                _record_elim("f8_sar_3m", "f8_sar_3m_elim_syms", sym)
                 return None
             sar_3m_val = _pround(sar_3m[-1][0])
         if _sar_5m_on:
             sar_5m = calc_parabolic_sar(m5)
             if not (sar_5m and sar_5m[-1][1]):
-                with _filter_lock:
-                    _filter_counts["f8_sar_5m"] = _filter_counts.get("f8_sar_5m", 0) + 1
-                    _filter_counts["f8_sar_5m_elim_syms"].append(sym)
+                _record_elim("f8_sar_5m", "f8_sar_5m_elim_syms", sym)
                 return None
             sar_5m_val = _pround(sar_5m[-1][0])
         if _sar_15m_on:
             sar_15m = calc_parabolic_sar(m15)
             if not (sar_15m and sar_15m[-1][1]):
-                with _filter_lock:
-                    _filter_counts["f8_sar_15m"] = _filter_counts.get("f8_sar_15m", 0) + 1
-                    _filter_counts["f8_sar_15m_elim_syms"].append(sym)
+                _record_elim("f8_sar_15m", "f8_sar_15m_elim_syms", sym)
                 return None
             sar_15m_val = _pround(sar_15m[-1][0])
 
@@ -1925,9 +2106,7 @@ def process(sym, cfg: dict, super_counter: dict = None, super_lock=None):
                 window   = vols_15m[-(lookback+1):-1]
                 avg_vol  = sum(window) / len(window)
                 if avg_vol <= 0 or vols_15m[-1] < mult * avg_vol:
-                    with _filter_lock:
-                        _filter_counts["f9_vol"] = _filter_counts.get("f9_vol", 0) + 1
-                        _filter_counts["f9_elim_syms"].append(sym)
+                    _record_elim("f9_vol", "f9_elim_syms", sym)
                     return None
                 vol_ratio = round(vols_15m[-1] / avg_vol, 2) if avg_vol > 0 else None
 
@@ -1942,9 +2121,7 @@ def process(sym, cfg: dict, super_counter: dict = None, super_lock=None):
             ema_slow_15m = calc_ema(closes_15m, _slow_p)
             if not ema_fast_15m or not ema_slow_15m or \
                     ema_fast_15m[-1] <= ema_slow_15m[-1]:
-                with _filter_lock:
-                    _filter_counts["f10_ema_cross"] = _filter_counts.get("f10_ema_cross", 0) + 1
-                    _filter_counts["f10_elim_syms"].append(sym)
+                _record_elim("f10_ema_cross", "f10_elim_syms", sym)
                 return None
             ema_cross_12_15m_val = _pround(ema_fast_15m[-1])
             ema_cross_21_15m_val = _pround(ema_slow_15m[-1])
@@ -1958,9 +2135,8 @@ def process(sym, cfg: dict, super_counter: dict = None, super_lock=None):
         sec     = SECTORS.get(sym, "Other")
         max_lev = get_max_leverage(sym)
 
-        with _filter_lock:
-            _filter_counts["passed"] = _filter_counts.get("passed", 0) + 1
-            _filter_counts["passed_syms"].append(sym)
+        _incr_filter("passed")
+        _filter_counts["passed_syms"].append(sym)
 
         rsi5 = (calc_rsi_series(closes_5m) or [rsi5_q])[-1]
         criteria = {
@@ -2000,18 +2176,27 @@ def process(sym, cfg: dict, super_counter: dict = None, super_lock=None):
         }
 
     except Exception as _proc_exc:
-        with _filter_lock:
-            _filter_counts["errors"] = _filter_counts.get("errors", 0) + 1
+        _incr_filter("errors")
         _append_error("scan", str(_proc_exc), symbol=sym)
         return "error"
+    finally:
+        # Single lock acquisition per process() call — merges all thread-local
+        # counter deltas into the shared `_filter_counts`. Runs on every
+        # return path (None, signal dict, "error").
+        _flush_tl_counts()
 
-def scan(cfg: dict, super_slots_remaining: int = None):
+def scan(cfg: dict, super_slots_remaining: int = None, skip_symbols: set = None):
     """Full watchlist scan. Returns (sorted_results, error_count).
 
     super_slots_remaining — number of additional Super Setup trades this cycle
     may open before the cap (cfg['max_super_trades']) is reached. Computed by
     the caller (bg loop) by subtracting currently-open Super trades from the
     configured cap. If None, defaults to the full cap (fresh state).
+
+    skip_symbols — pre-computed blacklist (SL-cooldown ∪ TP-cooldown ∪ currently
+    active). Removed from the deep-scan pool BEFORE any candle fetches so that
+    (a) no API calls are wasted on coins that will be rejected at placement
+    time, and (b) SL-cooldown-blocked coins can never consume Super slots.
     """
     _reset_filter_counts()
     with _filter_lock:                          # store config used for this scan
@@ -2032,9 +2217,26 @@ def scan(cfg: dict, super_slots_remaining: int = None):
         _filter_counts["pre_filtered_out"] = len(symbols) - len(pre_filtered)
         _filter_counts["pre_filter_passed_syms"] = list(pre_filtered)
 
+    # ── Cooldown / active blacklist ─────────────────────────────────────────
+    # Drop these BEFORE deep-scan so:
+    #   • SL-cooldown blackout is respected at the earliest possible stage
+    #   • no Super slot is consumed by a coin that would be rejected anyway
+    #   • no candle API calls are wasted fetching data for skipped coins
+    skip_set = set(skip_symbols) if skip_symbols else set()
+    _skipped_count = 0
+    if skip_set:
+        before_skip = len(pre_filtered)
+        pre_filtered = [s for s in pre_filtered if s not in skip_set]
+        _skipped_count = before_skip - len(pre_filtered)
+        with _filter_lock:
+            _filter_counts["skipped_pre_scan"] = _skipped_count
+
+    _removed_pre = (0 if not cfg.get('use_pre_filter', True)
+                    else _filter_counts['pre_filtered_out'])
+    _blk_tag = f", {_skipped_count} blacklisted" if skip_set else ""
     print(f"[Scan] {len(symbols)} valid symbols → "
           f"{len(pre_filtered)} after bulk pre-filter "
-          f"({'disabled' if not cfg.get('use_pre_filter', True) else _filter_counts['pre_filtered_out']} removed)")
+          f"({_removed_pre} removed{_blk_tag})")
 
     # ── Super Setup cap coordination ─────────────────────────────────────────
     # Shared atomic counter + lock — used by process() to decide whether a
@@ -2064,14 +2266,39 @@ def scan(cfg: dict, super_slots_remaining: int = None):
 # ─────────────────────────────────────────────────────────────────────────────
 _PRICE_ALERT_PCT = 3.0   # alert when current price is this % or more below entry
 
+def _parse_iso_safe(ts_str: str):
+    """Parse an ISO-8601 timestamp tolerating Z / naive formats.
+
+    Accepts:
+      • "2026-04-19T12:34:56.789+04:00"  (current dubai_now() format)
+      • "2026-04-19T12:34:56Z"           (UTC-suffixed)
+      • "2026-04-19T12:34:56"            (naive — assumed UTC)
+    Raises ValueError on un-parseable input (caller must handle).
+    """
+    s = str(ts_str).strip()
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    dt = datetime.fromisoformat(s)
+    if dt.tzinfo is None:                    # naive → assume UTC
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
 def _update_one_signal(sig: dict) -> None:
     """Fetch candles for a single open signal and update its status in-place.
 
     Runs inside a ThreadPoolExecutor — must not hold any locks.
     All writes go directly into the signal dict (dicts are shared references).
+
+    Any exception is logged (not silently swallowed) so TP/SL detection
+    failures become visible in the API Error Log panel.
     """
+    _sym = sig.get("symbol", "?")
     try:
-        sig_ts_ms = int(datetime.fromisoformat(sig["timestamp"]).timestamp() * 1000)
+        # Robust timestamp parsing — tolerates Z-suffixed or naive strings
+        # that may exist in older log entries.
+        sig_dt    = _parse_iso_safe(sig["timestamp"])
+        sig_ts_ms = int(sig_dt.timestamp() * 1000)
         candles   = get_klines(sig["symbol"], "5m", 200)
         post      = [c for c in candles if c["time"] >= sig_ts_ms]
         tp_time = sl_time = None
@@ -2104,8 +2331,13 @@ def _update_one_signal(sig: dict) -> None:
                 else:
                     sig["price_alert"]     = False
                     sig["price_alert_pct"] = 0.0
-    except Exception:
-        pass
+    except Exception as _upd_exc:
+        # Previously swallowed silently — surfaced now so malformed signals
+        # (bad timestamp, missing tp/sl, OKX fetch failure) become visible
+        # in the API Error Log instead of leaving trades "open" forever.
+        _append_error("signal_update",
+                      f"{_sym}: {type(_upd_exc).__name__}: {_upd_exc}",
+                      symbol=_sym)
 
 
 def update_open_signals(signals):
@@ -2154,8 +2386,24 @@ def _bg_loop():
             cfg = dict(_b._bsc_cfg)
         t0 = time.time()
         try:
+            # ── Phase 1: Update open signals (candle fetch per open trade) ──
+            # This is network-bound (0.3–0.8 s typical, up to several seconds
+            # on slow connections). We intentionally run it OUTSIDE `_log_lock`
+            # so the UI snapshot in the main render thread is never blocked
+            # waiting for OKX. Signal dicts are shared references, so in-place
+            # mutations performed by _update_one_signal are visible to the
+            # main log automatically — no write-back required.
+            # Safety: the only path that REPLACES the signals list wholesale
+            # (Flush All / Clear 24h) holds `_log_lock` while doing so, so
+            # taking a shallow copy under the lock here gives us a stable
+            # snapshot even if the user flushes mid-cycle. Any dicts that
+            # got removed from the live list won't be re-added — we only
+            # mutate dict fields, never reassign the list.
             with _log_lock:
-                _b._bsc_log["signals"] = update_open_signals(_b._bsc_log["signals"])
+                _open_snapshot = [s for s in _b._bsc_log["signals"]
+                                  if s.get("status") == "open"]
+            if _open_snapshot:
+                update_open_signals(_open_snapshot)   # in-place dict mutations
 
             # ── Circuit breaker: check AFTER updating signals so newly-closed
             # sl_hit trades are counted immediately ─────────────────────────
@@ -2173,9 +2421,9 @@ def _bg_loop():
             _super_cap        = max(0, int(cfg.get("max_super_trades", 5)))
             _super_slots_left = max(0, _super_cap - _current_supers)
 
-            new_sigs, errors = scan(cfg, super_slots_remaining=_super_slots_left)
-
             # ── Cooldown windows (TP — minutes; SL — hours, universal blackout) ─
+            # Compute BEFORE scan() so the skip set can be passed in and SL-cooldown
+            # coins never consume Super slots or trigger any candle fetches.
             now_dubai   = dubai_now()
             tp_cutoff   = now_dubai - timedelta(minutes=int(cfg["cooldown_minutes"]))
             sl_cd_hours = max(1, int(cfg.get("sl_cooldown_hours", 24)))
@@ -2199,6 +2447,17 @@ def _bg_loop():
                                  s["close_time"].replace("Z","+00:00")) >= sl_cutoff}
                 cooled = cooled_tp | cooled_sl
                 active = {s["symbol"] for s in _b._bsc_log["signals"] if s["status"]=="open"}
+
+            # Pass the full skip set (TP cooldown ∪ SL cooldown ∪ currently open)
+            # into scan() so these coins are dropped pre-deep-scan.
+            _pre_scan_skip = cooled | active
+            new_sigs, errors = scan(
+                cfg,
+                super_slots_remaining=_super_slots_left,
+                skip_symbols=_pre_scan_skip,
+            )
+
+            with _log_lock:
                 # ── Queue-limit check ─────────────────────────────────────────
                 # Count only genuinely OPEN trades (queue_limit entries are NOT
                 # real open positions — no order was placed for them).
@@ -2556,18 +2815,85 @@ with st.sidebar:
     if new_trade_enabled and new_demo_mode == "Live":
         st.warning("⚠️ LIVE mode — real funds at risk!")
 
+    # ── Credential source indicator ────────────────────────────────────────
+    # Env vars (OKX_API_KEY / OKX_API_SECRET / OKX_API_PASSPHRASE) take
+    # precedence over plaintext fields. Show the user which source is active
+    # so they know whether their secrets are sitting in scanner_config.json.
+    import os as _os_env
+    _env_has = {
+        "api_key":        bool(_os_env.environ.get("OKX_API_KEY", "").strip()),
+        "api_secret":     bool(_os_env.environ.get("OKX_API_SECRET", "").strip()),
+        "api_passphrase": bool(_os_env.environ.get("OKX_API_PASSPHRASE", "").strip()),
+    }
+    _any_env = any(_env_has.values())
+    _all_env = all(_env_has.values())
+    _has_plaintext = any(
+        str(_snap_cfg.get(k, "")).strip() for k in ("api_key", "api_secret", "api_passphrase")
+    )
+    if _all_env:
+        st.success(
+            "🔐 All 3 credentials loaded from environment variables "
+            "(`OKX_API_KEY`, `OKX_API_SECRET`, `OKX_API_PASSPHRASE`). "
+            "No secrets are persisted to disk.",
+            icon=None,
+        )
+    elif _any_env:
+        _missing = [k for k, v in _env_has.items() if not v]
+        st.info(
+            "🔑 Partial env-var credentials detected. Missing: "
+            f"`{', '.join(_missing)}`. Set all three env vars or fill the "
+            "text fields below.",
+            icon=None,
+        )
+    elif _has_plaintext:
+        st.warning(
+            "⚠️ API credentials are stored in **plaintext** in "
+            "`scanner_config.json`. Consider exporting `OKX_API_KEY`, "
+            "`OKX_API_SECRET`, and `OKX_API_PASSPHRASE` as environment "
+            "variables instead — they override the file and are never "
+            "written back to disk.",
+            icon=None,
+        )
+
+    # When env vars provide a credential, hide the saved value from the input
+    # and show a neutral placeholder instead of letting the user overwrite
+    # the empty-string placeholder with an actual key on save.
+    _key_display  = ("(from env)" if _env_has["api_key"]
+                     else _snap_cfg.get("api_key", ""))
+    _sec_display  = ("" if _env_has["api_secret"]
+                     else _snap_cfg.get("api_secret", ""))
+    _pass_display = ("" if _env_has["api_passphrase"]
+                     else _snap_cfg.get("api_passphrase", ""))
+
     new_api_key = st.text_input(
-        "API Key", value=_snap_cfg.get("api_key", ""),
-        key="cfg_api_key", disabled=not new_trade_enabled,
-        placeholder="Your OKX API key")
+        "API Key", value=_key_display,
+        key="cfg_api_key", disabled=not new_trade_enabled or _env_has["api_key"],
+        placeholder=("Loaded from OKX_API_KEY env var" if _env_has["api_key"]
+                     else "Your OKX API key"),
+        help=(
+            "OKX API key used to place and manage orders.\n\n"
+            "Env-var override: `OKX_API_KEY` (preferred — not written to disk)."
+        ))
     new_api_secret = st.text_input(
-        "API Secret", value=_snap_cfg.get("api_secret", ""),
-        key="cfg_api_secret", type="password", disabled=not new_trade_enabled,
-        placeholder="Your OKX API secret")
+        "API Secret", value=_sec_display,
+        key="cfg_api_secret", type="password",
+        disabled=not new_trade_enabled or _env_has["api_secret"],
+        placeholder=("Loaded from OKX_API_SECRET env var" if _env_has["api_secret"]
+                     else "Your OKX API secret"),
+        help=(
+            "OKX API secret used to sign requests.\n\n"
+            "Env-var override: `OKX_API_SECRET` (preferred — not written to disk)."
+        ))
     new_api_passphrase = st.text_input(
-        "API Passphrase", value=_snap_cfg.get("api_passphrase", ""),
-        key="cfg_api_passphrase", type="password", disabled=not new_trade_enabled,
-        placeholder="Your OKX API passphrase")
+        "API Passphrase", value=_pass_display,
+        key="cfg_api_passphrase", type="password",
+        disabled=not new_trade_enabled or _env_has["api_passphrase"],
+        placeholder=("Loaded from OKX_API_PASSPHRASE env var" if _env_has["api_passphrase"]
+                     else "Your OKX API passphrase"),
+        help=(
+            "OKX API passphrase (set when the key was created).\n\n"
+            "Env-var override: `OKX_API_PASSPHRASE` (preferred — not written to disk)."
+        ))
 
     # ── Size / Leverage / Margin Mode ────────────────────────────────────────
     # These fields are EDITABLE even when Auto-Trading is OFF, because they
@@ -3167,9 +3493,15 @@ with st.sidebar:
             # ── Auto-trading ─────────────────────────────────────────────────
             "trade_enabled":     bool(new_trade_enabled),
             "demo_mode":         (new_demo_mode == "Demo"),
-            "api_key":           new_api_key.strip(),
-            "api_secret":        new_api_secret.strip(),
-            "api_passphrase":    new_api_passphrase.strip(),
+            # When env vars supply credentials, the UI field is disabled and
+            # shows a placeholder — never save placeholders / env-sourced values
+            # back to disk. Use empty string so load_config() re-applies the env.
+            "api_key":           ("" if _env_has["api_key"]
+                                  else new_api_key.strip()),
+            "api_secret":        ("" if _env_has["api_secret"]
+                                  else new_api_secret.strip()),
+            "api_passphrase":    ("" if _env_has["api_passphrase"]
+                                  else new_api_passphrase.strip()),
             "trade_usdt_amount": float(new_trade_usdt),
             "trade_leverage":    int(new_trade_lev),
             "trade_margin_mode": new_margin_mode,
@@ -3277,11 +3609,28 @@ if _snap_cfg.get("use_ema_cross_15m", True):
 st.markdown("**Active Filters:**")
 st.caption("  |  ".join(badges) if badges else "No advanced filters enabled")
 
+# ── Shared PnL helper ──────────────────────────────────────────────────────
+# Single source of truth for per-signal PnL ($). Used by:
+#   • 24h Realized PnL summary (below)
+#   • PnL $ column in the Open Signals / Closed Signals table
+# Returns None if any input is missing or non-numeric — callers render "—".
+def _calc_pnl_usd(sig: dict, ref_price, usdt_fallback: float, lev_fallback: int):
+    try:
+        _entry = float(sig.get("entry", 0) or 0)
+        _ref   = float(ref_price) if ref_price is not None else 0.0
+        _usdt  = float(sig.get("trade_usdt", usdt_fallback) or 0)
+        _lev   = int(sig.get("trade_lev",    lev_fallback)  or 0)
+    except (TypeError, ValueError):
+        return None
+    if _entry <= 0 or _ref <= 0 or _usdt <= 0 or _lev <= 0:
+        return None
+    return (_ref / _entry - 1.0) * (_usdt * _lev)
+
 # ── 24-hour realized PnL ($) ───────────────────────────────────────────────
 # Sum realized PnL for all TP and SL closes in the last 24 hours. Uses the
-# same formula as the per-row "PnL $" column: (close_price / entry - 1) ×
-# (trade_usdt × trade_lev). Falls back to current config if the signal
-# pre-dates the stored trade_usdt / trade_lev fields.
+# shared _calc_pnl_usd helper so this always matches the per-row "PnL $"
+# column. Falls back to current config if the signal pre-dates the stored
+# trade_usdt / trade_lev fields.
 _pnl_cutoff_24h = dubai_now() - timedelta(hours=24)
 _pnl_24h_total = 0.0
 _pnl_24h_wins  = 0.0
@@ -3302,17 +3651,10 @@ for _s in signals:
         continue
     if _ct < _pnl_cutoff_24h:
         continue
-    try:
-        _entry_val = float(_s.get("entry", 0) or 0)
-        _close_val = float(_s.get("close_price", 0) or 0)
-        _usdt_val  = float(_s.get("trade_usdt", _cfg_usdt_fallback) or 0)
-        _lev_val   = int(_s.get("trade_lev",  _cfg_lev_fallback)   or 0)
-    except (TypeError, ValueError):
+    _pnl_val = _calc_pnl_usd(_s, _s.get("close_price"),
+                             _cfg_usdt_fallback, _cfg_lev_fallback)
+    if _pnl_val is None:
         continue
-    if _entry_val <= 0 or _close_val <= 0 or _usdt_val <= 0 or _lev_val <= 0:
-        continue
-    _notional_val = _usdt_val * _lev_val
-    _pnl_val      = (_close_val / _entry_val - 1.0) * _notional_val
     _pnl_24h_total += _pnl_val
     if _s["status"] == "tp_hit":
         _pnl_24h_wins  += _pnl_val
@@ -3499,15 +3841,13 @@ def _build_signal_row(s: dict, is_open_table: bool = False,
     #   • queue   → "—" (no trade was ever opened)
     pnl_col = "—"
     if status in ("open", "tp_hit", "sl_hit"):
-        _entry_pnl = float(s.get("entry", 0) or 0)
-        _usdt_pnl  = float(s.get("trade_usdt", _snap_cfg.get("trade_usdt_amount", 0)) or 0)
-        _lev_pnl   = int(s.get("trade_lev", _snap_cfg.get("trade_leverage", 10)) or 0)
         if status == "open":
             _ref_pnl = s.get("latest_price")
             if _ref_pnl is None:
                 # Fall back to deriving from price_alert_pct if latest_price
                 # not stored yet (first cycle, before update_open_signals ran)
                 _pa = s.get("price_alert_pct")
+                _entry_pnl = float(s.get("entry", 0) or 0)
                 if _pa is not None and _entry_pnl > 0:
                     try:
                         _ref_pnl = _entry_pnl * (1.0 - float(_pa) / 100.0)
@@ -3516,14 +3856,10 @@ def _build_signal_row(s: dict, is_open_table: bool = False,
         else:
             # tp_hit or sl_hit — close_price is the realized exit level
             _ref_pnl = s.get("close_price")
-        if (_entry_pnl > 0 and _usdt_pnl > 0 and _lev_pnl > 0
-                and _ref_pnl is not None):
-            try:
-                _notional_pnl = _usdt_pnl * _lev_pnl
-                _pnl_val = (float(_ref_pnl) / _entry_pnl - 1.0) * _notional_pnl
-                pnl_col = f"{_pnl_val:+.2f} $"
-            except (TypeError, ValueError, ZeroDivisionError):
-                pnl_col = "—"
+        # Use the shared helper — single source of truth for PnL math.
+        _pnl_val = _calc_pnl_usd(s, _ref_pnl, _cfg_usdt_fallback, _cfg_lev_fallback)
+        if _pnl_val is not None:
+            pnl_col = f"{_pnl_val:+.2f} $"
 
     ts_str    = fmt_dubai(s.get("timestamp", ""))
     close_str = fmt_dubai(s["close_time"]) if s.get("close_time") else "—"
@@ -4309,9 +4645,11 @@ st.divider()
 with getattr(_b, "_bsc_error_log_lock", threading.Lock()):
     _err_snap = list(getattr(_b, "_bsc_error_log", []))
 
-_TYPE_ICON  = {"scan": "🔴", "trade": "🟠", "loop": "🟣", "http": "🔵"}
+_TYPE_ICON  = {"scan": "🔴", "trade": "🟠", "loop": "🟣", "http": "🔵",
+               "signal_update": "🟤", "io": "💾"}
 _TYPE_LABEL = {"scan": "Scan/Candle", "trade": "Trade/Order",
-               "loop": "Scanner loop", "http": "HTTP/Network"}
+               "loop": "Scanner loop", "http": "HTTP/Network",
+               "signal_update": "Signal Update", "io": "File I/O"}
 
 _err_count = len(_err_snap)
 _err_label = f"⚠️ API Error Log — {_err_count} entr{'y' if _err_count == 1 else 'ies'}"
