@@ -12,7 +12,7 @@ v2 additions:
   E. N-trade Queue Limit      — when the max open-trade cap (cfg "max_open_trades",
                                  default 15, adjustable from sidebar) is reached, new
                                  signals are logged as status="queue_limit" (no order
-                                 placed). The coin is NOT blocked by active or cooldaown
+                                 placed). The coin is NOT blocked by active or cooldown
                                  filters — it is freely re-scanned every cycle until a
                                  slot opens. Lowering the cap does NOT close existing
                                  trades; overflow simply routes to queue_limit.
@@ -2905,7 +2905,7 @@ with st.sidebar:
     # ── Size / Leverage / Margin Mode ────────────────────────────────────────
     # These fields are EDITABLE even when Auto-Trading is OFF, because they
     # drive display-only calculations too:
-    #   • Est. Liq. column    — uses leverage + margin mode
+    #   • Est Liquidity column    — uses leverage + margin mode
     #   • PnL $ column        — uses size × leverage as notional
     #   • Super / normal SL   — uses leverage to derive isolated SL (1 / lev)
     # The user needs to be able to tune these to preview what a live trade
@@ -2931,7 +2931,7 @@ with st.sidebar:
             "Leverage applied (capped by OKX max for each coin).\n\n"
             "Used by:\n"
             "  • Live order leverage (when Auto-Trading is enabled)\n"
-            "  • Est. Liq. column — isolated liq ≈ entry × (1 − 1/lev)\n"
+            "  • Est Liquidity column — isolated liq ≈ entry × (1 − 1/lev)\n"
             "  • PnL $ column — notional = Size × Leverage\n"
             "  • Isolated SL level — SL = entry × (1 − 1/lev)\n\n"
             "Editable whether or not Auto-Trading is enabled."
@@ -2944,11 +2944,11 @@ with st.sidebar:
             "Margin mode for futures positions.\n\n"
             "  • isolated — each position uses its own collateral; SL is "
             "pinned at the liquidation price (1/leverage below entry). "
-            "Est. Liq. column shows the per-trade liq price.\n"
+            "Est Liquidity column shows the per-trade liq price.\n"
             "  • cross    — positions share account equity as collateral; SL "
-            "uses the configured SL %. Est. Liq. column shows '—'.\n\n"
+            "uses the configured SL %. Est Liquidity column shows '—'.\n\n"
             "Editable whether or not Auto-Trading is enabled — affects display "
-            "columns (Est. Liq.) and SL placement logic."
+            "columns (Est Liquidity) and SL placement logic."
         ))
 
     # Notional preview — always shown (even when Auto-Trading is off) so the
@@ -3750,15 +3750,26 @@ def _build_signal_row(s: dict, is_open_table: bool = False,
                       show_pnl: bool = False) -> dict:
     """Convert one signal dict into a table row dict (all columns).
 
-    Flags control which optional columns appear:
-      • `is_open_table=True` adds two open-only columns:
-          - "Current Drop" (3rd column) — signed % change of current price vs.
-            entry. Populated only for rows already flagged with DL / TL / DL-TL.
-          - "Est. Liq." (4th column) — estimated liquidation price for isolated
-            trades, with % distance from entry in parentheses. Cross trades
-            show "—".
+    Flags control which schema is emitted:
+      • `is_open_table=True` — emit the Open-Signals-specific 26-column layout
+        with its custom ordering and renamed columns:
+          - "Current Status" (pos 7) — signed % change vs. entry, computed
+            for EVERY open row (not just DL/TL-flagged). "—" only when live
+            price data hasn't landed yet.
+          - "Est Liquidity"  (pos 11) — estimated liquidation price for
+            isolated trades, % distance from entry in parentheses. Cross
+            trades show "—".
+          - "Order Size"     (pos 26) — total dollar notional (margin ×
+            leverage). Prefers the value OKX actually used; falls back to
+            sidebar settings for non-traded signals.
 
-      • `show_pnl=True` adds the PnL column (after Sector):
+      • `is_open_table=False` — emit the legacy column layout used by TP Hit
+        and SL Hit tables (and Queue Limit). Keeps the original "Fill $"
+        column (actual market fill price), no "Current Status" / "Est
+        Liquidity" / "Order Size" columns.
+
+      • `show_pnl=True` adds the PnL column (after Sector in legacy layout,
+        position 5 in Open layout):
           - "PnL $" — dollar PnL, formatted like "-2.76 $" / "+1.34 $".
             • Open trades    → live unrealized PnL (uses latest_price)
             • TP Hit trades  → realized gain   (uses close_price = TP)
@@ -3794,22 +3805,28 @@ def _build_signal_row(s: dict, is_open_table: bool = False,
         elif _dl:          alert_col = "🔴 DL"
         elif _tl:          alert_col = "🔴 TL"
 
-    # Current Drop column — signed % change from entry, populated only when
-    # there is an active DL / TL / DL-TL alert on an open trade.
-    current_drop_col = "—"
-    if status == "open" and alert_col:
+    # Current Status column — signed % change from entry for EVERY open trade
+    # (previously "Current Drop", gated on DL/TL alerts — now always shown so
+    # users can see real-time drift at a glance).
+    #
+    # price_alert_pct is populated by update_open_signals on every cycle
+    # whenever candles are available, so nearly all open rows have a value.
+    # Rows where it's missing (first cycle before update ran, or empty
+    # candle fetch) fall back to "—".
+    current_status_col = "—"
+    if status == "open":
         _entry_rm = float(s.get("entry", 0) or 0)
         _pa_pct   = s.get("price_alert_pct")
         if _pa_pct is not None and _entry_rm > 0:
             # price_alert_pct = (entry - latest) / entry * 100 (positive = drop)
-            # Flip sign: negative = drop, positive = rise — reads intuitively.
+            # Flip sign so negative = drop, positive = rise — reads intuitively.
             try:
                 _change = -float(_pa_pct)
-                current_drop_col = f"{_change:+.2f}%"
+                current_status_col = f"{_change:+.2f}%"
             except (TypeError, ValueError):
-                current_drop_col = "—"
+                current_status_col = "—"
 
-    # ── Est. Liq. column ─────────────────────────────────────────────────────
+    # ── Est Liquidity column (Open Signals only) ────────────────────────────
     # Estimated liquidation price + % distance from entry (negative, since liq
     # is below entry for LONG). Shown only for isolated trades. Cross-margin
     # trades show "—" because their liquidation depends on account-wide equity
@@ -3975,31 +3992,16 @@ def _build_signal_row(s: dict, is_open_table: bool = False,
         except Exception:
             pass
 
-    # Build row dict in order. Optional columns (inserted via the flags):
-    #   • "Current Drop" → 3rd column — only when is_open_table=True
-    #   • "Est. Liq."    → 4th column — only when is_open_table=True
-    #   • "Margin Mode"  → right after Setup — only when show_pnl=True
-    #                       (Open, TP Hit, and SL Hit tables set show_pnl=True;
-    #                        Queue Limit table leaves it False, since queued
-    #                        signals never actually placed a trade.)
-    #   • "PnL $"        → right after Sector — only when show_pnl=True
-    row: dict = {
-        "Time (GST)":     ts_str,
-        "Alert":          alert_col,
-    }
-    if is_open_table:
-        row["Current Drop"] = current_drop_col
-        row["Est. Liq."]    = est_liq_col
-    row["Symbol"] = s.get("symbol", "")
-    row["Setup"]  = setup_type
+    # ── Margin Mode display value (shared by Open and non-Open tables) ───────
+    # When `order_margin_mode` is present on the signal, we show the value OKX
+    # actually used. When it's missing (auto-trading OFF at the time the
+    # signal fired, creds missing, or `place_okx_order` short-circuited before
+    # any request was sent), we fall back to the CURRENT sidebar setting so
+    # this column stays consistent with the OKX Command column and the active
+    # config — prefixed with "⚠️" to signal that no live trade confirmation
+    # exists for the row.
+    _mm_val = ""
     if show_pnl:
-        # Margin Mode — captured on trade placement in sig["order_margin_mode"].
-        # When the field is present, we show the value OKX actually used.
-        # When it's missing (e.g. the signal fired with auto-trading OFF, or
-        # `place_okx_order` short-circuited before any request was sent), we
-        # fall back to the CURRENT sidebar setting so this column stays
-        # consistent with the OKX Command column and the active config —
-        # prefixed with "⚠️" to signal that no live trade confirmation exists.
         _mm_raw = (s.get("order_margin_mode") or "").strip().lower()
         if _mm_raw not in ("isolated", "cross"):
             _mm_raw = (_snap_cfg.get("trade_margin_mode") or "isolated").strip().lower()
@@ -4007,9 +4009,72 @@ def _build_signal_row(s: dict, is_open_table: bool = False,
         else:
             _mm_inferred = False
         if _mm_raw == "isolated":
-            row["Margin Mode"] = ("⚠️ " if _mm_inferred else "") + "🔒 Isolated"
+            _mm_val = ("⚠️ " if _mm_inferred else "") + "🔒 Isolated"
         else:  # "cross"
-            row["Margin Mode"] = ("⚠️ " if _mm_inferred else "") + "🔓 Cross"
+            _mm_val = ("⚠️ " if _mm_inferred else "") + "🔓 Cross"
+
+    # ── Order Size (Open Signals only) ───────────────────────────────────────
+    # Total dollar notional = margin × leverage. Prefers the value actually
+    # sent to OKX (`order_notional`), then per-signal trade_usdt × trade_lev
+    # (captured at trade placement), then current sidebar settings as a last
+    # resort (so non-traded signals still show what WOULD have been sent).
+    _os_notional = float(s.get("order_notional", 0) or 0)
+    if _os_notional <= 0:
+        _os_usdt = float(s.get("trade_usdt", _snap_cfg.get("trade_usdt_amount", 0)) or 0)
+        _os_lev  = int(s.get("trade_lev",   _snap_cfg.get("trade_leverage",     0)) or 0)
+        if _os_usdt > 0 and _os_lev > 0:
+            _os_notional = _os_usdt * _os_lev
+    order_size_col = f"${_os_notional:,.2f}" if _os_notional > 0 else "—"
+
+    if is_open_table:
+        # New Open-Signals-specific column order (26 columns).
+        # TP Hit / SL Hit / Queue Limit tables use the non-Open branch below,
+        # keeping their established ordering and "Fill $" (fill price) column.
+        row: dict = {
+            "Time (GST)":      ts_str,
+            "Symbol":          s.get("symbol", ""),
+            "Alert":           alert_col,
+            "Setup":           setup_type,
+            "PnL $":           pnl_col,
+            "Margin Mode":     _mm_val,
+            "Current Status":  current_status_col,
+            "Signal Entry":    s.get("signal_entry", s.get("entry", "")),
+            "TP":              s.get("tp", ""),
+            "SL":              s.get("sl", ""),
+            "Est Liquidity":   est_liq_col,
+            "Duration":        duration_str,
+            "TP $":            tp_usd_str,
+            "SL $":            sl_usd_str,
+            "Status":          status_icon,
+            "Close Time":      close_str,
+            "Sector":          s.get("sector", "Other"),
+            "Close $":         s.get("close_price") or "—",
+            "Max Lev":         f"{max_lev}×",
+            "Order":           ord_status_str,
+            "OKX Command":     okx_cmd_str,
+            "Entry Criteria":  crit_str,
+            "Order ID":        ord_id_str,
+            "Algo ID":         algo_id_str,
+            "⚠️ SL Reason":   sl_reason,
+            "Order Size":      order_size_col,
+        }
+        return row
+
+    # ── Non-Open tables (TP Hit, SL Hit, Queue Limit) — unchanged ordering ──
+    # Optional columns (inserted via the flags):
+    #   • "Margin Mode"  → right after Setup — only when show_pnl=True
+    #                       (TP Hit and SL Hit tables set show_pnl=True;
+    #                        Queue Limit table leaves it False, since queued
+    #                        signals never actually placed a trade.)
+    #   • "PnL $"        → right after Sector — only when show_pnl=True
+    row = {
+        "Time (GST)":     ts_str,
+        "Alert":          alert_col,
+    }
+    row["Symbol"] = s.get("symbol", "")
+    row["Setup"]  = setup_type
+    if show_pnl:
+        row["Margin Mode"] = _mm_val
     row["Sector"] = s.get("sector", "Other")
     if show_pnl:
         row["PnL $"] = pnl_col
@@ -4039,13 +4104,16 @@ _SIG_COL_CFG = {
     "Alert":          st.column_config.TextColumn(
                           "🚨 Alert", width="small",
                           help="🔴 DL = price ≥3% below entry  |  🔴 TL = open ≥2 hours"),
-    "Current Drop":   st.column_config.TextColumn(
-                          "⚠️ Current Drop", width="small",
-                          help="Signed % change of current price vs. entry — "
-                               "negative = drop, positive = rise. Shown only "
-                               "for open trades flagged DL / TL / DL-TL."),
-    "Est. Liq.":      st.column_config.TextColumn(
-                          "💥 Est. Liq.", width="medium",
+    "Current Status": st.column_config.TextColumn(
+                          "📈 Current Status", width="small",
+                          help="Signed % change of current price vs. entry for "
+                               "every open trade — negative = drop, positive = "
+                               "rise. Computed on each scan cycle from the "
+                               "latest close price; rows show \"—\" only when "
+                               "live price data hasn't landed yet (typically "
+                               "the very first cycle after a signal fires)."),
+    "Est Liquidity":  st.column_config.TextColumn(
+                          "💥 Est Liquidity", width="medium",
                           help="Estimated liquidation price for isolated trades, "
                                "with % distance from entry in parentheses.\n\n"
                                "Formula (LONG isolated, approximate): "
@@ -4054,6 +4122,20 @@ _SIG_COL_CFG = {
                                "(e.g. 10× → -10%, 20× → -5%).\n\n"
                                "Cross-margin trades show \"—\" because liquidation "
                                "depends on account-wide equity, not per-trade info."),
+    "Order Size":     st.column_config.TextColumn(
+                          "💵 Order Size", width="small",
+                          help="Total dollar notional for this trade "
+                               "(collateral × leverage).\n\n"
+                               "Source priority:\n"
+                               "  1. `order_notional` from the actual OKX "
+                               "placement (authoritative).\n"
+                               "  2. Per-signal `trade_usdt × trade_lev` "
+                               "captured at placement time.\n"
+                               "  3. Current sidebar settings (for signals "
+                               "that never opened a real trade — shows what "
+                               "WOULD have been sent).\n\n"
+                               "\"—\" means neither a trade amount nor a "
+                               "leverage is available to compute from."),
     "Setup":          st.column_config.TextColumn(width="small"),
     "Margin Mode":    st.column_config.TextColumn(
                           "Margin Mode", width="small",
