@@ -12,7 +12,7 @@ v2 additions:
   E. N-trade Queue Limit      — when the max open-trade cap (cfg "max_open_trades",
                                  default 15, adjustable from sidebar) is reached, new
                                  signals are logged as status="queue_limit" (no order
-                                 placed). The coin is NOT blocked by active or cooldown
+                                 placed). The coin is NOT blocked by active or cooldaown
                                  filters — it is freely re-scanned every cycle until a
                                  slot opens. Lowering the cap does NOT close existing
                                  trades; overflow simply routes to queue_limit.
@@ -989,7 +989,7 @@ def _set_leverage_okx(sym: str, cfg: dict) -> None:
     _trade_post("/api/v5/account/set-leverage", {
         "instId":  _to_okx(sym),
         "lever":   lev,
-        "mgnMode": cfg.get("trade_margin_mode", "cross"),
+        "mgnMode": cfg.get("trade_margin_mode", "isolated"),
     }, cfg)
 
 _OKX_KNOWN_ERRORS = {
@@ -1081,7 +1081,7 @@ def place_okx_order(sig: dict, cfg: dict) -> dict:
                     "status": "error", "error": _err}
 
         lev    = min(_lev_cfg, get_max_leverage(sym))
-        mode   = cfg.get("trade_margin_mode", "cross")
+        mode   = cfg.get("trade_margin_mode", "isolated")
 
         # ── Pre-trade instrument validation ───────────────────────────────────
         # A coin can appear in signals even after being delisted from OKX SWAP
@@ -1279,7 +1279,7 @@ def place_okx_manual_order(sym: str, entry: float, tp: float, sl: float,
     try:
         usdt   = float(cfg.get("trade_usdt_amount", 10))
         lev    = min(int(cfg.get("trade_leverage", 10)), get_max_leverage(sym))
-        mode   = cfg.get("trade_margin_mode", "cross")
+        mode   = cfg.get("trade_margin_mode", "isolated")
 
         # Pre-trade instrument check
         ct_cache = _b._bsc_symbol_cache.get("ct_val", {})
@@ -2538,7 +2538,14 @@ def _bg_loop():
                     sig["demo_mode"]         = bool(cfg.get("demo_mode", True))
                     sig["order_ct_val"]      = float(result.get("ct_val", 0) or 0)
                     sig["order_notional"]    = float(result.get("notional", 0) or 0)
-                    sig["order_margin_mode"] = result.get("tdMode", "cross")
+                    # Prefer the tdMode that `place_okx_order` actually used
+                    # (passed back in its `_base_info`). If the call bailed on
+                    # early validation before building _base_info, fall back to
+                    # the cfg value — which matches what would have been sent.
+                    sig["order_margin_mode"] = (
+                        result.get("tdMode")
+                        or cfg.get("trade_margin_mode", "isolated")
+                    )
                     sig["order_is_hedge"]    = bool(result.get("is_hedge", False))
                     # Overwrite entry/TP/SL with actual fill values if available.
                     # Market orders fill at the live price, not the signal price —
@@ -3016,7 +3023,7 @@ with st.sidebar:
             _tc = dict(_snap_cfg)
             _cs = getattr(_b, "_bsc_api_conn_status", {})
             _is_h = _cs.get("pos_mode", "net_mode") == "long_short_mode"
-            _mode = _tc.get("trade_margin_mode", "cross")
+            _mode = _tc.get("trade_margin_mode", "isolated")
 
             # Set leverage
             try:
@@ -3915,15 +3922,33 @@ def _build_signal_row(s: dict, is_open_table: bool = False,
     else:                         ord_status_str = "—"
 
     # ── OKX Command column — shows exact parameters sent to OKX ──────────────
-    _ord_sz      = int(s.get("order_sz", 0) or 0)
-    _ct_val      = float(s.get("order_ct_val", 0) or 0)
-    _notional    = float(s.get("order_notional", 0) or 0)
-    _margin_mode = s.get("order_margin_mode", "") or "cross"
-    _is_hedge    = bool(s.get("order_is_hedge", False))
+    # A real order was placed iff we have an ordId OR order_status indicates
+    # the call reached OKX (placed / partial / error — an explicit rejection
+    # counts because OKX did see the request). Signals without these hallmarks
+    # never actually talked to OKX (auto-trading OFF, creds missing, or the
+    # pre-flight validation in place_okx_order short-circuited); we must not
+    # display a fabricated command string for them.
+    _ord_sz       = int(s.get("order_sz", 0) or 0)
+    _ct_val       = float(s.get("order_ct_val", 0) or 0)
+    _notional     = float(s.get("order_notional", 0) or 0)
+    _is_hedge     = bool(s.get("order_is_hedge", False))
+    _order_id     = (s.get("order_id") or "").strip()
+    _ord_status   = (s.get("order_status") or "").strip()
+    _order_sent   = bool(_order_id) or _ord_status in ("placed", "partial", "error")
+    # Fallback margin mode reflects the CURRENT sidebar setting — this matches
+    # what `place_okx_order` would send RIGHT NOW, and keeps the Margin Mode
+    # column (which uses the same fallback) in sync.
+    _margin_mode  = (s.get("order_margin_mode") or "").strip().lower()
+    if _margin_mode not in ("isolated", "cross"):
+        _margin_mode = (_snap_cfg.get("trade_margin_mode") or "isolated").strip().lower()
     if not _notional and _usdt > 0 and _lev > 0:
         _notional = _usdt * _lev   # reconstruct for older signals without stored notional
     if status == "queue_limit":
         okx_cmd_str = "No order placed — Queue Limit"
+    elif not _order_sent:
+        # Signal fired but no OKX order was ever placed (auto-trading off,
+        # missing creds, or early-return). Don't manufacture a fake command.
+        okx_cmd_str = "No order placed — auto-trading off or rejected pre-flight"
     elif _usdt > 0 or _ord_sz > 0:
         _sym_okx = _to_okx(s.get("symbol", ""))
         _ps_part = " | posSide: long" if _is_hedge else ""
@@ -3969,17 +3994,22 @@ def _build_signal_row(s: dict, is_open_table: bool = False,
     row["Setup"]  = setup_type
     if show_pnl:
         # Margin Mode — captured on trade placement in sig["order_margin_mode"].
-        # We surface the value that was actually used by OKX when the trade
-        # opened (not the current sidebar default), so historical rows remain
-        # accurate if the user later toggles the global setting. Blank or
-        # missing → "Unknown" (e.g. signals that never auto-traded).
+        # When the field is present, we show the value OKX actually used.
+        # When it's missing (e.g. the signal fired with auto-trading OFF, or
+        # `place_okx_order` short-circuited before any request was sent), we
+        # fall back to the CURRENT sidebar setting so this column stays
+        # consistent with the OKX Command column and the active config —
+        # prefixed with "⚠️" to signal that no live trade confirmation exists.
         _mm_raw = (s.get("order_margin_mode") or "").strip().lower()
-        if _mm_raw == "isolated":
-            row["Margin Mode"] = "🔒 Isolated"
-        elif _mm_raw == "cross":
-            row["Margin Mode"] = "🔓 Cross"
+        if _mm_raw not in ("isolated", "cross"):
+            _mm_raw = (_snap_cfg.get("trade_margin_mode") or "isolated").strip().lower()
+            _mm_inferred = True
         else:
-            row["Margin Mode"] = "Unknown"
+            _mm_inferred = False
+        if _mm_raw == "isolated":
+            row["Margin Mode"] = ("⚠️ " if _mm_inferred else "") + "🔒 Isolated"
+        else:  # "cross"
+            row["Margin Mode"] = ("⚠️ " if _mm_inferred else "") + "🔓 Cross"
     row["Sector"] = s.get("sector", "Other")
     if show_pnl:
         row["PnL $"] = pnl_col
@@ -4027,18 +4057,21 @@ _SIG_COL_CFG = {
     "Setup":          st.column_config.TextColumn(width="small"),
     "Margin Mode":    st.column_config.TextColumn(
                           "Margin Mode", width="small",
-                          help="Margin mode that was in effect at OKX when the "
-                               "trade was opened.\n\n"
-                               "  • 🔒 Isolated — only this trade's collateral "
-                               "is at risk (per-position liquidation).\n"
+                          help="Margin mode for this signal's trade.\n\n"
+                               "  • 🔒 Isolated — per-position liquidation; "
+                               "only this trade's collateral is at risk.\n"
                                "  • 🔓 Cross    — liquidation depends on "
                                "account-wide equity.\n"
-                               "  • Unknown    — no recorded margin mode "
-                               "(e.g. the signal was never auto-traded, or the "
-                               "trade predates this field).\n\n"
-                               "The value reflects what OKX actually used at "
-                               "trade time; changing the sidebar default later "
-                               "does not update rows that were already opened."),
+                               "  • ⚠️ prefix — no `order_margin_mode` was "
+                               "recorded on this signal (e.g. auto-trading "
+                               "was OFF when it fired, or credentials missing, "
+                               "or the order short-circuited before any OKX "
+                               "call). The value shown is the CURRENT sidebar "
+                               "setting — NOT a confirmation of what was sent "
+                               "to OKX (nothing was).\n\n"
+                               "Rows without the ⚠️ reflect what OKX actually "
+                               "used at trade time; changing the sidebar "
+                               "default later does not relabel them."),
     "PnL $":          st.column_config.TextColumn(
                           "💰 PnL $", width="small",
                           help="Dollar PnL based on the collateral and leverage "
