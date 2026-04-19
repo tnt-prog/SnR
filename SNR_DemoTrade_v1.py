@@ -3953,9 +3953,11 @@ def _build_signal_row(s: dict, is_open_table: bool = False,
     # Build row dict in order. Optional columns (inserted via the flags):
     #   • "Current Drop" → 3rd column — only when is_open_table=True
     #   • "Est. Liq."    → 4th column — only when is_open_table=True
-    #   • "PnL $"        → right after Sector — only when show_pnl=True
+    #   • "Margin Mode"  → right after Setup — only when show_pnl=True
     #                       (Open, TP Hit, and SL Hit tables set show_pnl=True;
-    #                        Queue Limit table leaves it False.)
+    #                        Queue Limit table leaves it False, since queued
+    #                        signals never actually placed a trade.)
+    #   • "PnL $"        → right after Sector — only when show_pnl=True
     row: dict = {
         "Time (GST)":     ts_str,
         "Alert":          alert_col,
@@ -3965,6 +3967,19 @@ def _build_signal_row(s: dict, is_open_table: bool = False,
         row["Est. Liq."]    = est_liq_col
     row["Symbol"] = s.get("symbol", "")
     row["Setup"]  = setup_type
+    if show_pnl:
+        # Margin Mode — captured on trade placement in sig["order_margin_mode"].
+        # We surface the value that was actually used by OKX when the trade
+        # opened (not the current sidebar default), so historical rows remain
+        # accurate if the user later toggles the global setting. Blank or
+        # missing → "Unknown" (e.g. signals that never auto-traded).
+        _mm_raw = (s.get("order_margin_mode") or "").strip().lower()
+        if _mm_raw == "isolated":
+            row["Margin Mode"] = "🔒 Isolated"
+        elif _mm_raw == "cross":
+            row["Margin Mode"] = "🔓 Cross"
+        else:
+            row["Margin Mode"] = "Unknown"
     row["Sector"] = s.get("sector", "Other")
     if show_pnl:
         row["PnL $"] = pnl_col
@@ -4010,6 +4025,20 @@ _SIG_COL_CFG = {
                                "Cross-margin trades show \"—\" because liquidation "
                                "depends on account-wide equity, not per-trade info."),
     "Setup":          st.column_config.TextColumn(width="small"),
+    "Margin Mode":    st.column_config.TextColumn(
+                          "Margin Mode", width="small",
+                          help="Margin mode that was in effect at OKX when the "
+                               "trade was opened.\n\n"
+                               "  • 🔒 Isolated — only this trade's collateral "
+                               "is at risk (per-position liquidation).\n"
+                               "  • 🔓 Cross    — liquidation depends on "
+                               "account-wide equity.\n"
+                               "  • Unknown    — no recorded margin mode "
+                               "(e.g. the signal was never auto-traded, or the "
+                               "trade predates this field).\n\n"
+                               "The value reflects what OKX actually used at "
+                               "trade time; changing the sidebar default later "
+                               "does not update rows that were already opened."),
     "PnL $":          st.column_config.TextColumn(
                           "💰 PnL $", width="small",
                           help="Dollar PnL based on the collateral and leverage "
