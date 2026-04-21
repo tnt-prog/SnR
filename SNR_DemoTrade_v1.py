@@ -4097,6 +4097,91 @@ with st.sidebar:
 # ─────────────────────────────────────────────────────────────────────────────
 st.title("S&R — Crypto Intelligent Portal")
 
+# ── Total Realized PnL banner ──────────────────────────────────────────────
+# Prominent all-time total at the top of the page. Sums realized PnL across
+# every closed signal (tp_hit + sl_hit + dca_sl_hit) using the same formula
+# as the 24h summary and the per-row PnL column:
+#   • DCA trades  → (close / avg_entry − 1) × total_notional
+#   • Non-DCA     → (close / entry     − 1) × (trade_usdt × trade_lev)
+# Green = net gain, red = net loss, grey = no closed trades yet.
+def _pnl_topline(sig: dict, usdt_fb: float, lev_fb: int):
+    try:
+        _close = float(sig.get("close_price") or 0)
+    except (TypeError, ValueError):
+        return None
+    if _close <= 0:
+        return None
+    _dcn = int(sig.get("dca_count", 0) or 0)
+    if _dcn > 0:
+        try:
+            _avg = float(sig.get("avg_entry", 0) or 0)
+            _tnl = float(sig.get("total_notional", 0) or 0)
+        except (TypeError, ValueError):
+            _avg, _tnl = 0.0, 0.0
+        if _avg > 0 and _tnl > 0:
+            return (_close / _avg - 1.0) * _tnl
+    try:
+        _ent = float(sig.get("entry", 0) or 0)
+        _usd = float(sig.get("trade_usdt", usdt_fb) or 0)
+        _lev = int(sig.get("trade_lev", lev_fb) or 0)
+    except (TypeError, ValueError):
+        return None
+    if _ent <= 0 or _usd <= 0 or _lev <= 0:
+        return None
+    return (_close / _ent - 1.0) * (_usd * _lev)
+
+_total_pnl       = 0.0
+_total_pnl_wins  = 0.0
+_total_pnl_loss  = 0.0
+_total_tp_ct     = 0
+_total_sl_ct     = 0
+_total_dca_sl_ct = 0
+_cfg_usdt_fb_top = float(_snap_cfg.get("trade_usdt_amount", 0) or 0)
+_cfg_lev_fb_top  = int(_snap_cfg.get("trade_leverage", 10) or 0)
+for _s in signals:
+    if _s.get("status") not in ("tp_hit", "sl_hit", "dca_sl_hit"):
+        continue
+    _v = _pnl_topline(_s, _cfg_usdt_fb_top, _cfg_lev_fb_top)
+    if _v is None:
+        continue
+    _total_pnl += _v
+    if _s["status"] == "tp_hit":
+        _total_pnl_wins += _v
+        _total_tp_ct    += 1
+    elif _s["status"] == "dca_sl_hit":
+        _total_pnl_loss  += _v
+        _total_dca_sl_ct += 1
+    else:
+        _total_pnl_loss += _v
+        _total_sl_ct    += 1
+
+_closed_total = _total_tp_ct + _total_sl_ct + _total_dca_sl_ct
+if _closed_total == 0:
+    _total_color = "#9CA3AF"
+    _total_prefix = "💼"
+    _total_sub    = "no closed trades yet"
+else:
+    _total_color  = "#22C55E" if _total_pnl >= 0 else "#EF4444"
+    _total_prefix = "💼" if _total_pnl >= 0 else "📉"
+    _total_sub    = (
+        f"{_closed_total} closed trades  ·  "
+        f"{_total_tp_ct} TP (+\\${_total_pnl_wins:,.2f})  |  "
+        f"{_total_sl_ct} SL  |  "
+        f"{_total_dca_sl_ct} DCA-SL (\\${_total_pnl_loss:,.2f})"
+    )
+
+st.markdown(
+    f"<div style='padding:10px 14px; margin:4px 0 10px 0; "
+    f"border:1px solid {_total_color}33; border-radius:10px; "
+    f"background:linear-gradient(90deg, {_total_color}14, transparent);'>"
+    f"<span style='font-size:0.95em; opacity:0.75;'>{_total_prefix} Total Realized PnL</span><br>"
+    f"<span style='font-size:2.2em; font-weight:700; color:{_total_color};'>"
+    f"{_total_pnl:+,.2f} $</span>  "
+    f"<span style='opacity:0.75; font-size:0.9em; margin-left:8px;'>{_total_sub}</span>"
+    f"</div>",
+    unsafe_allow_html=True,
+)
+
 last_scan = health.get("last_scan_at", "never")
 if last_scan and last_scan != "never":
     try:
