@@ -156,6 +156,17 @@ DEFAULT_CONFIG: dict = {
     "trade_usdt_amount":     10.0,   # USDT collateral per trade (before leverage)
     "trade_leverage":        10,     # leverage applied (capped by MAX_LEVERAGE)
     "trade_margin_mode":     "isolated",  # "cross" or "isolated"
+    # ── DCA (Dollar-Cost Averaging) ──────────────────────────────────────────
+    # 0 = DCA OFF (legacy behavior — sidebar TP/SL apply normally).
+    # 1-6 = Allow up to N automated DCA adds per trade.
+    # Each DCA doubles the previous add's margin (10 → 10 → 20 → 40 → 80 …).
+    # Isolated: DCA triggers when price reaches 70% of the distance from the
+    #           current blended average to the current liquidation price.
+    # Cross:    DCA triggers when price drops 7% below the current blended avg.
+    # After N DCAs are consumed, a final -3% SL (below blended avg) closes the
+    # position into a dedicated DCA SL Hit table. When DCA > 0, the sidebar SL %
+    # is ignored for that trade — only TP and the final -3% rule can close it.
+    "trade_max_dca":         1,
         "watchlist": [
         "XPDUSDT","WIFUSDT","PIUSDT","EDGEUSDT","RECALLUSDT","SUSHIUSDT","RAVEUSDT","XLMUSDT","DASHUSDT","TRUSTUSDT",
         "GPSUSDT","CROUSDT","ACUUSDT","UNIUSDT","STRKUSDT","NEIROUSDT","ZKPUSDT","APEUSDT","MSTRUSDT","ENJUSDT",
@@ -2284,6 +2295,401 @@ def _parse_iso_safe(ts_str: str):
     return dt
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# DCA helpers (Dollar-Cost Averaging ladder — Isolated 70% / Cross fixed 7%)
+# ─────────────────────────────────────────────────────────────────────────────
+def _dca_compute_trigger(sig: dict) -> float:
+    """Compute the next-DCA trigger price for an open signal.
+
+    Isolated: 70% of the distance from blended average to liquidation
+              (liq ≈ avg × (1 − 1/lev) → dca_drop = 0.70 × 1/lev).
+    Cross:    fixed 7% below blended average per DCA.
+
+    Returns 0.0 if the trigger cannot be computed.
+    """
+    avg_entry = float(sig.get("avg_entry", sig.get("entry", 0)) or 0)
+    if avg_entry <= 0:
+        return 0.0
+    mode = (sig.get("order_margin_mode") or "isolated").strip().lower()
+    lev  = int(sig.get("trade_lev", 0) or 0)
+    if lev <= 0:
+        lev = 10
+    if mode == "isolated":
+        dca_drop_pct = 0.70 * (1.0 / lev)
+    else:
+        dca_drop_pct = 0.07
+    return _pround(avg_entry * (1.0 - dca_drop_pct))
+
+
+def _dca_next_usdt(sig: dict) -> float:
+    """Return the USDT margin for the NEXT DCA add (doubles previous add).
+
+    Fill 0 is the original entry. DCA 1 matches the original size. Each
+    subsequent DCA doubles the prior DCA's margin:
+        DCA 1 → base
+        DCA 2 → 2× base
+        DCA 3 → 4× base
+        DCA 4 → 8× base …
+    """
+    fills = sig.get("dca_fills") or []
+    base  = float(sig.get("trade_usdt", 0) or 0)
+    if base <= 0:
+        return 0.0
+    # dca_count = number of DCAs already done (fills beyond index 0).
+    dca_count = max(0, len(fills) - 1)
+    # Next DCA index is dca_count + 1. DCA 1 = base; DCA N = base × 2^(N-1).
+    next_idx = dca_count + 1
+    return base * (2 ** (next_idx - 1))
+
+
+def place_okx_dca_order(sig: dict, cfg: dict, dca_usdt: float) -> dict:
+    """Place a DCA market-buy add on OKX using the sig's existing leverage/mode.
+
+    Does NOT touch the OCO algo order — caller is responsible for cancelling
+    the old algo and placing a new one with updated TP/SL after this returns.
+
+    Returns a dict compatible with the main order-result shape:
+      {"ordId", "sz", "status": "placed"|"error", "error",
+       "actual_entry", "ct_val", "notional", "tdMode", "is_hedge"}
+    """
+    try:
+        sym = sig.get("symbol", "")
+        if not sym:
+            return {"ordId": "", "sz": 0, "status": "error",
+                    "error": "Missing symbol"}
+        if dca_usdt <= 0:
+            return {"ordId": "", "sz": 0, "status": "error",
+                    "error": f"Invalid DCA size: {dca_usdt}"}
+
+        lev  = int(sig.get("trade_lev", 0) or 0)
+        if lev <= 0:
+            lev = int(cfg.get("trade_leverage", 10) or 10)
+        lev  = min(lev, get_max_leverage(sym))
+        mode = (sig.get("order_margin_mode") or
+                cfg.get("trade_margin_mode", "isolated")).strip().lower()
+
+        # Current market price reference (use latest close as sizing reference)
+        ref_price = float(sig.get("latest_price",
+                                  sig.get("avg_entry",
+                                          sig.get("entry", 0))) or 0)
+        if ref_price <= 0:
+            return {"ordId": "", "sz": 0, "status": "error",
+                    "error": "No reference price for DCA sizing"}
+
+        try:
+            ct_val = _get_ct_val(sym)
+        except ValueError as _cv:
+            return {"ordId": "", "sz": 0, "status": "error",
+                    "error": f"ct_val: {_cv}"}
+        if ct_val <= 0:
+            return {"ordId": "", "sz": 0, "status": "error",
+                    "error": f"Invalid ct_val: {ct_val}"}
+
+        notional  = dca_usdt * lev
+        contracts = max(1, int(notional / (ct_val * ref_price)))
+        if contracts > 100_000:
+            return {"ordId": "", "sz": contracts, "status": "error",
+                    "error": f"DCA contract count too large ({contracts})"}
+
+        # Fetch posMode (hedge vs net) — best-effort
+        is_hedge = bool(sig.get("order_is_hedge", False))
+        try:
+            _pm_resp = _trade_get("/api/v5/account/config", {}, cfg)
+            if _pm_resp.get("code") == "0":
+                _pm = _pm_resp.get("data", [{}])[0].get("posMode", "net_mode")
+                is_hedge = (_pm == "long_short_mode")
+        except Exception:
+            pass
+
+        # Re-apply leverage (idempotent; OKX accepts)
+        try:
+            _set_leverage_okx(sym, cfg)
+        except Exception as lev_exc:
+            _append_error("trade", f"DCA set-leverage warning: {lev_exc}",
+                          symbol=sym, endpoint="/api/v5/account/set-leverage")
+
+        order_body: dict = {
+            "instId":  _to_okx(sym),
+            "tdMode":  mode,
+            "side":    "buy",
+            "ordType": "market",
+            "sz":      str(contracts),
+        }
+        if is_hedge:
+            order_body["posSide"] = "long"
+
+        resp   = _trade_post("/api/v5/trade/order", order_body, cfg)
+        _b._bsc_last_trade_raw = {
+            "endpoint":  "/api/v5/trade/order (DCA add)",
+            "body_sent": order_body,
+            "response":  resp,
+            "is_hedge":  is_hedge,
+            "contracts": contracts,
+            "ct_val":    ct_val,
+            "dca_usdt":  dca_usdt,
+        }
+        d0     = (resp.get("data") or [{}])[0]
+        ord_id = d0.get("ordId", "")
+
+        if resp.get("code") != "0":
+            err = _okx_err(resp)
+            _append_error("trade",
+                          f"DCA {err} | body={json.dumps(order_body)} | "
+                          f"resp={json.dumps(resp)[:300]}",
+                          symbol=sym, endpoint="/api/v5/trade/order")
+            return {"ordId": "", "sz": contracts, "status": "error",
+                    "error": err, "ct_val": ct_val, "notional": notional,
+                    "tdMode": mode, "is_hedge": is_hedge}
+        if d0.get("sCode", "0") != "0":
+            err = f"DCA order: {d0.get('sCode')}: {d0.get('sMsg','')}"
+            _append_error("trade",
+                          f"{err} | body={json.dumps(order_body)}",
+                          symbol=sym, endpoint="/api/v5/trade/order")
+            return {"ordId": ord_id, "sz": contracts, "status": "error",
+                    "error": err, "ct_val": ct_val, "notional": notional,
+                    "tdMode": mode, "is_hedge": is_hedge}
+
+        # Fetch actual fill price
+        actual_entry = ref_price
+        time.sleep(0.3)
+        try:
+            fill_resp = _trade_get("/api/v5/trade/order",
+                                   {"instId": _to_okx(sym), "ordId": ord_id},
+                                   cfg)
+            if fill_resp.get("code") == "0":
+                fill_d = fill_resp.get("data", [{}])[0]
+                avg_px = float(fill_d.get("avgPx", 0) or 0)
+                if avg_px > 0:
+                    actual_entry = avg_px
+        except Exception as fill_exc:
+            _append_error("trade",
+                          f"DCA fill fetch failed: {fill_exc}",
+                          symbol=sym, endpoint="/api/v5/trade/order[GET]")
+
+        return {"ordId": ord_id, "sz": contracts,
+                "status": "placed", "error": "",
+                "actual_entry": actual_entry,
+                "ct_val": ct_val, "notional": notional,
+                "tdMode": mode, "is_hedge": is_hedge}
+
+    except Exception as exc:
+        _append_error("trade", f"DCA exception: {exc}",
+                      symbol=sig.get("symbol", ""),
+                      endpoint="/api/v5/trade/order")
+        return {"ordId": "", "sz": 0, "status": "error", "error": str(exc)}
+
+
+def _cancel_algo_best_effort(algo_id: str, sym: str, cfg: dict) -> None:
+    """Cancel an OCO algo order on OKX — log failure, never raise."""
+    if not algo_id or not sym:
+        return
+    try:
+        _trade_post("/api/v5/trade/cancel-algos",
+                    [{"algoId": algo_id, "instId": _to_okx(sym)}],
+                    cfg)
+    except Exception as exc:
+        _append_error("trade",
+                      f"cancel-algo failed for {sym} algoId={algo_id}: {exc}",
+                      symbol=sym, endpoint="/api/v5/trade/cancel-algos")
+
+
+def _place_dca_oco_algo(sig: dict, cfg: dict, new_tp: float,
+                         new_sl: float, total_contracts: int) -> str:
+    """Place a fresh OCO (TP + SL) algo on OKX after a DCA add.
+
+    Returns the new algoId, or "" on failure (non-fatal — DCA already placed).
+    """
+    try:
+        sym  = sig.get("symbol", "")
+        mode = (sig.get("order_margin_mode") or
+                cfg.get("trade_margin_mode", "isolated")).strip().lower()
+        is_hedge = bool(sig.get("order_is_hedge", False))
+        algo_body: dict = {
+            "instId":      _to_okx(sym),
+            "tdMode":      mode,
+            "side":        "sell",
+            "ordType":     "oco",
+            "sz":          str(int(total_contracts)),
+            "tpTriggerPx": str(_pround(new_tp)),
+            "tpOrdPx":     "-1",
+            "slTriggerPx": str(_pround(new_sl)),
+            "slOrdPx":     "-1",
+        }
+        if is_hedge:
+            algo_body["posSide"] = "long"
+        algo_resp = _trade_post("/api/v5/trade/order-algo", algo_body, cfg)
+        ad        = (algo_resp.get("data") or [{}])[0]
+        if algo_resp.get("code") != "0" or (ad.get("sCode","0") != "0" and ad.get("sCode","")):
+            err = _okx_err(algo_resp) if algo_resp.get("code") != "0" \
+                  else f"{ad.get('sCode')}: {ad.get('sMsg','')}"
+            _append_error("trade", f"DCA OCO algo failed: {err}",
+                          symbol=sym, endpoint="/api/v5/trade/order-algo")
+            return ""
+        return ad.get("algoId", "")
+    except Exception as exc:
+        _append_error("trade", f"DCA OCO exception: {exc}",
+                      symbol=sig.get("symbol", ""),
+                      endpoint="/api/v5/trade/order-algo")
+        return ""
+
+
+def _execute_dca_fill(sig: dict, cfg: dict) -> bool:
+    """Execute one DCA add for a signal flagged with `_dca_pending=True`.
+
+    Steps:
+      1. Compute next DCA margin (doubles previous).
+      2. Place the market-buy add via place_okx_dca_order().
+      3. On success: append to dca_fills, recompute blended avg / total_usdt /
+         total_notional, increment dca_count, recompute tp & (if ladder now
+         exhausted) final_sl_price.
+      4. Cancel the prior OCO algo and place a fresh one at the new TP/SL.
+
+    Returns True on successful add, False otherwise. Clears _dca_pending.
+    """
+    sym = sig.get("symbol", "?")
+    try:
+        dca_usdt = _dca_next_usdt(sig)
+        if dca_usdt <= 0:
+            sig.pop("_dca_pending", None)
+            return False
+
+        result = place_okx_dca_order(sig, cfg, dca_usdt)
+        if result.get("status") != "placed":
+            # Leave _dca_pending=True so the next cycle retries? For safety,
+            # clear it to avoid hammering on a structural failure. User can
+            # see the error in the error log. Add it back as True only on
+            # retryable paths; for now clear unconditionally.
+            sig.pop("_dca_pending", None)
+            sig["_dca_last_error"] = result.get("error", "")
+            return False
+
+        fill_px   = float(result.get("actual_entry", 0) or 0)
+        fill_sz   = int(result.get("sz", 0) or 0)
+        fill_not  = float(result.get("notional", 0) or 0) or (dca_usdt * int(sig.get("trade_lev", 10) or 10))
+        fill_ordid = result.get("ordId", "")
+
+        # Append fill record
+        fills = sig.get("dca_fills") or []
+        next_idx = len(fills)  # 0-based; new fill is at index next_idx
+        fills.append({
+            "price":    fill_px,
+            "usdt":     dca_usdt,
+            "leverage": int(sig.get("trade_lev", 0) or 0),
+            "notional": fill_not,
+            "ts":       dubai_now().isoformat(),
+            "order_id": fill_ordid,
+            "dca_idx":  next_idx,
+        })
+        sig["dca_fills"] = fills
+
+        # Recompute blended average as notional-weighted mean of fills.
+        # If any fill is missing notional, fall back to equal weighting.
+        total_notional = 0.0
+        total_units    = 0.0
+        total_usdt     = 0.0
+        for f in fills:
+            px = float(f.get("price", 0) or 0)
+            nt = float(f.get("notional", 0) or 0)
+            ud = float(f.get("usdt", 0) or 0)
+            if px > 0 and nt > 0:
+                total_notional += nt
+                total_units    += nt / px
+                total_usdt     += ud
+        if total_units > 0:
+            avg_entry = total_notional / total_units
+        else:
+            # Fallback: straight arithmetic mean of prices
+            prices = [float(f.get("price", 0) or 0) for f in fills
+                      if float(f.get("price", 0) or 0) > 0]
+            avg_entry = sum(prices) / len(prices) if prices else float(sig.get("avg_entry", 0) or 0)
+
+        sig["avg_entry"]      = _pround(avg_entry)
+        sig["total_usdt"]     = total_usdt
+        sig["total_notional"] = total_notional
+        sig["dca_count"]      = next_idx  # fill 0 is entry; DCA count = fills-1
+
+        # Recompute TP from sidebar tp_pct and new blended avg
+        tp_pct = float(cfg.get("tp_pct", 1.5)) / 100.0
+        new_tp = _pround(sig["avg_entry"] * (1.0 + tp_pct))
+        sig["tp"] = new_tp
+
+        # If ladder now exhausted, set final SL at -3% below blended avg.
+        # Otherwise, keep sig["sl"] at a sentinel (use 0 so candle-SL check
+        # can't accidentally fire — _update_one_signal's DCA path already
+        # skips SL checking while ladder has adds remaining).
+        dca_max = int(sig.get("dca_max", 0) or 0)
+        if sig["dca_count"] >= dca_max:
+            final_sl = _pround(sig["avg_entry"] * 0.97)
+            sig["final_sl_price"] = final_sl
+            sig["sl"] = final_sl
+        else:
+            sig["final_sl_price"] = None
+            # Keep a reasonable-looking SL for display purposes — we'll use
+            # the next-DCA trigger price so the table's SL column has meaning
+            # while the ladder is still active. The actual SL check is
+            # bypassed for DCA trades with remaining adds.
+            sig["sl"] = _dca_compute_trigger(sig)
+
+        # Update last-order/display fields so OKX Command / Order ID reflect
+        # the newest add.
+        sig["order_id"]       = fill_ordid or sig.get("order_id", "")
+        sig["order_sz"]       = fill_sz
+        sig["order_notional"] = fill_not
+        sig["order_status"]   = "placed"
+
+        # Cancel old OCO and place fresh one at new levels, sized to the
+        # TOTAL contract count across all fills.
+        total_contracts = sum(int(f.get("sz", 0) or 0) for f in fills)
+        # fill 0 (original entry) stored its sz in sig["order_sz"] historically
+        # — reconstruct total: contracts from each DCA fill plus the initial
+        # entry (stored separately before we started appending fills).
+        _entry_contracts = 0
+        try:
+            if fills:
+                # First fill record may lack 'sz' (we didn't capture it at entry).
+                # Derive contract count from the initial sig order_sz set after
+                # the first place_okx_order.
+                _entry_contracts = int(fills[0].get("sz", 0) or 0)
+        except Exception:
+            pass
+        # If the entry fill didn't store sz, reconstruct from initial sig fields.
+        # dca_fills[0] was populated BEFORE we tracked contract counts; use
+        # sig["order_sz"] snapshot that existed at entry (but we've now
+        # overwritten it). As a simple rule: reconstruct total from notional / (ct_val * price).
+        try:
+            _ct_val = float(sig.get("order_ct_val", 0) or 0)
+            if _ct_val > 0:
+                total_contracts = 0
+                for f in fills:
+                    _fp = float(f.get("price", 0) or 0)
+                    _fn = float(f.get("notional", 0) or 0)
+                    if _fp > 0 and _fn > 0:
+                        total_contracts += max(1, int(_fn / (_ct_val * _fp)))
+        except Exception:
+            pass
+        if total_contracts <= 0:
+            total_contracts = fill_sz
+
+        _old_algo = sig.get("algo_id", "")
+        if _old_algo:
+            _cancel_algo_best_effort(_old_algo, sym, cfg)
+        new_algo = _place_dca_oco_algo(sig, cfg, sig["tp"], sig["sl"],
+                                       total_contracts)
+        if new_algo:
+            sig["algo_id"] = new_algo
+
+        sig.pop("_dca_pending", None)
+        sig.pop("_dca_trigger_px", None)
+        sig.pop("_dca_trigger_time", None)
+        return True
+
+    except Exception as exc:
+        _append_error("trade", f"DCA execute exception: {exc}",
+                      symbol=sym, endpoint="_execute_dca_fill")
+        sig.pop("_dca_pending", None)
+        return False
+
+
 def _update_one_signal(sig: dict) -> None:
     """Fetch candles for a single open signal and update its status in-place.
 
@@ -2301,6 +2707,81 @@ def _update_one_signal(sig: dict) -> None:
         sig_ts_ms = int(sig_dt.timestamp() * 1000)
         candles   = get_klines(sig["symbol"], "5m", 200)
         post      = [c for c in candles if c["time"] >= sig_ts_ms]
+
+        # ── DCA branch: trade has DCA ladder + unused slots ─────────────────
+        _dca_enabled = bool(sig.get("dca_enabled", False))
+        _dca_max     = int(sig.get("dca_max", 0) or 0)
+        _dca_count   = int(sig.get("dca_count", 0) or 0)
+        _ladder_slots_left = _dca_enabled and _dca_count < _dca_max
+
+        if _ladder_slots_left:
+            # While the ladder still has unused slots the sidebar SL is
+            # IGNORED — only TP exit or a DCA trigger can act on this trade.
+            _dca_trigger_price = _dca_compute_trigger(sig)
+            # Scan candles AFTER the last fill timestamp (entry or last DCA).
+            _last_fill_ts_ms = sig_ts_ms
+            _fills = sig.get("dca_fills") or []
+            if _fills:
+                _last_fill = _fills[-1]
+                try:
+                    _last_fill_ts_ms = int(_parse_iso_safe(
+                        _last_fill.get("ts") or sig["timestamp"]
+                    ).timestamp() * 1000)
+                except Exception:
+                    _last_fill_ts_ms = sig_ts_ms
+            _post_dca = [c for c in post if c["time"] >= _last_fill_ts_ms]
+            tp_time  = None
+            dca_time = None
+            for c in _post_dca:
+                if tp_time is None and c["high"] >= sig["tp"]:
+                    tp_time = c["time"]
+                if (dca_time is None and _dca_trigger_price > 0
+                        and c["low"] <= _dca_trigger_price):
+                    dca_time = c["time"]
+            if tp_time is not None and (dca_time is None or tp_time <= dca_time):
+                # TP wins — close (DCA trade closes via TP Hit table, which
+                # is shared; table layer recognises DCA from dca_count).
+                sig.update(status="tp_hit", close_price=sig["tp"],
+                           close_time=to_dubai(datetime.fromtimestamp(
+                               tp_time/1000, tz=timezone.utc)).isoformat())
+                sig.pop("price_alert", None)
+                sig.pop("_dca_pending", None)
+            elif dca_time is not None:
+                # DCA trigger fired — main loop will place the order.
+                sig["_dca_pending"]      = True
+                sig["_dca_trigger_px"]   = _dca_trigger_price
+                sig["_dca_trigger_time"] = to_dubai(datetime.fromtimestamp(
+                    dca_time/1000, tz=timezone.utc)).isoformat()
+                # Still update latest_price / Current Status for the table.
+                if candles:
+                    latest_price = candles[-1]["close"]
+                    sig["latest_price"] = float(latest_price)
+                    _avg = float(sig.get("avg_entry",
+                                         sig.get("entry", 0)) or 0)
+                    if _avg > 0:
+                        drop_pct = (_avg - latest_price) / _avg * 100
+                        sig["price_alert"]     = drop_pct >= _PRICE_ALERT_PCT
+                        sig["price_alert_pct"] = round(drop_pct, 2)
+            else:
+                # No trigger — display-only refresh using blended avg.
+                if candles:
+                    latest_price = candles[-1]["close"]
+                    sig["latest_price"] = float(latest_price)
+                    _avg = float(sig.get("avg_entry",
+                                         sig.get("entry", 0)) or 0)
+                    if _avg > 0:
+                        drop_pct = (_avg - latest_price) / _avg * 100
+                        sig["price_alert"]     = drop_pct >= _PRICE_ALERT_PCT
+                        sig["price_alert_pct"] = round(drop_pct, 2)
+                    else:
+                        sig["price_alert"]     = False
+                        sig["price_alert_pct"] = 0.0
+            return  # DCA branch done — do not fall through to legacy logic
+
+        # ── Legacy branch (no DCA) OR DCA ladder fully exhausted ────────────
+        # When ladder is exhausted, sig["sl"] == final_sl_price (blended × 0.97)
+        # and a hit routes to "dca_sl_hit" instead of "sl_hit".
+        _ladder_full = _dca_enabled and _dca_max > 0 and _dca_count >= _dca_max
         tp_time = sl_time = None
         for c in post:
             if tp_time is None and c["high"] >= sig["tp"]: tp_time = c["time"]
@@ -2312,7 +2793,8 @@ def _update_one_signal(sig: dict) -> None:
                                tp_time/1000, tz=timezone.utc)).isoformat())
                 sig.pop("price_alert", None)
             else:
-                sig.update(status="sl_hit", close_price=sig["sl"],
+                _close_status = "dca_sl_hit" if _ladder_full else "sl_hit"
+                sig.update(status=_close_status, close_price=sig["sl"],
                            close_time=to_dubai(datetime.fromtimestamp(
                                sl_time/1000, tz=timezone.utc)).isoformat())
                 sig.pop("price_alert", None)
@@ -2320,12 +2802,14 @@ def _update_one_signal(sig: dict) -> None:
             # Trade still open — update price-drop alert flag
             if candles:
                 latest_price = candles[-1]["close"]
-                entry_price  = float(sig.get("entry", 0) or 0)
+                # Use blended avg if present (post-DCA), else original entry.
+                _ref = float(sig.get("avg_entry",
+                                     sig.get("entry", 0)) or 0)
                 # Store raw latest close — used by PnL $ column (avoids the
                 # precision loss of deriving from rounded price_alert_pct).
                 sig["latest_price"] = float(latest_price)
-                if entry_price > 0:
-                    drop_pct = (entry_price - latest_price) / entry_price * 100
+                if _ref > 0:
+                    drop_pct = (_ref - latest_price) / _ref * 100
                     sig["price_alert"]     = drop_pct >= _PRICE_ALERT_PCT
                     sig["price_alert_pct"] = round(drop_pct, 2)
                 else:
@@ -2404,6 +2888,35 @@ def _bg_loop():
                                   if s.get("status") == "open"]
             if _open_snapshot:
                 update_open_signals(_open_snapshot)   # in-place dict mutations
+
+                # ── DCA execution pass ───────────────────────────────────────
+                # _update_one_signal flags any signal whose price has crossed
+                # its DCA trigger with sig["_dca_pending"] = True. We now place
+                # those DCA market orders sequentially (network I/O) under the
+                # same auto-trading gating as normal entries. Skipped entirely
+                # when auto-trading is disabled.
+                _dca_pending_sigs = [s for s in _open_snapshot
+                                     if s.get("_dca_pending")]
+                if _dca_pending_sigs:
+                    if cfg.get("trade_enabled"):
+                        for _dsig in _dca_pending_sigs:
+                            _ok = _execute_dca_fill(_dsig, cfg)
+                            # _execute_dca_fill clears _dca_pending regardless
+                            # of outcome. Errors surface in the Error Log.
+                            _ = _ok
+                        with _log_lock:
+                            save_log(_b._bsc_log)
+                    else:
+                        # Auto-trading off — skip real orders but clear the
+                        # flag so it doesn't accumulate. Surface as error.
+                        for _dsig in _dca_pending_sigs:
+                            _append_error(
+                                "trade",
+                                f"DCA trigger hit but auto-trading disabled; "
+                                f"skipping add for {_dsig.get('symbol', '?')}",
+                                symbol=_dsig.get("symbol", ""),
+                            )
+                            _dsig.pop("_dca_pending", None)
 
             # ── Circuit breaker: check AFTER updating signals so newly-closed
             # sl_hit trades are counted immediately ─────────────────────────
@@ -2555,6 +3068,35 @@ def _bg_loop():
                         sig["tp"]           = result["actual_tp"]
                         sig["sl"]           = result["actual_sl"]
                         sig["signal_entry"] = sig.get("entry")  # keep original for reference
+                    # ── DCA state initialization ────────────────────────────
+                    # Snapshot the DCA config at entry time so later sidebar
+                    # changes don't retroactively alter already-open trades.
+                    # Fill 0 IS the original entry (same price, margin, lev).
+                    _dca_max_snap = int(cfg.get("trade_max_dca", 0) or 0)
+                    _dca_max_snap = max(0, min(6, _dca_max_snap))
+                    _entry_px     = float(sig.get("entry", 0) or 0)
+                    _entry_usdt   = float(sig.get("trade_usdt", 0) or 0)
+                    _entry_lev    = int(sig.get("trade_lev",   0) or 0)
+                    _entry_notnl  = _entry_usdt * _entry_lev if _entry_lev > 0 else 0.0
+                    sig["dca_enabled"]    = _dca_max_snap > 0
+                    sig["dca_max"]        = _dca_max_snap
+                    sig["dca_count"]      = 0
+                    sig["dca_fills"]      = [{
+                        "price":    _entry_px,
+                        "usdt":     _entry_usdt,
+                        "leverage": _entry_lev,
+                        "notional": _entry_notnl,
+                        "ts":       sig.get("timestamp", ""),
+                        "order_id": sig.get("order_id", ""),
+                        "dca_idx":  0,
+                    }] if _entry_px > 0 else []
+                    sig["avg_entry"]      = _entry_px
+                    sig["total_usdt"]     = _entry_usdt
+                    sig["total_notional"] = _entry_notnl
+                    sig["original_entry"] = _entry_px
+                    # final_sl_price is populated only after the DCA ladder is
+                    # fully exhausted (dca_count == dca_max).
+                    sig["final_sl_price"] = None
                 with _log_lock:
                     save_log(_b._bsc_log)
             _b._bsc_last_error = ""
@@ -2949,6 +3491,34 @@ with st.sidebar:
             "uses the configured SL %. Est Liquidity column shows '—'.\n\n"
             "Editable whether or not Auto-Trading is enabled — affects display "
             "columns (Est Liquidity) and SL placement logic."
+        ))
+
+    # ── Max DCA per Trade ─────────────────────────────────────────────────────
+    # Dropdown (0-6). Doubling ladder; each add placed as a real market order.
+    # Trigger math differs for isolated vs cross — see DEFAULT_CONFIG docstring.
+    _dca_opts = [0, 1, 2, 3, 4, 5, 6]
+    _cur_dca  = int(_snap_cfg.get("trade_max_dca", 1))
+    if _cur_dca not in _dca_opts:
+        _cur_dca = 1
+    new_trade_max_dca = st.selectbox(
+        "Max DCA per Trade", _dca_opts,
+        index=_dca_opts.index(_cur_dca),
+        key="cfg_trade_max_dca",
+        help=(
+            "How many automated DCA (Dollar-Cost Averaging) adds are allowed "
+            "per trade.\n\n"
+            "  • 0 — DCA OFF. Legacy behavior: sidebar TP/SL apply as usual.\n"
+            "  • 1-6 — Allow up to N DCA adds. Each DCA doubles the previous "
+            "add's margin (base → base → 2× → 4× → 8× …).\n\n"
+            "Trigger:\n"
+            "  • Isolated — DCA fires at 70% of the distance from blended "
+            "average to current liquidation price.\n"
+            "  • Cross — DCA fires at −7% below the current blended average.\n\n"
+            "After N DCAs are consumed, the final SL sits at −3% below the "
+            "blended average. Such closures route to the dedicated DCA SL Hit "
+            "table. When DCA > 0 the sidebar SL % is IGNORED; only TP or the "
+            "final −3% rule can close the position.\n\n"
+            "Editable whether or not Auto-Trading is enabled."
         ))
 
     # Notional preview — always shown (even when Auto-Trading is off) so the
@@ -3512,6 +4082,7 @@ with st.sidebar:
             "trade_usdt_amount": float(new_trade_usdt),
             "trade_leverage":    int(new_trade_lev),
             "trade_margin_mode": new_margin_mode,
+            "trade_max_dca":     max(0, min(6, int(new_trade_max_dca))),
         }
         with _config_lock: _b._bsc_cfg.clear(); _b._bsc_cfg.update(new_cfg)
         save_config(new_cfg)
@@ -3562,10 +4133,11 @@ if _trade_on and _api_stat == "ok":
     st.caption(f"🤖 Auto-Trading active · {_api_cs.get('message','')} · tested {_tested_str}")
 
 # ── Health metrics ─────────────────────────────────────────────────────────────
-open_count  = sum(1 for s in signals if s["status"]=="open")
-tp_count    = sum(1 for s in signals if s["status"]=="tp_hit")
-sl_count    = sum(1 for s in signals if s["status"]=="sl_hit")
-queue_count = sum(1 for s in signals if s["status"]=="queue_limit")
+open_count     = sum(1 for s in signals if s["status"]=="open")
+tp_count       = sum(1 for s in signals if s["status"]=="tp_hit")
+sl_count       = sum(1 for s in signals if s["status"]=="sl_hit")
+dca_sl_count   = sum(1 for s in signals if s["status"]=="dca_sl_hit")
+queue_count    = sum(1 for s in signals if s["status"]=="queue_limit")
 
 # ── Warn if log loaded from a previous session already exceeds the cap
 # (e.g. migrating from v1 which had no limit). No new trades will fire until
@@ -3582,7 +4154,7 @@ if open_count > _max_open_cap:
 pre_out     = health.get("pre_filtered_out", 0)
 deep_sc     = health.get("deep_scanned",     0)
 
-m1,m2,m3,m4,m5c,m6,m7,m8,m9 = st.columns(9)
+m1,m2,m3,m4,m5c,m6,m7,m8,m8b,m9 = st.columns(10)
 m1.metric("Cycles",        health.get("total_cycles",0))
 m2.metric("Scan Time",     f"{health.get('last_scan_duration_s',0)}s")
 m3.metric("API Errors",    health.get("total_api_errors",0))
@@ -3590,7 +4162,8 @@ m4.metric("Pre-filtered ⚡", pre_out, help="Coins removed by bulk ticker pre-fi
 m5c.metric("Deep Scanned", deep_sc, help="Coins that passed pre-filter and received full candle analysis")
 m6.metric("Open",          open_count,  help=f"Active open trades (max {_max_open_cap} allowed simultaneously — configurable in sidebar)")
 m7.metric("TP Hit ✅",     tp_count)
-m8.metric("SL Hit ❌",     sl_count)
+m8.metric("SL Hit ❌",     sl_count,   help="Regular SL hits (non-DCA trades, or DCA disabled)")
+m8b.metric("DCA-SL ❌",    dca_sl_count, help="Ladder-exhausted SL hits — DCA trade closed at final SL (blended avg × 0.97) after max DCAs were consumed")
 m9.metric("⏳ Queued",     queue_count, help=f"Signals detected while the {_max_open_cap}-trade limit was reached — no order placed, coin rescanned each cycle")
 
 if getattr(_b, "_bsc_last_error", ""):
@@ -3622,14 +4195,36 @@ st.caption("  |  ".join(badges) if badges else "No advanced filters enabled")
 #   • PnL $ column in the Open Signals / Closed Signals table
 # Returns None if any input is missing or non-numeric — callers render "—".
 def _calc_pnl_usd(sig: dict, ref_price, usdt_fallback: float, lev_fallback: int):
+    """PnL $ for a signal — uses blended avg + total notional for DCA trades.
+
+    For DCA trades (dca_count > 0) the reference is the blended average
+    entry price and the notional is the cumulative total across all fills.
+    For non-DCA trades this reduces to the original `(ref/entry − 1) × (usdt × lev)`.
+    """
+    try:
+        _ref   = float(ref_price) if ref_price is not None else 0.0
+    except (TypeError, ValueError):
+        return None
+    if _ref <= 0:
+        return None
+    # DCA trade — use blended avg + cumulative notional.
+    _dca_count = int(sig.get("dca_count", 0) or 0)
+    if _dca_count > 0:
+        try:
+            _avg   = float(sig.get("avg_entry", 0) or 0)
+            _tnot  = float(sig.get("total_notional", 0) or 0)
+        except (TypeError, ValueError):
+            _avg = 0.0; _tnot = 0.0
+        if _avg > 0 and _tnot > 0:
+            return (_ref / _avg - 1.0) * _tnot
+    # Non-DCA (or DCA with no fills yet beyond entry) — legacy formula.
     try:
         _entry = float(sig.get("entry", 0) or 0)
-        _ref   = float(ref_price) if ref_price is not None else 0.0
         _usdt  = float(sig.get("trade_usdt", usdt_fallback) or 0)
         _lev   = int(sig.get("trade_lev",    lev_fallback)  or 0)
     except (TypeError, ValueError):
         return None
-    if _entry <= 0 or _ref <= 0 or _usdt <= 0 or _lev <= 0:
+    if _entry <= 0 or _usdt <= 0 or _lev <= 0:
         return None
     return (_ref / _entry - 1.0) * (_usdt * _lev)
 
@@ -3639,15 +4234,16 @@ def _calc_pnl_usd(sig: dict, ref_price, usdt_fallback: float, lev_fallback: int)
 # column. Falls back to current config if the signal pre-dates the stored
 # trade_usdt / trade_lev fields.
 _pnl_cutoff_24h = dubai_now() - timedelta(hours=24)
-_pnl_24h_total = 0.0
-_pnl_24h_wins  = 0.0
-_pnl_24h_loss  = 0.0
-_pnl_24h_tp_ct = 0
-_pnl_24h_sl_ct = 0
+_pnl_24h_total     = 0.0
+_pnl_24h_wins      = 0.0
+_pnl_24h_loss      = 0.0
+_pnl_24h_tp_ct     = 0
+_pnl_24h_sl_ct     = 0
+_pnl_24h_dca_sl_ct = 0
 _cfg_usdt_fallback = float(_snap_cfg.get("trade_usdt_amount", 0) or 0)
 _cfg_lev_fallback  = int(_snap_cfg.get("trade_leverage", 10) or 0)
 for _s in signals:
-    if _s.get("status") not in ("tp_hit", "sl_hit"):
+    if _s.get("status") not in ("tp_hit", "sl_hit", "dca_sl_hit"):
         continue
     _ct_raw = _s.get("close_time")
     if not _ct_raw:
@@ -3666,12 +4262,15 @@ for _s in signals:
     if _s["status"] == "tp_hit":
         _pnl_24h_wins  += _pnl_val
         _pnl_24h_tp_ct += 1
+    elif _s["status"] == "dca_sl_hit":
+        _pnl_24h_loss      += _pnl_val      # negative
+        _pnl_24h_dca_sl_ct += 1
     else:
         _pnl_24h_loss  += _pnl_val      # negative for SL hits
         _pnl_24h_sl_ct += 1
 
 # Color based on sign: green for gain, red for loss, grey for exact zero / empty
-if _pnl_24h_tp_ct == 0 and _pnl_24h_sl_ct == 0:
+if _pnl_24h_tp_ct == 0 and _pnl_24h_sl_ct == 0 and _pnl_24h_dca_sl_ct == 0:
     _pnl_color   = "#9CA3AF"  # grey
     _pnl_prefix  = "💰"
     _pnl_summary = "no closed trades in the last 24 h"
@@ -3683,7 +4282,8 @@ else:
     # swallow the inline <span> HTML between them).
     _pnl_summary = (
         f"{_pnl_24h_tp_ct} TP (+\\${_pnl_24h_wins:,.2f})  |  "
-        f"{_pnl_24h_sl_ct} SL (\\${_pnl_24h_loss:,.2f})"
+        f"{_pnl_24h_sl_ct} SL  |  "
+        f"{_pnl_24h_dca_sl_ct} DCA-SL (\\${_pnl_24h_loss:,.2f})"
     )
 st.markdown(
     f"{_pnl_prefix} **24h Realized PnL:** "
@@ -3787,23 +4387,35 @@ def _build_signal_row(s: dict, is_open_table: bool = False,
         "open":        "🔵 Open",
         "tp_hit":      "✅ TP Hit",
         "sl_hit":      "❌ SL Hit",
+        "dca_sl_hit":  "❌ DCA SL Hit",
         "queue_limit": "⏳ Queue Limit",
     }.get(status, status)
 
-    # Alert column — only meaningful for open trades
+    # Alert column — only meaningful for open trades.
+    # For DCA trades that have had ≥1 DCA fire, the alert shows the latest
+    # DCA state (DCA-1, DCA-2, …) and supersedes the DL/TL tags so users can
+    # tell at a glance that the trade has been averaged down.
     alert_col = ""
+    _dca_count_row = int(s.get("dca_count", 0) or 0)
     if status == "open":
-        _dl = s.get("price_alert", False)
-        _tl = False
-        if s.get("timestamp"):
-            try:
-                _t_open = datetime.fromisoformat(s["timestamp"].replace("Z", "+00:00"))
-                _tl = (dubai_now() - _t_open).total_seconds() >= 7200
-            except Exception:
-                pass
-        if _dl and _tl:   alert_col = "🔴 DL / TL"
-        elif _dl:          alert_col = "🔴 DL"
-        elif _tl:          alert_col = "🔴 TL"
+        if _dca_count_row > 0:
+            alert_col = f"DCA-{_dca_count_row}"
+        else:
+            _dl = s.get("price_alert", False)
+            _tl = False
+            if s.get("timestamp"):
+                try:
+                    _t_open = datetime.fromisoformat(s["timestamp"].replace("Z", "+00:00"))
+                    _tl = (dubai_now() - _t_open).total_seconds() >= 7200
+                except Exception:
+                    pass
+            if _dl and _tl:   alert_col = "🔴 DL / TL"
+            elif _dl:          alert_col = "🔴 DL"
+            elif _tl:          alert_col = "🔴 TL"
+    elif status in ("tp_hit", "sl_hit", "dca_sl_hit") and _dca_count_row > 0:
+        # Preserve the DCA-N tag on closed DCA trades so TP Hit / DCA SL Hit
+        # tables show it clearly.
+        alert_col = f"DCA-{_dca_count_row}"
 
     # Current Status column — signed % change from entry for EVERY open trade
     # (previously "Current Drop", gated on DL/TL alerts — now always shown so
@@ -3840,7 +4452,8 @@ def _build_signal_row(s: dict, is_open_table: bool = False,
         _margin_mode_rm = (s.get("order_margin_mode") or
                            _snap_cfg.get("trade_margin_mode", "isolated") or
                            "isolated").lower()
-        _entry_liq = float(s.get("entry", 0) or 0)
+        # For DCA trades use the blended average; otherwise the original entry.
+        _entry_liq = float(s.get("avg_entry", s.get("entry", 0)) or 0)
         _lev_liq   = int(s.get("trade_lev", _snap_cfg.get("trade_leverage", 10)) or 0)
         if _margin_mode_rm == "isolated" and _entry_liq > 0 and _lev_liq > 0:
             _liq_price = _entry_liq * (1.0 - 1.0 / _lev_liq)
@@ -3867,21 +4480,24 @@ def _build_signal_row(s: dict, is_open_table: bool = False,
     #   • sl_hit  → sig["close_price"] (= SL level — realized loss)
     #   • queue   → "—" (no trade was ever opened)
     pnl_col = "—"
-    if status in ("open", "tp_hit", "sl_hit"):
+    if status in ("open", "tp_hit", "sl_hit", "dca_sl_hit"):
         if status == "open":
             _ref_pnl = s.get("latest_price")
             if _ref_pnl is None:
                 # Fall back to deriving from price_alert_pct if latest_price
-                # not stored yet (first cycle, before update_open_signals ran)
+                # not stored yet (first cycle, before update_open_signals ran).
+                # For DCA trades the pct is computed from blended avg; use
+                # avg_entry as the reference too.
                 _pa = s.get("price_alert_pct")
-                _entry_pnl = float(s.get("entry", 0) or 0)
-                if _pa is not None and _entry_pnl > 0:
+                _ref_entry_pnl = float(s.get("avg_entry",
+                                             s.get("entry", 0)) or 0)
+                if _pa is not None and _ref_entry_pnl > 0:
                     try:
-                        _ref_pnl = _entry_pnl * (1.0 - float(_pa) / 100.0)
+                        _ref_pnl = _ref_entry_pnl * (1.0 - float(_pa) / 100.0)
                     except (TypeError, ValueError):
                         _ref_pnl = None
         else:
-            # tp_hit or sl_hit — close_price is the realized exit level
+            # tp_hit / sl_hit / dca_sl_hit — close_price is the realized exit
             _ref_pnl = s.get("close_price")
         # Use the shared helper — single source of truth for PnL math.
         _pnl_val = _calc_pnl_usd(s, _ref_pnl, _cfg_usdt_fallback, _cfg_lev_fallback)
@@ -3921,7 +4537,19 @@ def _build_signal_row(s: dict, is_open_table: bool = False,
     _entry_p = float(s.get("entry", 0) or 0)
     _tp_p    = float(s.get("tp",    0) or 0)
     _sl_p    = float(s.get("sl",    0) or 0)
-    if _usdt > 0 and _lev > 0 and _entry_p > 0:
+    # For DCA trades, TP $ / SL $ use the blended average and cumulative
+    # notional so the dollar figures reflect the ACTUAL committed position
+    # across all ladder fills.
+    _dca_n_row = int(s.get("dca_count", 0) or 0)
+    if _dca_n_row > 0:
+        _avg_row = float(s.get("avg_entry", 0) or 0)
+        _pos_row = float(s.get("total_notional", 0) or 0)
+        if _avg_row > 0 and _pos_row > 0 and _tp_p > 0 and _sl_p > 0:
+            tp_usd_str = f"+${_pos_row * (_tp_p - _avg_row) / _avg_row:.2f}"
+            sl_usd_str = f"-${_pos_row * (_avg_row - _sl_p) / _avg_row:.2f}"
+        else:
+            tp_usd_str = sl_usd_str = "—"
+    elif _usdt > 0 and _lev > 0 and _entry_p > 0:
         _pos = _usdt * _lev
         tp_usd_str = f"+${_pos * (_tp_p - _entry_p) / _entry_p:.2f}"
         sl_usd_str = f"-${_pos * (_entry_p - _sl_p) / _entry_p:.2f}"
@@ -4018,7 +4646,12 @@ def _build_signal_row(s: dict, is_open_table: bool = False,
     # sent to OKX (`order_notional`), then per-signal trade_usdt × trade_lev
     # (captured at trade placement), then current sidebar settings as a last
     # resort (so non-traded signals still show what WOULD have been sent).
-    _os_notional = float(s.get("order_notional", 0) or 0)
+    # For DCA trades the cumulative total_notional (sum across all fills) is
+    # the authoritative position size. Fall back to single-order fields for
+    # non-DCA trades.
+    _os_notional = float(s.get("total_notional", 0) or 0)
+    if _os_notional <= 0:
+        _os_notional = float(s.get("order_notional", 0) or 0)
     if _os_notional <= 0:
         _os_usdt = float(s.get("trade_usdt", _snap_cfg.get("trade_usdt_amount", 0)) or 0)
         _os_lev  = int(s.get("trade_lev",   _snap_cfg.get("trade_leverage",     0)) or 0)
@@ -4026,10 +4659,26 @@ def _build_signal_row(s: dict, is_open_table: bool = False,
             _os_notional = _os_usdt * _os_lev
     order_size_col = f"${_os_notional:,.2f}" if _os_notional > 0 else "—"
 
+    # Signal Entry displays the latest working entry price:
+    #   • DCA trades (dca_count > 0) → blended average (avg_entry)
+    #   • Non-DCA / pre-first-DCA → signal_entry (actual fill) or entry
+    # The Original Entry column (inserted right after Signal Entry) holds
+    # the very first fill price so the original reference is never lost.
+    if _dca_count_row > 0:
+        _sig_entry_display = s.get("avg_entry",
+                                   s.get("signal_entry", s.get("entry", "")))
+    else:
+        _sig_entry_display = s.get("signal_entry", s.get("entry", ""))
+    _orig_entry_display = s.get("original_entry",
+                                s.get("signal_entry", s.get("entry", ""))) \
+        if s.get("original_entry") is not None \
+        else s.get("signal_entry", s.get("entry", ""))
+
     if is_open_table:
-        # New Open-Signals-specific column order (26 columns).
-        # TP Hit / SL Hit / Queue Limit tables use the non-Open branch below,
-        # keeping their established ordering and "Fill $" (fill price) column.
+        # Open-Signals-specific column order (27 columns — adds Original Entry
+        # after Signal Entry for DCA trade visibility).
+        # TP Hit / SL Hit / DCA SL Hit / Queue Limit tables use the non-Open
+        # branch below.
         row: dict = {
             "Time (GST)":      ts_str,
             "Symbol":          s.get("symbol", ""),
@@ -4038,7 +4687,8 @@ def _build_signal_row(s: dict, is_open_table: bool = False,
             "PnL $":           pnl_col,
             "Margin Mode":     _mm_val,
             "Current Status":  current_status_col,
-            "Signal Entry":    s.get("signal_entry", s.get("entry", "")),
+            "Signal Entry":    _sig_entry_display,
+            "Original Entry":  _orig_entry_display,
             "TP":              s.get("tp", ""),
             "SL":              s.get("sl", ""),
             "Est Liquidity":   est_liq_col,
@@ -4079,7 +4729,8 @@ def _build_signal_row(s: dict, is_open_table: bool = False,
     if show_pnl:
         row["PnL $"] = pnl_col
     row.update({
-        "Signal Entry":   s.get("signal_entry", s.get("entry", "")),
+        "Signal Entry":   _sig_entry_display,
+        "Original Entry": _orig_entry_display,
         "Fill $":         s.get("entry", "") if s.get("signal_entry") else "—",
         "TP":             s.get("tp", ""),
         "TP $":           tp_usd_str,
@@ -4097,6 +4748,10 @@ def _build_signal_row(s: dict, is_open_table: bool = False,
         "Entry Criteria": crit_str,
         "⚠️ SL Reason":  sl_reason,
     })
+    # For TP Hit / SL Hit / DCA SL Hit, surface the cumulative Order Size so
+    # DCA-exhausted closures show the full committed notional.
+    if show_pnl:
+        row["Order Size"] = order_size_col
     return row
 
 # Shared column_config used by all four tables
@@ -4167,7 +4822,20 @@ _SIG_COL_CFG = {
                                "Changing global settings later does not affect "
                                "the PnL of already-opened trades."),
     "Signal Entry":   st.column_config.NumberColumn(format="%.8f",
-                          help="Price when the scanner signal fired"),
+                          help="Latest working entry reference.\n\n"
+                               "  • Non-DCA trades → actual market fill price\n"
+                               "  • DCA trades     → blended average across "
+                               "all fills (updated on each DCA add).\n\n"
+                               "The ORIGINAL first-fill price is preserved in "
+                               "the Original Entry column next to this one so "
+                               "no information is lost when a ladder runs."),
+    "Original Entry": st.column_config.NumberColumn(
+                          "🎯 Original Entry", format="%.8f",
+                          help="The very first fill price for this trade, "
+                               "frozen at entry time. Useful for seeing how "
+                               "far a DCA ladder has averaged the position "
+                               "down from the initial entry.\n\n"
+                               "For non-DCA trades this matches Signal Entry."),
     "Fill $":         st.column_config.NumberColumn(format="%.8f",
                           help="Actual market fill price (may differ from signal entry)"),
     "TP":             st.column_config.NumberColumn(format="%.8f"),
@@ -4214,10 +4882,11 @@ filtered = signals if selected_sector == "All" else \
            [s for s in signals if s.get("sector") == selected_sector]
 filtered_sorted = sorted(filtered, key=lambda x: x.get("timestamp", ""), reverse=True)
 
-_open_sigs  = [s for s in filtered_sorted if s.get("status") == "open"]
-_tp_sigs    = [s for s in filtered_sorted if s.get("status") == "tp_hit"]
-_sl_sigs    = [s for s in filtered_sorted if s.get("status") == "sl_hit"]
-_queue_sigs = [s for s in filtered_sorted if s.get("status") == "queue_limit"]
+_open_sigs    = [s for s in filtered_sorted if s.get("status") == "open"]
+_tp_sigs      = [s for s in filtered_sorted if s.get("status") == "tp_hit"]
+_sl_sigs      = [s for s in filtered_sorted if s.get("status") == "sl_hit"]
+_dca_sl_sigs  = [s for s in filtered_sorted if s.get("status") == "dca_sl_hit"]
+_queue_sigs   = [s for s in filtered_sorted if s.get("status") == "queue_limit"]
 
 # ── Table 1: Open Signals ───────────────────────────────────────────────────────
 _render_sig_table(_open_sigs,  "🔵 Open Signals",  "No open signals right now.",
@@ -4226,17 +4895,29 @@ st.divider()
 
 # ── Table 2: TP Hit ─────────────────────────────────────────────────────────────
 # show_pnl=True → realized gain column, using close_price (= TP level).
+# For DCA trades, the row naturally picks up DCA-N in Alert, blended avg in
+# Signal Entry, original entry in Original Entry, and cumulative Order Size.
 _render_sig_table(_tp_sigs,    "✅ TP Hit",         "No TP hits yet.",
                   show_pnl=True)
 st.divider()
 
-# ── Table 3: SL Hit ─────────────────────────────────────────────────────────────
-# show_pnl=True → realized loss column, using close_price (= SL level).
+# ── Table 3: SL Hit (non-DCA trades only) ──────────────────────────────────────
+# Trades that exhausted a DCA ladder and hit the −3% final SL are routed to
+# the dedicated "DCA SL Hit" table below, not this one.
 _render_sig_table(_sl_sigs,    "❌ SL Hit",         "No SL hits yet.",
                   show_pnl=True)
 st.divider()
 
-# ── Table 4: Queue Limit ────────────────────────────────────────────────────────
+# ── Table 4: DCA SL Hit (ladder-exhausted closures) ────────────────────────────
+# Dedicated table for trades that consumed every allowed DCA add and then hit
+# the final −3%-below-blended-average SL. Keeping these separate from regular
+# SL hits makes it easy to audit DCA-strategy performance in isolation.
+_render_sig_table(_dca_sl_sigs, "❌ DCA SL Hit (ladder exhausted)",
+                  "No DCA ladder-exhausted SL hits yet.",
+                  show_pnl=True)
+st.divider()
+
+# ── Table 5: Queue Limit ────────────────────────────────────────────────────────
 # No PnL shown — queue_limit signals never opened a real trade.
 _render_sig_table(_queue_sigs, "⏳ Queue Limit",    "No queued signals.")
 
