@@ -4826,6 +4826,29 @@ with st.sidebar:
 # ─────────────────────────────────────────────────────────────────────────────
 st.title("S&R — Crypto Intelligent Portal")
 
+# ── OKX Account Summary ────────────────────────────────────────────────────────
+_acct_has_creds = bool(
+    _snap_cfg.get("api_key") and _snap_cfg.get("api_secret")
+    and _snap_cfg.get("api_passphrase")
+)
+if _acct_has_creds:
+    try:
+        _bal_resp = _trade_get("/api/v5/account/balance", {"ccy": "USDT"}, _snap_cfg)
+        if _bal_resp.get("code") == "0":
+            _bal_d   = _bal_resp["data"][0]
+            _bal_det = _bal_d.get("details", [{}])[0]
+            _avail   = float(_bal_det.get("availBal", 0) or 0)
+            _tot_eq  = float(_bal_d.get("totalEq",   0) or 0)
+            _invested = _tot_eq - _avail
+            _upl     = float(_bal_det.get("upl",     0) or 0)
+            _upl_sign = "+" if _upl >= 0 else ""
+            _ac1, _ac2, _ac3 = st.columns(3)
+            _ac1.metric("💰 Available",      f"${_avail:,.2f} USDT")
+            _ac2.metric("📊 Invested",       f"${_invested:,.2f} USDT")
+            _ac3.metric("📈 Unrealized PnL", f"${_upl_sign}{_upl:,.2f} USDT")
+    except Exception:
+        pass
+
 # ── Total Realized PnL banner ──────────────────────────────────────────────
 # Prominent all-time total at the top of the page. Sums realized PnL across
 # every closed signal (tp_hit + sl_hit + dca_sl_hit) using the same formula
