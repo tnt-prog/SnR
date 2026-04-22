@@ -2410,6 +2410,52 @@ def _init_signal_trade_snapshot(sig: dict, cfg: dict) -> None:
     sig["final_sl_price"] = None
 
 
+def _migrate_legacy_signals(log: dict, cfg: dict) -> int:
+    """Backfill the DCA/trade snapshot onto pre-existing OPEN signals that
+    were created before `_init_signal_trade_snapshot` was wired into the
+    non-traded path (or before the DCA fields even existed in the schema).
+
+    Only touches signals where:
+      • status == "open"  (closed trades are historical and must not change)
+      • At least one of the DCA snapshot fields is missing / legacy —
+        specifically, `dca_fills` is empty OR `dca_enabled` is absent OR
+        `original_entry` is missing.
+
+    Uses the CURRENT sidebar config to fill in trade_usdt, trade_lev,
+    margin_mode, DCA max, and drop percentages. This is the pragmatic
+    trade-off: we can't retroactively know what the config was at the
+    moment the signal fired (it may have been different), but it's better
+    than the current state of the Next DCA column showing "—" forever.
+
+    Returns the number of signals migrated so it can be logged/reported.
+    """
+    if not log or not isinstance(log.get("signals"), list):
+        return 0
+    _n = 0
+    for _sig in log["signals"]:
+        if not isinstance(_sig, dict):
+            continue
+        if _sig.get("status") != "open":
+            continue
+        # Detect legacy / missing snapshot
+        _missing_dca = (
+            "dca_enabled" not in _sig
+            or not _sig.get("dca_fills")
+            or "original_entry" not in _sig
+        )
+        if not _missing_dca:
+            continue
+        try:
+            _init_signal_trade_snapshot(_sig, cfg)
+            # Also populate the tag that surfaces in the UI fallback paths.
+            _sig.setdefault("signal_entry", _sig.get("entry"))
+            _n += 1
+        except Exception:
+            # Never let one bad row abort the rest of the migration.
+            continue
+    return _n
+
+
 def _dca_compute_trigger(sig: dict, cfg: dict = None) -> float:
     """Compute the next-DCA trigger price for an open signal.
 
@@ -3757,6 +3803,33 @@ hr {
 ::-webkit-scrollbar-thumb:hover { background: #C9A84C; }
 </style>
 """, unsafe_allow_html=True)
+
+# ── One-shot legacy-signal migration ────────────────────────────────────────
+# Runs exactly once per process (guarded by builtins flag). Backfills the
+# DCA/trade snapshot onto any legacy open signals that were created before
+# `_init_signal_trade_snapshot` was wired into the non-traded path. This is
+# what unblocks the Next DCA column and paper-mode DCA simulation on trades
+# that already exist in the log at the time of the code update.
+if not getattr(_b, "_bsc_legacy_migration_done", False):
+    try:
+        with _log_lock, _config_lock:
+            _migrated = _migrate_legacy_signals(_b._bsc_log, _b._bsc_cfg)
+            if _migrated > 0:
+                save_log(_b._bsc_log)
+        _b._bsc_legacy_migration_done = True
+        if _migrated > 0:
+            _append_error(
+                "loop",
+                f"Legacy DCA snapshot migration: backfilled {_migrated} "
+                f"open signal(s) with current sidebar DCA config.",
+            )
+    except Exception as _mig_exc:
+        # Never block startup over a migration error.
+        try:
+            _append_error("loop", f"Legacy migration failed: {_mig_exc}")
+        except Exception:
+            pass
+        _b._bsc_legacy_migration_done = True
 
 _ensure_scanner()
 
@@ -6454,7 +6527,7 @@ def _build_diagnostics_text() -> str:
     except Exception as _fex:
         _push(f"  <error reading filter counts: {_fex}>")
 
-    # ── API error log (last 50) ─────────────────────────────────────────────
+    # API error log (last 50)
     _hdr("RECENT API ERRORS (last 50, newest last)")
     try:
         with getattr(_b, "_bsc_error_log_lock", threading.Lock()):
@@ -6462,13 +6535,12 @@ def _build_diagnostics_text() -> str:
         _el_tail = _el_snap[-50:] if len(_el_snap) > 50 else _el_snap
         if _el_tail:
             for _e in _el_tail:
-                _push(
-                    f"  [{_fmt_ts(_e.get('ts',''))}] "
-                    f"{_e.get('type','?'):<14} "
-                    f"{_e.get('symbol','-') or '-':<12} "
-                    f"{_e.get('endpoint','-') or '-':<28} "
-                    f"{(_e.get('message','') or '')[:400]}"
-                )
+                _ts_s  = _fmt_ts(_e.get("ts", ""))
+                _typ_s = _e.get("type", "?")
+                _sym_s = _e.get("symbol", "-") or "-"
+                _ep_s  = _e.get("endpoint", "-") or "-"
+                _msg_s = (_e.get("message", "") or "")[:400]
+                _push(f"  [{_ts_s}] {_typ_s:<14} {_sym_s:<12} {_ep_s:<28} {_msg_s}")
             _push(f"  (showing {len(_el_tail)} of {len(_el_snap)} total)")
         else:
             _push("  (no errors recorded)")
@@ -6485,24 +6557,21 @@ def _build_diagnostics_text() -> str:
 
 try:
     _diag_text = _build_diagnostics_text()
-    _diag_fname = "DCA_SMACORSS_diagnostics_" + \
-                  dubai_now().strftime("%Y%m%d_%H%M%S") + ".txt"
+    _diag_fname = "DCA_SMACORSS_diagnostics_" + dubai_now().strftime("%Y%m%d_%H%M%S") + ".txt"
     st.download_button(
         label=f"📥 Download full diagnostics (.txt · {len(_diag_text):,} chars)",
         data=_diag_text.encode("utf-8"),
         file_name=_diag_fname,
         mime="text/plain",
         key="download_diagnostics_txt",
-        help="Downloads a plain-text snapshot of filters, every open/closed "
-             "trade, recent API errors, and runtime state. Attach to bug "
-             "reports or code-improvement requests so the full context is "
-             "visible without screenshots.",
+        help=("Downloads a plain-text snapshot of filters, every open/closed "
+              "trade, recent API errors, and runtime state. Attach to bug "
+              "reports or code-improvement requests so the full context is "
+              "visible without screenshots."),
     )
 except Exception as _diag_exc:
     st.error(f"Diagnostics build error: {_diag_exc}")
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Auto-refresh
-# ─────────────────────────────────────────────────────────────────────────────
 time.sleep(30)
 st.rerun()
