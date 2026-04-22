@@ -169,16 +169,21 @@ DEFAULT_CONFIG: dict = {
     "trade_max_dca":         1,
     # ── DCA trigger drop percentages ──────────────────────────────────────────
     # Two separate configurables, shown in the sidebar based on selected
-    # margin mode. Both default to the original hardcoded behaviour so
-    # upgrades from older configs produce identical triggers.
-    #   • Isolated: % of the distance from blended avg to liquidation.
-    #       default 70 → at 10× lev, fires at −7% from avg.
-    #                    at 20× lev, fires at −3.5% from avg. (leverage-aware)
+    # margin mode.
+    #   • Isolated: % DISTANCE ABOVE LIQUIDATION toward entry (dropdown
+    #     10/15/…/95, step 5). Higher = conservative (fires near entry);
+    #     lower = aggressive (fires near liq).
+    #       drop_pct = (1/lev) × (1 − iso_dist/100)
+    #       DCA price = entry × (1 − drop_pct)
+    #       Example: entry $100, 10× lev, liq ≈ $90
+    #         10% → $91  · 50% → $95  · 70% → $97  · 95% → $99.50
+    #       default 70 → at 10× lev, fires at −3% from avg.
+    #                    at 20× lev, fires at −1.5% from avg. (leverage-aware)
     #   • Cross:    % drop below blended avg (leverage-independent).
     #       default 7 → fires at −7% from avg, regardless of leverage.
     # Snapshotted onto the signal at entry time so sidebar tweaks don't
     # retroactively change already-open trades.
-    "dca_iso_distance_pct":  70.0,   # 1–100, isolated
+    "dca_iso_distance_pct":  70.0,   # 10–95 (step 5), isolated
     "dca_cross_drop_pct":    7.0,    # 0.1–50, cross
     # ── Open-Trade Watcher loop (1-minute DCA/TP checker) ─────────────────────
     # When > 0 AND < loop_minutes: a dedicated background thread runs every
@@ -2466,14 +2471,25 @@ def _migrate_legacy_signals(log: dict, cfg: dict) -> int:
 def _dca_compute_trigger(sig: dict, cfg: dict = None) -> float:
     """Compute the next-DCA trigger price for an open signal.
 
-    Two drop percentages are configurable from the sidebar and snapshotted
-    onto the signal at entry time so later sidebar changes don't alter
-    already-open trades:
+    Two percentages are configurable from the sidebar and snapshotted onto
+    the signal at entry time so later sidebar changes don't retroactively
+    alter already-open trades:
 
-      Isolated: `dca_iso_distance_pct` % of the distance from blended avg to
-                liquidation (default 70%). At 10× leverage with 70 → fires
-                at −7% from avg. At 20× with 70 → fires at −3.5% from avg
-                (auto-scales with leverage via liq = avg × (1 − 1/lev)).
+      Isolated: `dca_iso_distance_pct` % = DISTANCE FROM LIQUIDATION toward
+                entry, measured as a fraction of the entry-to-liq range.
+                10 → fires very close to liquidation (aggressive).
+                95 → fires very close to entry (conservative).
+
+                Formula:
+                  dca_drop % = (1 / leverage) × (1 − iso_dist / 100)
+                  DCA price  = avg_entry × (1 − dca_drop %)
+
+                Example — entry $100 · 10× → liq ≈ $90:
+                  iso_dist=10  →  drop 9%    →  DCA at $91
+                  iso_dist=50  →  drop 5%    →  DCA at $95
+                  iso_dist=70  →  drop 3%    →  DCA at $97
+                  iso_dist=95  →  drop 0.5%  →  DCA at $99.50
+
       Cross:    `dca_cross_drop_pct` % fixed drop below blended avg (default 7%).
                 Leverage-independent.
 
@@ -2492,8 +2508,11 @@ def _dca_compute_trigger(sig: dict, cfg: dict = None) -> float:
         # sig snapshot wins; fall back to current cfg; then hardcoded 70.
         iso_dist = float(sig.get("dca_iso_distance_pct",
                                  cfg.get("dca_iso_distance_pct", 70.0)) or 70.0)
-        iso_dist = max(1.0, min(100.0, iso_dist))  # clamp 1–100
-        dca_drop_pct = (iso_dist / 100.0) * (1.0 / lev)
+        iso_dist = max(10.0, min(95.0, iso_dist))  # clamp to dropdown range
+        # New semantic: iso_dist = % DISTANCE ABOVE LIQUIDATION toward entry.
+        # drop_pct = (1/lev) × (1 − iso_dist/100)
+        # At 10×, iso_dist=70 → drop 3% → trigger at entry × 0.97.
+        dca_drop_pct = (1.0 / lev) * (1.0 - iso_dist / 100.0)
     else:
         cross_drop = float(sig.get("dca_cross_drop_pct",
                                    cfg.get("dca_cross_drop_pct", 7.0)) or 7.0)
@@ -4075,23 +4094,44 @@ with st.sidebar:
     # signal at entry time so sidebar changes don't retroactively alter
     # already-open trades.
     if new_margin_mode == "isolated":
+        # Fixed dropdown — % distance FROM liquidation price toward entry.
+        # 10% = DCA fires close to liquidation (aggressive); 95% = fires
+        # very close to entry (conservative).
+        _iso_options = list(range(10, 100, 5))  # 10, 15, …, 95
         _cur_iso_pct = float(_snap_cfg.get("dca_iso_distance_pct", 70.0) or 70.0)
-        _cur_iso_pct = max(1.0, min(100.0, _cur_iso_pct))
-        new_dca_iso_distance_pct = st.number_input(
-            "DCA Trigger — Isolated (% of distance to liquidation)",
-            min_value=1.0, max_value=100.0,
-            value=float(_cur_iso_pct), step=1.0,
+        # Snap the saved value to the nearest dropdown option so the widget
+        # can always render (free-input legacy values get normalized).
+        _cur_iso_int = int(round(_cur_iso_pct / 5.0) * 5)
+        _cur_iso_int = max(10, min(95, _cur_iso_int))
+        try:
+            _cur_iso_idx = _iso_options.index(_cur_iso_int)
+        except ValueError:
+            _cur_iso_idx = _iso_options.index(70)
+        new_dca_iso_distance_pct = float(st.selectbox(
+            "DCA Trigger — Isolated (% distance from liquidation)",
+            options=_iso_options,
+            index=_cur_iso_idx,
+            format_func=lambda v: f"{v}%",
             key="cfg_dca_iso_distance_pct",
             help=(
                 "Only applies when Max DCA > 0 AND Margin Mode = Isolated.\n\n"
-                "DCA fires when price reaches X% of the distance from the "
-                "blended average entry down to the liquidation price. "
-                "Default 70% → DCA triggers 70% of the way to liquidation.\n\n"
-                "Example: 10× leverage → liquidation ~10% below avg. "
-                "70% × 10% = 7% drop below avg triggers the next DCA fill.\n\n"
-                "Lower values = DCA fires earlier (closer to avg). "
-                "Higher values = DCA fires later (closer to liquidation)."
-            ))
+                "Meaning: DCA fires at the chosen % DISTANCE ABOVE the "
+                "liquidation price (toward entry). Lower % = closer to "
+                "liquidation (aggressive — you sit deep in the hole before "
+                "averaging). Higher % = closer to entry (conservative — "
+                "average down quickly on small drawdowns).\n\n"
+                "Formula:\n"
+                "  dca_drop %  = (1 / leverage) × (1 − chosen_pct / 100)\n"
+                "  DCA price   = entry × (1 − dca_drop %)\n\n"
+                "Example — Entry $100, 10× leverage → liquidation ≈ $90:\n"
+                "  • 10% → DCA fires at $91   (10% above liq, toward entry)\n"
+                "  • 50% → DCA fires at $95   (midpoint)\n"
+                "  • 70% → DCA fires at $97   (70% above liq, toward entry)\n"
+                "  • 95% → DCA fires at $99.50 (very close to entry)\n\n"
+                "The chosen value is snapshotted onto each signal at entry "
+                "time, so changing it later does not retroactively move the "
+                "trigger on already-open trades."
+            )))
         new_dca_cross_drop_pct = float(_snap_cfg.get("dca_cross_drop_pct", 7.0) or 7.0)
     else:
         _cur_cross_pct = float(_snap_cfg.get("dca_cross_drop_pct", 7.0) or 7.0)
@@ -4696,7 +4736,7 @@ with st.sidebar:
             "trade_leverage":    int(new_trade_lev),
             "trade_margin_mode": new_margin_mode,
             "trade_max_dca":     max(0, min(6, int(new_trade_max_dca))),
-            "dca_iso_distance_pct": max(1.0, min(100.0, float(new_dca_iso_distance_pct))),
+            "dca_iso_distance_pct": max(10.0, min(95.0, float(new_dca_iso_distance_pct))),
             "dca_cross_drop_pct":   max(0.1, min(50.0,  float(new_dca_cross_drop_pct))),
         }
         with _config_lock: _b._bsc_cfg.clear(); _b._bsc_cfg.update(new_cfg)
@@ -5703,9 +5743,12 @@ _SIG_COL_CFG = {
                                "(e.g. \"DCA 2/3\" means the upcoming fire "
                                "will be the 2nd DCA of a max-3 ladder).\n\n"
                                "Computed from the blended average and the "
-                               "drop % snapshotted onto the signal at entry:\n"
-                               "  • Isolated → `dca_iso_distance_pct` % of the "
-                               "distance from avg to liquidation.\n"
+                               "% snapshotted onto the signal at entry:\n"
+                               "  • Isolated → `dca_iso_distance_pct` = "
+                               "% DISTANCE ABOVE LIQUIDATION toward entry. "
+                               "Higher = conservative (fires near entry), "
+                               "lower = aggressive (fires near liq).\n"
+                               "     e.g. entry $100 · 10× · 70% → $97\n"
                                "  • Cross    → `dca_cross_drop_pct` % fixed "
                                "drop below avg.\n\n"
                                "Shown only when DCA is enabled on the trade "
@@ -6690,50 +6733,39 @@ def _build_diagnostics_text() -> str:
     except Exception as _fex:
         _push(f"  <error reading filter counts: {_fex}>")
 
-    # API error log (last 50)
-    _hdr("RECENT API ERRORS (last 50, newest last)")
+    # ── API errors (recent) ─────────────────────────────────
+    _hdr("API ERRORS (recent)")
     try:
-        with getattr(_b, "_bsc_error_log_lock", threading.Lock()):
-            _el_snap = list(getattr(_b, "_bsc_error_log", []))
-        _el_tail = _el_snap[-50:] if len(_el_snap) > 50 else _el_snap
-        if _el_tail:
-            for _e in _el_tail:
-                _ts_s  = _fmt_ts(_e.get("ts", ""))
-                _typ_s = _e.get("type", "?")
-                _sym_s = _e.get("symbol", "-") or "-"
-                _ep_s  = _e.get("endpoint", "-") or "-"
-                _msg_s = (_e.get("message", "") or "")[:400]
-                _push(f"  [{_ts_s}] {_typ_s:<14} {_sym_s:<12} {_ep_s:<28} {_msg_s}")
-            _push(f"  (showing {len(_el_tail)} of {len(_el_snap)} total)")
+        _err_log = list(_b._bsc_log.get("api_errors", []) or []) if hasattr(_b, "_bsc_log") else []
+        if _err_log:
+            for _e in _err_log[-50:]:
+                if isinstance(_e, dict):
+                    _push(
+                        f"  {_fmt_ts(_e.get('ts',''))}  "
+                        f"{_e.get('type','?')}  "
+                        f"{str(_e.get('msg',''))[:200]}"
+                    )
+                else:
+                    _push(f"  {str(_e)[:240]}")
         else:
-            _push("  (no errors recorded)")
-    except Exception as _eex:
-        _push(f"  <error reading error log: {_eex}>")
+            _push("  (none)")
+    except Exception as _err_ex:
+        _push(f"  <error reading api_errors: {_err_ex}>")
 
-    _push("")
-    _push("=" * 78)
-    _push("END OF DIAGNOSTICS SNAPSHOT")
-    _push("=" * 78)
+    return "\n".join(_lines)
 
-    return "\n".join(str(x) for x in _lines)
 
+# ── Download Diagnostics button ────────────────────────────────────────────────
 try:
     _diag_text = _build_diagnostics_text()
-    _diag_fname = "DCA_SMACORSS_diagnostics_" + dubai_now().strftime("%Y%m%d_%H%M%S") + ".txt"
+    _diag_fname = "diagnostics_" + dubai_now().strftime("%Y%m%d_%H%M%S") + ".txt"
     st.download_button(
-        label=f"📥 Download full diagnostics (.txt · {len(_diag_text):,} chars)",
-        data=_diag_text.encode("utf-8"),
+        label="⬇️ Download Diagnostics",
+        data=_diag_text,
         file_name=_diag_fname,
         mime="text/plain",
-        key="download_diagnostics_txt",
-        help=("Downloads a plain-text snapshot of filters, every open/closed "
-              "trade, recent API errors, and runtime state. Attach to bug "
-              "reports or code-improvement requests so the full context is "
-              "visible without screenshots."),
+        key="btn_download_diagnostics",
+        help="Full plain-text snapshot of app state: config, signals, DCA fills, filter funnel, API errors.",
     )
-except Exception as _diag_exc:
-    st.error(f"Diagnostics build error: {_diag_exc}")
-
-# Auto-refresh
-time.sleep(30)
-st.rerun()
+except Exception as _dex:
+    st.warning(f"Diagnostics unavailable: {_dex}")
