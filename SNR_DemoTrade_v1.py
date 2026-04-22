@@ -5080,13 +5080,23 @@ def _fmt_trade_history(s: dict) -> str:
     lines: list = []
 
     if fills:
-        for f in fills:
+        _last_idx = len(fills) - 1
+        for i, f in enumerate(fills):
             idx   = int(f.get("dca_idx", 0) or 0)
             label = "Entry" if idx == 0 else f"DCA {idx}"
             px_s  = _fmt_px_auto(f.get("price", 0))
             ts_s  = fmt_dubai(f.get("ts", "")) or "—"
             tp_v  = f.get("tp")
             sl_v  = f.get("sl")
+            # Fallback ONLY for the most recent fill: sig["tp"]/sig["sl"]
+            # reflect the state immediately after this fill (no later DCAs
+            # have rewritten them yet), so they're accurate for this row.
+            # Older fills can't borrow from sig — the values would be wrong.
+            if i == _last_idx:
+                if tp_v is None or _fmt_px_auto(tp_v) == "—":
+                    tp_v = s.get("tp")
+                if sl_v is None or _fmt_px_auto(sl_v) == "—":
+                    sl_v = s.get("sl")
             _has_tp = tp_v is not None and _fmt_px_auto(tp_v) != "—"
             _has_sl = sl_v is not None and _fmt_px_auto(sl_v) != "—"
             if _has_tp and _has_sl:
@@ -5095,7 +5105,7 @@ def _fmt_trade_history(s: dict) -> str:
                     f"SL ${_fmt_px_auto(sl_v)} | {ts_s}"
                 )
             else:
-                # Pre-migration fill — only price + time are reliable.
+                # Pre-migration fill with no reliable TP/SL — price + time only.
                 lines.append(f"{label:<6}: ${px_s} | {ts_s}")
         return "\n".join(lines)
 
@@ -5779,17 +5789,14 @@ def _render_sig_table(sig_list: list, header: str, empty_msg: str,
 
         if auto_height:
             # Expand so ALL rows are visible without internal scrolling.
-            # Each row ≈ 35 px, header ≈ 38 px, +10 px buffer. Trade History
-            # is multi-line (up to 1 entry + 6 DCAs = 7 lines ≈ 120 px), so
-            # give each row a roomier default when any trade has DCA'd.
-            _max_dca = max(
-                (int(s.get("dca_count", 0) or 0) for s in sig_list),
-                default=0,
-            )
-            _row_h = 35 + max(0, _max_dca) * 18  # +18 px per extra line
+            # Each row ≈ 35 px, header ≈ 38 px, +10 px buffer. Streamlit's
+            # dataframe auto-expands individual cells that contain newlines
+            # (Trade History column) — we do NOT inflate the fixed per-row
+            # height globally, since that would add empty whitespace for
+            # rows whose Trade History is short.
             st.dataframe(_render_obj, use_container_width=True,
                          hide_index=True,
-                         height=len(rows) * _row_h + 48,
+                         height=len(rows) * 35 + 48,
                          column_config=_SIG_COL_CFG)
         else:
             st.dataframe(_render_obj, use_container_width=True,
@@ -6709,7 +6716,6 @@ def _build_diagnostics_text() -> str:
     _push("=" * 78)
 
     return "\n".join(str(x) for x in _lines)
-
 
 try:
     _diag_text = _build_diagnostics_text()
