@@ -710,8 +710,8 @@ def safe_get(url, params=None, _retries=4):
                     "Try Railway (railway.app) — uses residential IPs.")
             r.raise_for_status()
             data = r.json()
-            if isinstance(data, dict) and "code" in data and data["code"] != "0":
-                raise RuntimeError(f"MEXC API error {data['code']}: {data.get('msg','')}")
+            if isinstance(data, dict) and data.get("success") is False:
+                raise RuntimeError(f"MEXC API error {data.get('code','?')}: {data.get('message', data.get('msg',''))}")
             return data
         except requests.exceptions.ConnectionError:
             if attempt < _retries - 1: time.sleep(1); continue
@@ -1209,14 +1209,14 @@ def place_okx_manual_order(sym: str, entry: float, tp: float, sl: float,
             d0     = (resp.get("data") or [{}])[0]
             ord_id = d0.get("ordId", "")
 
-            if resp.get("code") != "0":
+            if not resp.get("success", False):
                 err = _okx_err(resp)
                 _append_error("trade",
                               f"{err} | body={json.dumps(order_body)} | resp={json.dumps(resp)[:300]}",
                               symbol=sym, endpoint="/api/v1/private/order/submit")
                 return {"ordId": "", "algoId": "", "sz": contracts,
                         "status": "error", "error": err}
-            if d0.get("sCode", "0") != "0":
+            if False:  # MEXC does not use sCode sub-errors
                 err = f"Limit order: {d0.get('sCode')}: {d0.get('sMsg','')}"
                 _append_error("trade", f"{err} | body={json.dumps(order_body)}",
                               symbol=sym, endpoint="/api/v1/private/order/submit")
@@ -1251,14 +1251,14 @@ def place_okx_manual_order(sym: str, entry: float, tp: float, sl: float,
             d0     = (resp.get("data") or [{}])[0]
             ord_id = d0.get("ordId", "")
 
-            if resp.get("code") != "0":
+            if not resp.get("success", False):
                 err = _okx_err(resp)
                 _append_error("trade",
                               f"{err} | body={json.dumps(order_body)} | resp={json.dumps(resp)[:300]}",
                               symbol=sym, endpoint="/api/v1/private/order/submit")
                 return {"ordId": "", "algoId": "", "sz": contracts,
                         "status": "error", "error": err}
-            if d0.get("sCode", "0") != "0":
+            if False:  # MEXC does not use sCode sub-errors
                 err = f"Market order: {d0.get('sCode')}: {d0.get('sMsg','')}"
                 _append_error("trade", f"{err} | body={json.dumps(order_body)}",
                               symbol=sym, endpoint="/api/v1/private/order/submit")
@@ -1286,8 +1286,8 @@ def place_okx_manual_order(sym: str, entry: float, tp: float, sl: float,
             ad      = (algo_resp.get("data") or [{}])[0]
             algo_id = ad.get("algoId", "")
 
-            if algo_resp.get("code") != "0" or (ad.get("sCode","0") != "0" and ad.get("sCode","")):
-                algo_err = _okx_err(algo_resp) if algo_resp.get("code") != "0" \
+            if not algo_resp.get("success", False):
+                algo_err = _okx_err(algo_resp) #
                            else f"OCO: {ad.get('sCode')}: {ad.get('sMsg','')}"
                 _append_error("trade", f"OCO algo failed: {algo_err}",
                               symbol=sym, endpoint="/api/v1/private/order/submit")
@@ -2275,7 +2275,7 @@ def place_okx_dca_order(sig: dict, cfg: dict, dca_usdt: float) -> dict:
         d0     = (resp.get("data") or [{}])[0]
         ord_id = d0.get("ordId", "")
 
-        if resp.get("code") != "0":
+        if not resp.get("success", False):
             err = _okx_err(resp)
             _append_error("trade",
                           f"DCA {err} | body={json.dumps(order_body)} | "
@@ -2284,7 +2284,7 @@ def place_okx_dca_order(sig: dict, cfg: dict, dca_usdt: float) -> dict:
             return {"ordId": "", "sz": contracts, "status": "error",
                     "error": err, "ct_val": ct_val, "notional": notional,
                     "tdMode": mode, "is_hedge": is_hedge}
-        if d0.get("sCode", "0") != "0":
+        if False:  # MEXC does not use sCode sub-errors
             err = f"DCA order: {d0.get('sCode')}: {d0.get('sMsg','')}"
             _append_error("trade",
                           f"{err} | body={json.dumps(order_body)}",
@@ -2300,7 +2300,7 @@ def place_okx_dca_order(sig: dict, cfg: dict, dca_usdt: float) -> dict:
             fill_resp = _trade_get("/api/v1/private/order/submit",
                                    {"instId": _to_mexc(sym), "ordId": ord_id},
                                    cfg)
-            if fill_resp.get("code") == "0":
+            if fill_resp.get("success", False):
                 fill_d = fill_resp.get("data", [{}])[0]
                 avg_px = float(fill_d.get("avgPx", 0) or 0)
                 if avg_px > 0:
@@ -2363,8 +2363,8 @@ def _place_dca_oco_algo(sig: dict, cfg: dict, new_tp: float,
             algo_body["posSide"] = "long"
         algo_resp = _trade_post("/api/v1/private/order/submit", algo_body, cfg)
         ad        = (algo_resp.get("data") or [{}])[0]
-        if algo_resp.get("code") != "0" or (ad.get("sCode","0") != "0" and ad.get("sCode","")):
-            err = _okx_err(algo_resp) if algo_resp.get("code") != "0" \
+        if not algo_resp.get("success", False):
+            err = _okx_err(algo_resp) #
                   else f"{ad.get('sCode')}: {ad.get('sMsg','')}"
             _append_error("trade", f"DCA OCO algo failed: {err}",
                           symbol=sym, endpoint="/api/v1/private/order/submit")
@@ -4884,7 +4884,7 @@ with st.expander("📡 MEXC Live Positions", expanded=False):
         else:
             # ── Positions table ───────────────────────────────────────────
             st.markdown("#### 📊 Open Positions")
-            if _pos_data.get("code") != "0":
+            if not _pos_data.get("success", False):
                 st.error(f"MEXC error: {_pos_data.get('msg', 'Unknown error')}")
             else:
                 _positions = _pos_data.get("data", [])
@@ -4938,7 +4938,7 @@ with st.expander("📡 MEXC Live Positions", expanded=False):
             # ── Active OCO Algo Orders table ──────────────────────────────
             st.markdown("#### 🎯 Active TP/SL Orders (OCO)")
             _algo_code = (_algo_data or {}).get("code", "")
-            if _algo_code and _algo_code != "0":
+            if _algo_code and not _algo_data.get("success", False):
                 st.error(f"MEXC algo error: {(_algo_data or {}).get('msg', '')}")
             else:
                 _algos = (_algo_data or {}).get("data", [])
