@@ -2592,6 +2592,118 @@ def _place_dca_oco_algo(sig: dict, cfg: dict, new_tp: float,
         return ""
 
 
+def _execute_dca_fill_paper(sig: dict, cfg: dict) -> bool:
+    """Paper-mode DCA fill (no OKX API calls).
+
+    Runs the SAME math as `_execute_dca_fill` — appends a synthetic fill
+    record, recomputes blended avg / total_usdt / total_notional / tp / sl,
+    increments dca_count — but skips the real market-buy order AND the
+    OCO cancel/replace. The simulated fill price is taken from the detected
+    trigger (`sig["_dca_trigger_px"]`, set by `_update_one_signal` /
+    `_watcher_update_one_signal`) so the displayed blended avg matches what
+    a live fill at market would have produced.
+
+    Used automatically whenever:
+      • auto-trading is OFF  (cfg["trade_enabled"] is False), OR
+      • the signal has no live OKX order  (no order_id — e.g. a paper-mode
+        entry that never placed a real order).
+
+    Returns True on successful simulated add, False otherwise.
+    Each paper fill record is tagged with "paper": True so the UI / logs
+    can distinguish it from real fills.
+    """
+    sym = sig.get("symbol", "?")
+    try:
+        dca_usdt = _dca_next_usdt(sig)
+        if dca_usdt <= 0:
+            sig.pop("_dca_pending", None)
+            return False
+
+        # Use the detected trigger price as the simulated fill — this is the
+        # price the low wick reached on the candle that flagged the trigger,
+        # which is a faithful approximation of what a market order would have
+        # filled at. Fallback: recompute the current trigger.
+        fill_px = float(sig.get("_dca_trigger_px", 0) or 0)
+        if fill_px <= 0:
+            fill_px = _dca_compute_trigger(sig, cfg)
+        if fill_px <= 0:
+            sig.pop("_dca_pending", None)
+            return False
+
+        lev = int(sig.get("trade_lev", 0) or 0)
+        if lev <= 0:
+            lev = int(cfg.get("trade_leverage", 10) or 10)
+        fill_not = dca_usdt * lev
+
+        fills = sig.get("dca_fills") or []
+        next_idx = len(fills)
+        fills.append({
+            "price":    _pround(fill_px),
+            "usdt":     dca_usdt,
+            "leverage": lev,
+            "notional": fill_not,
+            "ts":       dubai_now().isoformat(),
+            "order_id": "",
+            "dca_idx":  next_idx,
+            "paper":    True,
+        })
+        sig["dca_fills"] = fills
+
+        # Recompute blended average as notional-weighted mean of fills.
+        total_notional = 0.0
+        total_units    = 0.0
+        total_usdt     = 0.0
+        for f in fills:
+            px = float(f.get("price", 0) or 0)
+            nt = float(f.get("notional", 0) or 0)
+            ud = float(f.get("usdt", 0) or 0)
+            if px > 0 and nt > 0:
+                total_notional += nt
+                total_units    += nt / px
+                total_usdt     += ud
+        if total_units > 0:
+            avg_entry = total_notional / total_units
+        else:
+            prices = [float(f.get("price", 0) or 0) for f in fills
+                      if float(f.get("price", 0) or 0) > 0]
+            avg_entry = (sum(prices) / len(prices)
+                         if prices else float(sig.get("avg_entry", 0) or 0))
+
+        sig["avg_entry"]      = _pround(avg_entry)
+        sig["total_usdt"]     = total_usdt
+        sig["total_notional"] = total_notional
+        sig["dca_count"]      = next_idx
+
+        # Recompute TP from sidebar tp_pct and new blended avg
+        tp_pct = float(cfg.get("tp_pct", 1.5)) / 100.0
+        sig["tp"] = _pround(sig["avg_entry"] * (1.0 + tp_pct))
+
+        # Final SL vs next-trigger display SL — same rules as real fill
+        dca_max = int(sig.get("dca_max", 0) or 0)
+        if sig["dca_count"] >= dca_max:
+            final_sl = _pround(sig["avg_entry"] * 0.97)
+            sig["final_sl_price"] = final_sl
+            sig["sl"] = final_sl
+        else:
+            sig["final_sl_price"] = None
+            sig["sl"] = _dca_compute_trigger(sig, cfg)
+
+        # No order_id / algo_id change — paper trade has no OKX position.
+        # Mark display-level status so the UI can reflect the paper fill.
+        sig["order_status"] = "paper_filled"
+
+        sig.pop("_dca_pending", None)
+        sig.pop("_dca_trigger_px", None)
+        sig.pop("_dca_trigger_time", None)
+        return True
+
+    except Exception as exc:
+        _append_error("trade", f"Paper DCA exception: {exc}",
+                      symbol=sym, endpoint="_execute_dca_fill_paper")
+        sig.pop("_dca_pending", None)
+        return False
+
+
 def _execute_dca_fill(sig: dict, cfg: dict) -> bool:
     """Execute one DCA add for a signal flagged with `_dca_pending=True`.
 
@@ -2760,6 +2872,11 @@ def _update_one_signal(sig: dict) -> None:
     """
     _sym = sig.get("symbol", "?")
     try:
+        # Snapshot cfg for DCA-trigger fallback chain. `_dca_compute_trigger`
+        # prefers the sig's own snapshot fields; cfg covers legacy trades
+        # created before those fields existed.
+        with _config_lock:
+            _cfg_snap = dict(_b._bsc_cfg)
         # Robust timestamp parsing — tolerates Z-suffixed or naive strings
         # that may exist in older log entries.
         sig_dt    = _parse_iso_safe(sig["timestamp"])
@@ -2776,7 +2893,7 @@ def _update_one_signal(sig: dict) -> None:
         if _ladder_slots_left:
             # While the ladder still has unused slots the sidebar SL is
             # IGNORED — only TP exit or a DCA trigger can act on this trade.
-            _dca_trigger_price = _dca_compute_trigger(sig)
+            _dca_trigger_price = _dca_compute_trigger(sig, _cfg_snap)
             # Scan candles AFTER the last fill timestamp (entry or last DCA).
             _last_fill_ts_ms = sig_ts_ms
             _fills = sig.get("dca_fills") or []
@@ -2922,6 +3039,10 @@ def _watcher_update_one_signal(sig: dict) -> None:
     """
     _sym = sig.get("symbol", "?")
     try:
+        # Snapshot cfg so `_dca_compute_trigger` can fall back to the live
+        # sidebar value for any signals without a per-entry snapshot.
+        with _config_lock:
+            _cfg_snap = dict(_b._bsc_cfg)
         sig_dt    = _parse_iso_safe(sig["timestamp"])
         sig_ts_ms = int(sig_dt.timestamp() * 1000)
         # 1m × 120 bars ≈ 2h history — enough to catch anything missed between
@@ -2937,7 +3058,7 @@ def _watcher_update_one_signal(sig: dict) -> None:
         _ladder_slots_left = _dca_enabled and _dca_count < _dca_max
 
         if _ladder_slots_left:
-            _dca_trigger_price = _dca_compute_trigger(sig)
+            _dca_trigger_price = _dca_compute_trigger(sig, _cfg_snap)
             _last_fill_ts_ms = sig_ts_ms
             _fills = sig.get("dca_fills") or []
             if _fills:
@@ -3077,26 +3198,23 @@ def _watcher_loop():
                 if _open_snapshot:
                     _watcher_update_open_signals(_open_snapshot)
 
-                    # Execute any DCA triggers inline — same pipeline the main
-                    # loop uses. Only runs when auto-trading is enabled.
+                    # Execute any DCA triggers inline. Uses the REAL fill
+                    # pipeline when auto-trading is ON and the signal has a
+                    # live OKX order to anchor to; otherwise falls through to
+                    # the PAPER simulator which runs the same math (blended
+                    # avg, tp, sl, dca_count) without any exchange calls.
                     _dca_pending_sigs = [s for s in _open_snapshot
                                          if s.get("_dca_pending")]
                     if _dca_pending_sigs:
-                        if cfg.get("trade_enabled"):
-                            for _dsig in _dca_pending_sigs:
+                        for _dsig in _dca_pending_sigs:
+                            _is_paper = (not cfg.get("trade_enabled")
+                                         or not _dsig.get("order_id"))
+                            if _is_paper:
+                                _execute_dca_fill_paper(_dsig, cfg)
+                            else:
                                 _execute_dca_fill(_dsig, cfg)
-                            with _log_lock:
-                                save_log(_b._bsc_log)
-                        else:
-                            for _dsig in _dca_pending_sigs:
-                                _append_error(
-                                    "trade",
-                                    f"[watcher] DCA trigger hit but "
-                                    f"auto-trading disabled; skipping add "
-                                    f"for {_dsig.get('symbol', '?')}",
-                                    symbol=_dsig.get("symbol", ""),
-                                )
-                                _dsig.pop("_dca_pending", None)
+                        with _log_lock:
+                            save_log(_b._bsc_log)
                     else:
                         # No DCA to place — still persist closed trades
                         # (TP/SL) if any flipped during this tick.
@@ -3180,25 +3298,17 @@ def _bg_loop():
                 _dca_pending_sigs = [s for s in _open_snapshot
                                      if s.get("_dca_pending")]
                 if _dca_pending_sigs:
-                    if cfg.get("trade_enabled"):
-                        for _dsig in _dca_pending_sigs:
-                            _ok = _execute_dca_fill(_dsig, cfg)
-                            # _execute_dca_fill clears _dca_pending regardless
-                            # of outcome. Errors surface in the Error Log.
-                            _ = _ok
-                        with _log_lock:
-                            save_log(_b._bsc_log)
-                    else:
-                        # Auto-trading off — skip real orders but clear the
-                        # flag so it doesn't accumulate. Surface as error.
-                        for _dsig in _dca_pending_sigs:
-                            _append_error(
-                                "trade",
-                                f"DCA trigger hit but auto-trading disabled; "
-                                f"skipping add for {_dsig.get('symbol', '?')}",
-                                symbol=_dsig.get("symbol", ""),
-                            )
-                            _dsig.pop("_dca_pending", None)
+                    # Real fill when auto-trading is ON AND the sig has a
+                    # live OKX order_id to anchor to; otherwise paper sim.
+                    for _dsig in _dca_pending_sigs:
+                        _is_paper = (not cfg.get("trade_enabled")
+                                     or not _dsig.get("order_id"))
+                        if _is_paper:
+                            _execute_dca_fill_paper(_dsig, cfg)
+                        else:
+                            _execute_dca_fill(_dsig, cfg)
+                    with _log_lock:
+                        save_log(_b._bsc_log)
 
             # ── Circuit breaker: check AFTER updating signals so newly-closed
             # sl_hit trades are counted immediately ─────────────────────────
