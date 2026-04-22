@@ -6189,6 +6189,272 @@ with st.expander(_err_label, expanded=(_err_count > 0)):
         st.caption(f"Showing {len(_err_rows)} of {_err_count} entries (newest first) · max {_ERROR_LOG_MAX} kept")
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Download Diagnostics  (bottom of page — plain-text snapshot for debug/share)
+# ─────────────────────────────────────────────────────────────────────────────
+# Produces a single .txt file containing everything needed to diagnose issues:
+#   • Runtime state (scanner running / halted, cooldown state, thread status)
+#   • Full config snapshot with API credentials REDACTED
+#   • Active filters summary + filter funnel from last scan
+#   • Every signal bucket (open / TP / SL / DCA SL / queue) with all key fields
+#   • Recent API error log
+#
+# The user can download this and paste/attach to a chat for troubleshooting,
+# saving the back-and-forth of copying filters + trade details manually.
+st.divider()
+st.markdown("### 📥 Download Diagnostics")
+st.caption(
+    "One-click text snapshot of every filter, sidebar setting, open/closed "
+    "trade, and recent error — useful for sharing the exact state of the app "
+    "when reporting a bug or asking for code changes. API credentials are "
+    "redacted automatically."
+)
+
+
+def _build_diagnostics_text() -> str:
+    """Assemble a readable plain-text dump of the full app state."""
+    _SENSITIVE_KEYS = {"api_key", "api_secret", "api_passphrase"}
+    _lines: list = []
+    _push = _lines.append
+
+    def _hdr(title: str):
+        _push("")
+        _push("=" * 78)
+        _push(title)
+        _push("=" * 78)
+
+    def _sub(title: str):
+        _push("")
+        _push("-- " + title + " " + "-" * max(3, 74 - len(title)))
+
+    def _kv(k, v):
+        _push(f"  {k:<32} : {v}")
+
+    def _fmt_ts(v):
+        try:
+            return fmt_dubai(v) if v else "—"
+        except Exception:
+            return str(v or "—")
+
+    def _redact(cfg: dict) -> dict:
+        out = {}
+        for k, v in cfg.items():
+            if k in _SENSITIVE_KEYS and v:
+                out[k] = f"<redacted · len={len(str(v))}>"
+            else:
+                out[k] = v
+        return out
+
+    # ── Header ───────────────────────────────────────────────────────────────
+    _push("DCA_SMACORSS DIAGNOSTICS SNAPSHOT")
+    _push("Generated: " + dubai_now().strftime("%Y-%m-%d %H:%M:%S GST"))
+    _push("User: " + (os.environ.get("USER") or os.environ.get("USERNAME") or "?"))
+
+    # ── Runtime state ────────────────────────────────────────────────────────
+    _hdr("RUNTIME STATE")
+    try:
+        _kv("scanner_running",        _scanner_running.is_set())
+    except Exception:
+        _kv("scanner_running",        "<unavailable>")
+    _kv("bsc_sl_paused",              getattr(_b, "_bsc_sl_paused", False))
+    _kv("bsc_sl_paused_reason",       getattr(_b, "_bsc_sl_paused_reason", "") or "—")
+    _kv("bsc_sl_paused_ts",           _fmt_ts(getattr(_b, "_bsc_sl_paused_ts", "")))
+    _kv("bg_thread_alive",
+        getattr(_b, "_bsc_bg_thread", None) is not None
+        and _b._bsc_bg_thread.is_alive())
+    _kv("watcher_thread_alive",
+        getattr(_b, "_bsc_watcher_thread", None) is not None
+        and _b._bsc_watcher_thread.is_alive())
+    _kv("last_scan_ts",               _fmt_ts(getattr(_b, "_bsc_last_ts", 0)))
+    _kv("last_scan_duration_sec",     round(float(getattr(_b, "_bsc_last_dur", 0) or 0), 2))
+    _kv("last_watcher_ts",            _fmt_ts(getattr(_b, "_bsc_watcher_last_ts", 0)))
+    _kv("last_watcher_duration_sec",  round(float(getattr(_b, "_bsc_watcher_last_dur", 0) or 0), 2))
+
+    # ── Configuration (redacted) ─────────────────────────────────────────────
+    _hdr("CONFIGURATION (API credentials redacted)")
+    try:
+        _cfg_snap_local = _redact(dict(_snap_cfg))
+    except Exception as _e:
+        _cfg_snap_local = {"<error>": str(_e)}
+    for _k in sorted(_cfg_snap_local.keys()):
+        _v = _cfg_snap_local[_k]
+        if isinstance(_v, list):
+            _v = f"[{len(_v)} items] " + ", ".join(str(x) for x in _v[:20])
+            if len(_cfg_snap_local[_k]) > 20:
+                _v += f" … (+{len(_cfg_snap_local[_k]) - 20} more)"
+        _kv(_k, _v)
+
+    # ── Signal bucket counts ────────────────────────────────────────────────
+    _hdr("SIGNAL COUNTS")
+    _kv("open",        len(_open_sigs))
+    _kv("tp_hit",      len(_tp_sigs))
+    _kv("sl_hit",      len(_sl_sigs))
+    _kv("dca_sl_hit",  len(_dca_sl_sigs))
+    _kv("queue_limit", len(_queue_sigs))
+    _kv("total",       len(signals))
+
+    # ── Per-signal detail (all buckets) ─────────────────────────────────────
+    def _dump_signal(s: dict):
+        _sub(f"{s.get('symbol','?')}  ·  {_fmt_ts(s.get('timestamp',''))}")
+        _kv("status",             s.get("status", ""))
+        _kv("sector",              s.get("sector", ""))
+        _kv("setup",               "Super" if s.get("is_super_setup") else "Normal")
+        _kv("margin_mode",         s.get("order_margin_mode", "") or "—")
+        _kv("leverage",            s.get("trade_lev", "—"))
+        _kv("trade_usdt (base)",   s.get("trade_usdt", "—"))
+        _kv("original_entry",      s.get("original_entry", s.get("signal_entry", s.get("entry", ""))))
+        _kv("signal_entry",        s.get("signal_entry", "—"))
+        _kv("entry (current ref)", s.get("entry", "—"))
+        _kv("avg_entry (blended)", s.get("avg_entry", "—"))
+        _kv("tp",                  s.get("tp", "—"))
+        _kv("sl",                  s.get("sl", "—"))
+        _kv("latest_price",        s.get("latest_price", "—"))
+        _kv("price_alert_pct",     s.get("price_alert_pct", "—"))
+        _kv("price_alert (DL)",    s.get("price_alert", False))
+        _kv("dca_enabled",         s.get("dca_enabled", False))
+        _kv("dca_max",             s.get("dca_max", 0))
+        _kv("dca_count",           s.get("dca_count", 0))
+        _kv("dca_iso_distance_pct", s.get("dca_iso_distance_pct", "—"))
+        _kv("dca_cross_drop_pct",   s.get("dca_cross_drop_pct", "—"))
+        _kv("total_notional",      s.get("total_notional", "—"))
+        # Compute next DCA price if applicable
+        try:
+            if (s.get("status") == "open"
+                    and s.get("dca_enabled")
+                    and int(s.get("dca_count", 0) or 0)
+                        < int(s.get("dca_max", 0) or 0)):
+                _next_px = _dca_compute_trigger(s, _snap_cfg)
+                _kv("next_dca_price (computed)", _next_px or "—")
+        except Exception:
+            pass
+        # DCA fill ladder
+        _fills = s.get("dca_fills") or []
+        if _fills:
+            _push("  dca_fills:")
+            for _i, _f in enumerate(_fills):
+                _tag = "entry" if _i == 0 else f"DCA-{_i}"
+                _push(f"    [{_i}] {_tag:<7} "
+                      f"px={_f.get('price','?')} "
+                      f"usdt={_f.get('usdt','?')} "
+                      f"notional={_f.get('notional','?')} "
+                      f"paper={_f.get('paper', False)} "
+                      f"order_id={_f.get('order_id','') or '—'} "
+                      f"ts={_fmt_ts(_f.get('ts',''))}")
+        _kv("order_id",            s.get("order_id", "") or "—")
+        _kv("algo_id",             s.get("algo_id",  "") or "—")
+        _kv("order_status",        s.get("order_status", "") or "—")
+        _kv("order_error",         (s.get("order_error", "") or "")[:200] or "—")
+        _kv("demo_mode",           s.get("demo_mode", False))
+        _kv("close_time",          _fmt_ts(s.get("close_time", "")))
+        _kv("close_price",         s.get("close_price", "—"))
+        # Entry criteria (compact)
+        _crit = s.get("criteria", {}) or {}
+        if _crit:
+            _push("  entry_criteria:")
+            for _ck in sorted(_crit.keys()):
+                _push(f"    {_ck:<22} : {_crit[_ck]}")
+
+    _hdr("OPEN TRADES  (live)")
+    if _open_sigs:
+        for _s in _open_sigs:
+            _dump_signal(_s)
+    else:
+        _push("  (none)")
+
+    _hdr("TP HIT TRADES")
+    if _tp_sigs:
+        for _s in _tp_sigs:
+            _dump_signal(_s)
+    else:
+        _push("  (none)")
+
+    _hdr("SL HIT TRADES  (non-DCA)")
+    if _sl_sigs:
+        for _s in _sl_sigs:
+            _dump_signal(_s)
+    else:
+        _push("  (none)")
+
+    _hdr("DCA SL HIT TRADES  (ladder exhausted)")
+    if _dca_sl_sigs:
+        for _s in _dca_sl_sigs:
+            _dump_signal(_s)
+    else:
+        _push("  (none)")
+
+    _hdr("QUEUE LIMIT (never opened)")
+    if _queue_sigs:
+        for _s in _queue_sigs:
+            _dump_signal(_s)
+    else:
+        _push("  (none)")
+
+    # ── Filter funnel (last scan) ───────────────────────────────────────────
+    _hdr("FILTER FUNNEL (last scan)")
+    try:
+        with _filter_lock:
+            _fc_snap = {k: (list(v) if isinstance(v, list) else v)
+                        for k, v in _filter_counts.items()}
+        if _fc_snap.get("total_watchlist", 0) > 0:
+            for _k in sorted(_fc_snap.keys()):
+                _v = _fc_snap[_k]
+                if _k == "scan_cfg":
+                    continue  # already dumped in CONFIGURATION
+                if isinstance(_v, list):
+                    _v = f"[{len(_v)} items] " + ", ".join(str(x) for x in _v[:30])
+                _kv(_k, _v)
+        else:
+            _push("  (no scan has completed yet)")
+    except Exception as _fex:
+        _push(f"  <error reading filter counts: {_fex}>")
+
+    # ── API error log (last 50) ─────────────────────────────────────────────
+    _hdr("RECENT API ERRORS (last 50, newest last)")
+    try:
+        with getattr(_b, "_bsc_error_log_lock", threading.Lock()):
+            _el_snap = list(getattr(_b, "_bsc_error_log", []))
+        _el_tail = _el_snap[-50:] if len(_el_snap) > 50 else _el_snap
+        if _el_tail:
+            for _e in _el_tail:
+                _push(
+                    f"  [{_fmt_ts(_e.get('ts',''))}] "
+                    f"{_e.get('type','?'):<14} "
+                    f"{_e.get('symbol','-') or '-':<12} "
+                    f"{_e.get('endpoint','-') or '-':<28} "
+                    f"{(_e.get('message','') or '')[:400]}"
+                )
+            _push(f"  (showing {len(_el_tail)} of {len(_el_snap)} total)")
+        else:
+            _push("  (no errors recorded)")
+    except Exception as _eex:
+        _push(f"  <error reading error log: {_eex}>")
+
+    _push("")
+    _push("=" * 78)
+    _push("END OF DIAGNOSTICS SNAPSHOT")
+    _push("=" * 78)
+
+    return "\n".join(str(x) for x in _lines)
+
+
+try:
+    _diag_text = _build_diagnostics_text()
+    _diag_fname = "DCA_SMACORSS_diagnostics_" + \
+                  dubai_now().strftime("%Y%m%d_%H%M%S") + ".txt"
+    st.download_button(
+        label=f"📥 Download full diagnostics (.txt · {len(_diag_text):,} chars)",
+        data=_diag_text.encode("utf-8"),
+        file_name=_diag_fname,
+        mime="text/plain",
+        key="download_diagnostics_txt",
+        help="Downloads a plain-text snapshot of filters, every open/closed "
+             "trade, recent API errors, and runtime state. Attach to bug "
+             "reports or code-improvement requests so the full context is "
+             "visible without screenshots.",
+    )
+except Exception as _diag_exc:
+    st.error(f"Diagnostics build error: {_diag_exc}")
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Auto-refresh
 # ─────────────────────────────────────────────────────────────────────────────
 time.sleep(30)
