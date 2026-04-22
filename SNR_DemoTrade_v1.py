@@ -3804,32 +3804,33 @@ hr {
 </style>
 """, unsafe_allow_html=True)
 
-# ── One-shot legacy-signal migration ────────────────────────────────────────
-# Runs exactly once per process (guarded by builtins flag). Backfills the
-# DCA/trade snapshot onto any legacy open signals that were created before
-# `_init_signal_trade_snapshot` was wired into the non-traded path. This is
-# what unblocks the Next DCA column and paper-mode DCA simulation on trades
-# that already exist in the log at the time of the code update.
-if not getattr(_b, "_bsc_legacy_migration_done", False):
-    try:
-        with _log_lock, _config_lock:
-            _migrated = _migrate_legacy_signals(_b._bsc_log, _b._bsc_cfg)
-            if _migrated > 0:
-                save_log(_b._bsc_log)
-        _b._bsc_legacy_migration_done = True
+# ── Legacy-signal migration ─────────────────────────────────────────────────
+# Runs on EVERY Streamlit script execution. The internal `_missing_dca` guard
+# inside `_migrate_legacy_signals` ensures already-migrated signals are left
+# untouched (the function only rewrites signals that still lack dca_enabled /
+# dca_fills / original_entry). Running on every load means that as soon as
+# the new code is loaded — even without a full Python restart — the next
+# page view will backfill any pre-existing open signals.
+try:
+    with _log_lock, _config_lock:
+        _migrated = _migrate_legacy_signals(_b._bsc_log, _b._bsc_cfg)
         if _migrated > 0:
-            _append_error(
-                "loop",
-                f"Legacy DCA snapshot migration: backfilled {_migrated} "
-                f"open signal(s) with current sidebar DCA config.",
-            )
-    except Exception as _mig_exc:
-        # Never block startup over a migration error.
-        try:
-            _append_error("loop", f"Legacy migration failed: {_mig_exc}")
-        except Exception:
-            pass
-        _b._bsc_legacy_migration_done = True
+            save_log(_b._bsc_log)
+    _b._bsc_legacy_migration_last_count = _migrated
+    _b._bsc_legacy_migration_last_ts    = dubai_now().isoformat()
+    if _migrated > 0:
+        _append_error(
+            "loop",
+            f"Legacy DCA snapshot migration: backfilled {_migrated} "
+            f"open signal(s) with current sidebar DCA config.",
+        )
+except Exception as _mig_exc:
+    # Never block page render over a migration error.
+    try:
+        _append_error("loop", f"Legacy migration failed: {_mig_exc}")
+    except Exception:
+        pass
+    _b._bsc_legacy_migration_last_count = -1
 
 _ensure_scanner()
 
@@ -6378,16 +6379,27 @@ def _build_diagnostics_text() -> str:
     _kv("bsc_sl_paused",              getattr(_b, "_bsc_sl_paused", False))
     _kv("bsc_sl_paused_reason",       getattr(_b, "_bsc_sl_paused_reason", "") or "—")
     _kv("bsc_sl_paused_ts",           _fmt_ts(getattr(_b, "_bsc_sl_paused_ts", "")))
-    _kv("bg_thread_alive",
-        getattr(_b, "_bsc_bg_thread", None) is not None
-        and _b._bsc_bg_thread.is_alive())
-    _kv("watcher_thread_alive",
-        getattr(_b, "_bsc_watcher_thread", None) is not None
-        and _b._bsc_watcher_thread.is_alive())
-    _kv("last_scan_ts",               _fmt_ts(getattr(_b, "_bsc_last_ts", 0)))
+    try:
+        _bg_t = getattr(_b, "_bsc_thread", None)
+        _kv("bg_thread_alive", bool(_bg_t is not None and _bg_t.is_alive()))
+    except Exception:
+        _kv("bg_thread_alive", "<unavailable>")
+    try:
+        _wt_t = getattr(_b, "_bsc_watcher_thread", None)
+        _kv("watcher_thread_alive", bool(_wt_t is not None and _wt_t.is_alive()))
+    except Exception:
+        _kv("watcher_thread_alive", "<unavailable>")
+    try:
+        _health_local = _b._bsc_log.get("health", {}) if hasattr(_b, "_bsc_log") else {}
+    except Exception:
+        _health_local = {}
+    _kv("last_scan_ts",               _fmt_ts(_health_local.get("last_scan_at", "")))
+    _kv("total_cycles",               _health_local.get("total_cycles", 0))
     _kv("last_scan_duration_sec",     round(float(getattr(_b, "_bsc_last_dur", 0) or 0), 2))
     _kv("last_watcher_ts",            _fmt_ts(getattr(_b, "_bsc_watcher_last_ts", 0)))
     _kv("last_watcher_duration_sec",  round(float(getattr(_b, "_bsc_watcher_last_dur", 0) or 0), 2))
+    _kv("legacy_migration_last_count", getattr(_b, "_bsc_legacy_migration_last_count", "n/a"))
+    _kv("legacy_migration_last_ts",    _fmt_ts(getattr(_b, "_bsc_legacy_migration_last_ts", "")))
 
     # ── Configuration (redacted) ─────────────────────────────────────────────
     _hdr("CONFIGURATION (API credentials redacted)")
