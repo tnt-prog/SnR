@@ -710,8 +710,16 @@ def safe_get(url, params=None, _retries=4):
                     "Try Railway (railway.app) — uses residential IPs.")
             r.raise_for_status()
             data = r.json()
+            # MEXC public endpoints use two response styles:
+            #   • Newer: {"success": true,  "code": 200, "data": {...}}
+            #   • Older: {"code": 0,        "data": {...}}   (no "success" key; code 0 = OK)
+            # Only raise on an explicit application-level error: success is False
+            # AND code is non-zero (code 0 means success in the older style).
             if isinstance(data, dict) and data.get("success") is False:
-                raise RuntimeError(f"MEXC API error {data.get('code','?')}: {data.get('message', data.get('msg',''))}")
+                err_code = data.get("code", "?")
+                err_msg  = data.get("message", data.get("msg", ""))
+                if err_code != 0:   # code 0 = success in older MEXC format — ignore
+                    raise RuntimeError(f"MEXC API error {err_code}: {err_msg}")
             return data
         except requests.exceptions.ConnectionError:
             if attempt < _retries - 1: time.sleep(1); continue
@@ -882,7 +890,7 @@ def test_api_connection(cfg: dict) -> dict:
                 "uid": "", "pos_mode": "net_mode"}
     try:
         resp = _trade_get("/api/v1/private/account/assets", {}, cfg)
-        if not resp.get("success", False):
+        if resp.get("success") is False or (resp.get("success") is None and resp.get("code", 200) not in (0, 200)):
             msg = f"MEXC error {resp.get('code','?')}: {resp.get('message', 'unknown')}"
             return {"status": "error", "message": msg, "uid": "", "pos_mode": "net_mode"}
 
@@ -1084,7 +1092,7 @@ def place_okx_order(sig: dict, cfg: dict) -> dict:
             "contracts": contracts,
             "ct_val":    ct_val,
         }
-        if not resp.get("success", False):
+        if resp.get("success") is False or (resp.get("success") is None and resp.get("code", 200) not in (0, 200)):
             err = _okx_err(resp)
             _append_error("trade",
                           f"{err} | body={json.dumps(order_body)} | resp={json.dumps(resp)[:300]}",
@@ -1209,7 +1217,7 @@ def place_okx_manual_order(sym: str, entry: float, tp: float, sl: float,
             d0     = (resp.get("data") or [{}])[0]
             ord_id = d0.get("ordId", "")
 
-            if not resp.get("success", False):
+            if resp.get("success") is False or (resp.get("success") is None and resp.get("code", 200) not in (0, 200)):
                 err = _okx_err(resp)
                 _append_error("trade",
                               f"{err} | body={json.dumps(order_body)} | resp={json.dumps(resp)[:300]}",
@@ -1251,7 +1259,7 @@ def place_okx_manual_order(sym: str, entry: float, tp: float, sl: float,
             d0     = (resp.get("data") or [{}])[0]
             ord_id = d0.get("ordId", "")
 
-            if not resp.get("success", False):
+            if resp.get("success") is False or (resp.get("success") is None and resp.get("code", 200) not in (0, 200)):
                 err = _okx_err(resp)
                 _append_error("trade",
                               f"{err} | body={json.dumps(order_body)} | resp={json.dumps(resp)[:300]}",
@@ -1286,7 +1294,7 @@ def place_okx_manual_order(sym: str, entry: float, tp: float, sl: float,
             ad      = (algo_resp.get("data") or [{}])[0]
             algo_id = ad.get("algoId", "")
 
-            if not algo_resp.get("success", False):
+            if algo_resp.get("success") is False or (algo_resp.get("success") is None and algo_resp.get("code", 200) not in (0, 200)):
                 algo_err = _okx_err(algo_resp)
                 _append_error("trade", f"OCO algo failed: {algo_err}",
                               symbol=sym, endpoint="/api/v1/private/order/submit")
@@ -2274,7 +2282,7 @@ def place_okx_dca_order(sig: dict, cfg: dict, dca_usdt: float) -> dict:
         d0     = (resp.get("data") or [{}])[0]
         ord_id = d0.get("ordId", "")
 
-        if not resp.get("success", False):
+        if resp.get("success") is False or (resp.get("success") is None and resp.get("code", 200) not in (0, 200)):
             err = _okx_err(resp)
             _append_error("trade",
                           f"DCA {err} | body={json.dumps(order_body)} | "
@@ -2362,7 +2370,7 @@ def _place_dca_oco_algo(sig: dict, cfg: dict, new_tp: float,
             algo_body["posSide"] = "long"
         algo_resp = _trade_post("/api/v1/private/order/submit", algo_body, cfg)
         ad        = (algo_resp.get("data") or [{}])[0]
-        if not algo_resp.get("success", False):
+        if algo_resp.get("success") is False or (algo_resp.get("success") is None and algo_resp.get("code", 200) not in (0, 200)):
             err = _okx_err(algo_resp)
             _append_error("trade", f"DCA OCO algo failed: {err}",
                           symbol=sym, endpoint="/api/v1/private/order/submit")
