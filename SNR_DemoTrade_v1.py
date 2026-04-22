@@ -2421,6 +2421,30 @@ def _init_signal_trade_snapshot(sig: dict, cfg: dict) -> None:
     # exhausted (dca_count == dca_max).
     sig["final_sl_price"] = None
 
+    # ── SL distance snapshot (isolated → 1/lev; cross → sl_pct/100) ──
+    # Snapshotted at entry time so post-DCA SL recompute stays proportional
+    # to the initial SL distance even if the sidebar SL % is changed later.
+    # Formula is identical regardless of mode — the distance just differs.
+    # Post-DCA: sig["sl"] = avg_entry × (1 − sl_distance_pct).
+    _mode = (sig.get("order_margin_mode") or "isolated").strip().lower()
+    if _mode == "isolated" and _entry_lev > 0:
+        _sl_dist = 1.0 / _entry_lev
+    else:
+        _sl_dist = float(cfg.get("sl_pct", 3.0) or 3.0) / 100.0
+    # Prefer deriving from the actual entry SL if available (more accurate
+    # when entry/sl were already set by the auto-trade path with fill price).
+    if _entry_px > 0 and 0 < _entry_sl_snap < _entry_px:
+        _sl_dist = (_entry_px - _entry_sl_snap) / _entry_px
+    sig["sl_distance_pct"] = float(_sl_dist)
+
+    # ── next_dca_px: the price at which the NEXT DCA add will fire. ──
+    # Separate from sig["sl"] so sig["sl"] can always be a real stop.
+    # Recomputed on each DCA fill in _execute_dca_fill_paper / _execute_dca_fill.
+    try:
+        sig["next_dca_px"] = float(_dca_compute_trigger(sig, cfg) or 0.0)
+    except Exception:
+        sig["next_dca_px"] = 0.0
+
 
 def _migrate_legacy_signals(log: dict, cfg: dict) -> int:
     """Backfill the DCA/trade snapshot onto pre-existing OPEN signals that
@@ -2819,15 +2843,39 @@ def _execute_dca_fill_paper(sig: dict, cfg: dict) -> bool:
         tp_pct = float(cfg.get("tp_pct", 1.5)) / 100.0
         sig["tp"] = _pround(sig["avg_entry"] * (1.0 + tp_pct))
 
-        # Final SL vs next-trigger display SL — same rules as real fill
+        # Post-DCA SL recompute — two-tier rule:
+        #   • Ladder NOT yet exhausted → sig["sl"] is a REAL stop proportional
+        #     to the snapshotted initial SL distance:
+        #       sl = avg_entry × (1 − sl_distance_pct)
+        #     This is the "SL moves down with the blended avg" behaviour the
+        #     user expects (entry 100, SL 90, DCA at 95 → new SL 87.75).
+        #   • Ladder fully exhausted → hard −3% floor below blended avg,
+        #     routes any breach into the DCA SL Hit table.
+        # The NEXT-DCA-TRIGGER price is stored separately in sig["next_dca_px"]
+        # so sig["sl"] is never repurposed for a non-SL meaning.
         dca_max = int(sig.get("dca_max", 0) or 0)
         if sig["dca_count"] >= dca_max:
             final_sl = _pround(sig["avg_entry"] * 0.97)
             sig["final_sl_price"] = final_sl
             sig["sl"] = final_sl
+            sig["next_dca_px"] = 0.0
         else:
+            _sl_dist = float(sig.get("sl_distance_pct", 0.0) or 0.0)
+            if _sl_dist <= 0:
+                # Legacy fallback: derive from fills[0] (entry price and sl)
+                _f0 = (sig.get("dca_fills") or [{}])[0]
+                _p0 = float(_f0.get("price", 0) or 0)
+                _s0 = float(_f0.get("sl", 0) or 0)
+                if _p0 > 0 and 0 < _s0 < _p0:
+                    _sl_dist = (_p0 - _s0) / _p0
+                else:
+                    _sl_dist = float(cfg.get("sl_pct", 3.0) or 3.0) / 100.0
+            sig["sl"] = _pround(sig["avg_entry"] * (1.0 - _sl_dist))
             sig["final_sl_price"] = None
-            sig["sl"] = _dca_compute_trigger(sig, cfg)
+            try:
+                sig["next_dca_px"] = float(_dca_compute_trigger(sig, cfg) or 0.0)
+            except Exception:
+                sig["next_dca_px"] = 0.0
 
         # Snapshot the post-recompute TP/SL onto THIS DCA fill so the
         # Trade History column can show what TP/SL were set for this add.
@@ -2933,22 +2981,36 @@ def _execute_dca_fill(sig: dict, cfg: dict) -> bool:
         new_tp = _pround(sig["avg_entry"] * (1.0 + tp_pct))
         sig["tp"] = new_tp
 
-        # If ladder now exhausted, set final SL at -3% below blended avg.
-        # Otherwise, keep sig["sl"] at a sentinel (use 0 so candle-SL check
-        # can't accidentally fire — _update_one_signal's DCA path already
-        # skips SL checking while ladder has adds remaining).
+        # Post-DCA SL recompute (same two-tier rule as the paper path):
+        #   • Ladder NOT yet exhausted → sig["sl"] is a REAL stop:
+        #       sl = avg_entry × (1 − sl_distance_pct)
+        #     where sl_distance_pct was snapshotted at entry (1/lev for
+        #     isolated, sl_pct/100 for cross).
+        #   • Ladder fully exhausted → hard −3% floor below blended avg.
+        # The NEXT-DCA-TRIGGER price lives in sig["next_dca_px"].
         dca_max = int(sig.get("dca_max", 0) or 0)
         if sig["dca_count"] >= dca_max:
             final_sl = _pround(sig["avg_entry"] * 0.97)
             sig["final_sl_price"] = final_sl
             sig["sl"] = final_sl
+            sig["next_dca_px"] = 0.0
         else:
+            _sl_dist = float(sig.get("sl_distance_pct", 0.0) or 0.0)
+            if _sl_dist <= 0:
+                # Legacy fallback: derive from fills[0]
+                _f0 = (sig.get("dca_fills") or [{}])[0]
+                _p0 = float(_f0.get("price", 0) or 0)
+                _s0 = float(_f0.get("sl", 0) or 0)
+                if _p0 > 0 and 0 < _s0 < _p0:
+                    _sl_dist = (_p0 - _s0) / _p0
+                else:
+                    _sl_dist = float(cfg.get("sl_pct", 3.0) or 3.0) / 100.0
+            sig["sl"] = _pround(sig["avg_entry"] * (1.0 - _sl_dist))
             sig["final_sl_price"] = None
-            # Keep a reasonable-looking SL for display purposes — we'll use
-            # the next-DCA trigger price so the table's SL column has meaning
-            # while the ladder is still active. The actual SL check is
-            # bypassed for DCA trades with remaining adds.
-            sig["sl"] = _dca_compute_trigger(sig, cfg)
+            try:
+                sig["next_dca_px"] = float(_dca_compute_trigger(sig, cfg) or 0.0)
+            except Exception:
+                sig["next_dca_px"] = 0.0
 
         # Snapshot the post-recompute TP/SL onto THIS DCA fill so the
         # Trade History column shows the exact TP/SL set after this add.
@@ -4290,12 +4352,23 @@ with st.sidebar:
     new_tp = c1.number_input("TP %", min_value=0.1, max_value=20.0, step=0.1, value=float(_snap_cfg["tp_pct"]),    key="cfg_tp")
     _isolated_active = _snap_cfg.get("trade_margin_mode", "isolated") == "isolated"
     new_sl = c2.number_input(
-        "SL %", min_value=0.1, max_value=20.0, step=0.1,
+        "SL % (Cross only)", min_value=0.1, max_value=20.0, step=0.1,
         value=float(_snap_cfg["sl_pct"]), key="cfg_sl",
         disabled=_isolated_active,
-        help=("SL is the liquidation price in isolated mode (entry × (1 − 1/leverage)). "
-              "Switch to Cross mode to use a custom SL %.")
-        if _isolated_active else "Stop-loss as % below entry."
+        help=(
+            "Applies only to CROSS margin trades.\n\n"
+            "• Cross mode → SL = entry × (1 − SL%/100). "
+            "After each DCA, SL = blended_avg × (1 − SL%/100), "
+            "so the stop moves down with the new average.\n\n"
+            "• Isolated mode → SL is pinned to the liquidation price "
+            "(entry × (1 − 1/leverage)). This field is ignored. "
+            "After each DCA, SL = blended_avg × (1 − 1/leverage), "
+            "which equals the NEW liquidation of the averaged position.\n\n"
+            "Final DCA rule (both modes): once the ladder is fully "
+            "consumed, SL collapses to blended_avg × 0.97 (a hard −3% "
+            "floor) and a breach routes the trade into the DCA SL Hit "
+            "table."
+        )
     )
     st.divider()
 
@@ -5528,7 +5601,12 @@ def _build_signal_row(s: dict, is_open_table: bool = False,
         _dca_max_row = int(s.get("dca_max", 0) or 0)
         if _dca_en_row and _dca_max_row > 0 and _dca_count_row < _dca_max_row:
             try:
-                _next_dca_px = _dca_compute_trigger(s, _snap_cfg)
+                # Prefer the stored sig["next_dca_px"] (set on each DCA
+                # fill + at signal open). Fall back to live computation
+                # for legacy signals that predate the field.
+                _next_dca_px = float(s.get("next_dca_px", 0) or 0)
+                if _next_dca_px <= 0:
+                    _next_dca_px = _dca_compute_trigger(s, _snap_cfg)
                 if _next_dca_px and _next_dca_px > 0:
                     # Auto-precision formatting matches Est Liquidity so low-
                     # value coins (BASEDUSDT, etc.) show enough digits.
@@ -6653,6 +6731,8 @@ def _build_diagnostics_text() -> str:
         _kv("dca_max",             s.get("dca_max", 0))
         _kv("dca_iso_distance_pct", s.get("dca_iso_distance_pct", "—"))
         _kv("dca_cross_drop_pct",   s.get("dca_cross_drop_pct", "—"))
+        _kv("sl_distance_pct",      s.get("sl_distance_pct", "—"))
+        _kv("next_dca_px",          s.get("next_dca_px", "—"))
         _kv("final_sl_price",      s.get("final_sl_price", "—"))
         _kv("order_id",            s.get("order_id", "—") or "—")
         _kv("algo_id",             s.get("algo_id",  "—") or "—")
