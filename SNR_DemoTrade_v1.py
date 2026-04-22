@@ -167,6 +167,27 @@ DEFAULT_CONFIG: dict = {
     # position into a dedicated DCA SL Hit table. When DCA > 0, the sidebar SL %
     # is ignored for that trade — only TP and the final -3% rule can close it.
     "trade_max_dca":         1,
+    # ── DCA trigger drop percentages ──────────────────────────────────────────
+    # Two separate configurables, shown in the sidebar based on selected
+    # margin mode. Both default to the original hardcoded behaviour so
+    # upgrades from older configs produce identical triggers.
+    #   • Isolated: % of the distance from blended avg to liquidation.
+    #       default 70 → at 10× lev, fires at −7% from avg.
+    #                    at 20× lev, fires at −3.5% from avg. (leverage-aware)
+    #   • Cross:    % drop below blended avg (leverage-independent).
+    #       default 7 → fires at −7% from avg, regardless of leverage.
+    # Snapshotted onto the signal at entry time so sidebar tweaks don't
+    # retroactively change already-open trades.
+    "dca_iso_distance_pct":  70.0,   # 1–100, isolated
+    "dca_cross_drop_pct":    7.0,    # 0.1–50, cross
+    # ── Open-Trade Watcher loop (1-minute DCA/TP checker) ─────────────────────
+    # When > 0 AND < loop_minutes: a dedicated background thread runs every
+    # `watcher_minutes` minutes, fetching 1m candles for each open trade and
+    # executing DCA triggers + TP exits in real time. The main scan loop's
+    # open-trade check is DISABLED while the watcher is active to avoid
+    # double-execution. When 0 or ≥ loop_minutes, watcher is disabled and
+    # main loop handles open-trade checks as before (legacy behaviour).
+    "watcher_minutes":       1,
         "watchlist": [
         "XPDUSDT","WIFUSDT","PIUSDT","EDGEUSDT","RECALLUSDT","SUSHIUSDT","RAVEUSDT","XLMUSDT","DASHUSDT","TRUSTUSDT",
         "GPSUSDT","CROUSDT","ACUUSDT","UNIUSDT","STRKUSDT","NEIROUSDT","ZKPUSDT","APEUSDT","MSTRUSDT","ENJUSDT",
@@ -636,6 +657,14 @@ if "_scanner_initialised" not in st.session_state:
         _b._bsc_filter_lock   = threading.Lock()
         _b._bsc_last_error    = ""
         _b._bsc_rescan_event  = threading.Event()   # set to skip sleep & rescan immediately
+        # ── Open-Trade Watcher (1-minute DCA/TP checker) ──────────────────────
+        # Separate thread that polls open trades on a shorter interval than the
+        # main scan loop. When active, the main loop skips its own open-trade
+        # update (avoids duplicate candle fetches + double DCA execution).
+        _b._bsc_watcher_thread  = None
+        _b._bsc_watcher_event   = threading.Event()   # wake watcher immediately
+        _b._bsc_watcher_last_ts = 0                   # unix ts of last tick (for UI)
+        _b._bsc_watcher_last_dur = 0.0                # seconds — last tick duration
         # ── Circuit-breaker halt flag ─────────────────────────────────────────
         # Set to True by the background loop when the last 3 closed trades are
         # all sl_hit. CONTRACT: once True, ONLY the manual "▶️ Resume Scanning"
@@ -2298,13 +2327,21 @@ def _parse_iso_safe(ts_str: str):
 # ─────────────────────────────────────────────────────────────────────────────
 # DCA helpers (Dollar-Cost Averaging ladder — Isolated 70% / Cross fixed 7%)
 # ─────────────────────────────────────────────────────────────────────────────
-def _dca_compute_trigger(sig: dict) -> float:
+def _dca_compute_trigger(sig: dict, cfg: dict = None) -> float:
     """Compute the next-DCA trigger price for an open signal.
 
-    Isolated: 70% of the distance from blended average to liquidation
-              (liq ≈ avg × (1 − 1/lev) → dca_drop = 0.70 × 1/lev).
-    Cross:    fixed 7% below blended average per DCA.
+    Two drop percentages are configurable from the sidebar and snapshotted
+    onto the signal at entry time so later sidebar changes don't alter
+    already-open trades:
 
+      Isolated: `dca_iso_distance_pct` % of the distance from blended avg to
+                liquidation (default 70%). At 10× leverage with 70 → fires
+                at −7% from avg. At 20× with 70 → fires at −3.5% from avg
+                (auto-scales with leverage via liq = avg × (1 − 1/lev)).
+      Cross:    `dca_cross_drop_pct` % fixed drop below blended avg (default 7%).
+                Leverage-independent.
+
+    Fallback chain for each %: sig snapshot → cfg → hardcoded default.
     Returns 0.0 if the trigger cannot be computed.
     """
     avg_entry = float(sig.get("avg_entry", sig.get("entry", 0)) or 0)
@@ -2314,10 +2351,18 @@ def _dca_compute_trigger(sig: dict) -> float:
     lev  = int(sig.get("trade_lev", 0) or 0)
     if lev <= 0:
         lev = 10
+    cfg = cfg or {}
     if mode == "isolated":
-        dca_drop_pct = 0.70 * (1.0 / lev)
+        # sig snapshot wins; fall back to current cfg; then hardcoded 70.
+        iso_dist = float(sig.get("dca_iso_distance_pct",
+                                 cfg.get("dca_iso_distance_pct", 70.0)) or 70.0)
+        iso_dist = max(1.0, min(100.0, iso_dist))  # clamp 1–100
+        dca_drop_pct = (iso_dist / 100.0) * (1.0 / lev)
     else:
-        dca_drop_pct = 0.07
+        cross_drop = float(sig.get("dca_cross_drop_pct",
+                                   cfg.get("dca_cross_drop_pct", 7.0)) or 7.0)
+        cross_drop = max(0.1, min(50.0, cross_drop))  # clamp 0.1–50
+        dca_drop_pct = cross_drop / 100.0
     return _pround(avg_entry * (1.0 - dca_drop_pct))
 
 
@@ -2628,7 +2673,7 @@ def _execute_dca_fill(sig: dict, cfg: dict) -> bool:
             # the next-DCA trigger price so the table's SL column has meaning
             # while the ladder is still active. The actual SL check is
             # bypassed for DCA trades with remaining adds.
-            sig["sl"] = _dca_compute_trigger(sig)
+            sig["sl"] = _dca_compute_trigger(sig, cfg)
 
         # Update last-order/display fields so OKX Command / Order ID reflect
         # the newest add.
@@ -2844,6 +2889,222 @@ def update_open_signals(signals):
     return signals
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Open-Trade Watcher thread (1-minute DCA/TP checker)
+# ─────────────────────────────────────────────────────────────────────────────
+# A lightweight second loop that polls every `watcher_minutes` minutes — much
+# faster than the main scan (`loop_minutes`). It only touches OPEN signals:
+# fetches 1m candles, detects TP hits (candle high) and DCA triggers
+# (candle LOW — the wick captures fast intra-candle drops), and executes the
+# full DCA pipeline inline. The main _bg_loop skips its own open-trade update
+# while the watcher is active, so there's no double-fetch and no race.
+# ─────────────────────────────────────────────────────────────────────────────
+def _watcher_update_one_signal(sig: dict) -> None:
+    """1-minute variant of `_update_one_signal`.
+
+    Fetches 1m candles and runs the same TP / DCA / SL detection logic, but
+    anchored on the last fill timestamp rather than the original entry. Uses
+    candle LOW (wick/tail) for DCA trigger — this catches fast downward spikes
+    that never print as a close. Mutates `sig` in place.
+    """
+    _sym = sig.get("symbol", "?")
+    try:
+        sig_dt    = _parse_iso_safe(sig["timestamp"])
+        sig_ts_ms = int(sig_dt.timestamp() * 1000)
+        # 1m × 120 bars ≈ 2h history — enough to catch anything missed between
+        # watcher ticks even if the thread was momentarily delayed.
+        candles   = get_klines(sig["symbol"], "1m", 120)
+        if not candles:
+            return
+        post = [c for c in candles if c["time"] >= sig_ts_ms]
+
+        _dca_enabled = bool(sig.get("dca_enabled", False))
+        _dca_max     = int(sig.get("dca_max", 0) or 0)
+        _dca_count   = int(sig.get("dca_count", 0) or 0)
+        _ladder_slots_left = _dca_enabled and _dca_count < _dca_max
+
+        if _ladder_slots_left:
+            _dca_trigger_price = _dca_compute_trigger(sig)
+            _last_fill_ts_ms = sig_ts_ms
+            _fills = sig.get("dca_fills") or []
+            if _fills:
+                _last_fill = _fills[-1]
+                try:
+                    _last_fill_ts_ms = int(_parse_iso_safe(
+                        _last_fill.get("ts") or sig["timestamp"]
+                    ).timestamp() * 1000)
+                except Exception:
+                    _last_fill_ts_ms = sig_ts_ms
+            _post_dca = [c for c in post if c["time"] >= _last_fill_ts_ms]
+            tp_time  = None
+            dca_time = None
+            for c in _post_dca:
+                if tp_time is None and c["high"] >= sig["tp"]:
+                    tp_time = c["time"]
+                if (dca_time is None and _dca_trigger_price > 0
+                        and c["low"] <= _dca_trigger_price):
+                    dca_time = c["time"]
+            if tp_time is not None and (dca_time is None or tp_time <= dca_time):
+                sig.update(status="tp_hit", close_price=sig["tp"],
+                           close_time=to_dubai(datetime.fromtimestamp(
+                               tp_time/1000, tz=timezone.utc)).isoformat())
+                sig.pop("price_alert", None)
+                sig.pop("_dca_pending", None)
+            elif dca_time is not None:
+                sig["_dca_pending"]      = True
+                sig["_dca_trigger_px"]   = _dca_trigger_price
+                sig["_dca_trigger_time"] = to_dubai(datetime.fromtimestamp(
+                    dca_time/1000, tz=timezone.utc)).isoformat()
+                if candles:
+                    latest_price = candles[-1]["close"]
+                    sig["latest_price"] = float(latest_price)
+                    _avg = float(sig.get("avg_entry",
+                                         sig.get("entry", 0)) or 0)
+                    if _avg > 0:
+                        drop_pct = (_avg - latest_price) / _avg * 100
+                        sig["price_alert"]     = drop_pct >= _PRICE_ALERT_PCT
+                        sig["price_alert_pct"] = round(drop_pct, 2)
+            else:
+                if candles:
+                    latest_price = candles[-1]["close"]
+                    sig["latest_price"] = float(latest_price)
+                    _avg = float(sig.get("avg_entry",
+                                         sig.get("entry", 0)) or 0)
+                    if _avg > 0:
+                        drop_pct = (_avg - latest_price) / _avg * 100
+                        sig["price_alert"]     = drop_pct >= _PRICE_ALERT_PCT
+                        sig["price_alert_pct"] = round(drop_pct, 2)
+                    else:
+                        sig["price_alert"]     = False
+                        sig["price_alert_pct"] = 0.0
+            return
+
+        # ── Legacy branch OR DCA ladder fully exhausted ─────────────────────
+        _ladder_full = _dca_enabled and _dca_max > 0 and _dca_count >= _dca_max
+        tp_time = sl_time = None
+        for c in post:
+            if tp_time is None and c["high"] >= sig["tp"]: tp_time = c["time"]
+            if sl_time is None and c["low"]  <= sig["sl"]: sl_time = c["time"]
+        if tp_time is not None or sl_time is not None:
+            if tp_time is not None and (sl_time is None or tp_time <= sl_time):
+                sig.update(status="tp_hit", close_price=sig["tp"],
+                           close_time=to_dubai(datetime.fromtimestamp(
+                               tp_time/1000, tz=timezone.utc)).isoformat())
+                sig.pop("price_alert", None)
+            else:
+                _close_status = "dca_sl_hit" if _ladder_full else "sl_hit"
+                sig.update(status=_close_status, close_price=sig["sl"],
+                           close_time=to_dubai(datetime.fromtimestamp(
+                               sl_time/1000, tz=timezone.utc)).isoformat())
+                sig.pop("price_alert", None)
+        else:
+            if candles:
+                latest_price = candles[-1]["close"]
+                _ref = float(sig.get("avg_entry",
+                                     sig.get("entry", 0)) or 0)
+                sig["latest_price"] = float(latest_price)
+                if _ref > 0:
+                    drop_pct = (_ref - latest_price) / _ref * 100
+                    sig["price_alert"]     = drop_pct >= _PRICE_ALERT_PCT
+                    sig["price_alert_pct"] = round(drop_pct, 2)
+                else:
+                    sig["price_alert"]     = False
+                    sig["price_alert_pct"] = 0.0
+    except Exception as _upd_exc:
+        _append_error("signal_update",
+                      f"[watcher] {_sym}: {type(_upd_exc).__name__}: {_upd_exc}",
+                      symbol=_sym)
+
+
+def _watcher_update_open_signals(signals):
+    """Parallel 1m candle fetch for all open signals."""
+    open_sigs = [s for s in signals if s["status"] == "open"]
+    if not open_sigs:
+        return signals
+    with ThreadPoolExecutor(max_workers=min(len(open_sigs), 15)) as pool:
+        futs = [pool.submit(_watcher_update_one_signal, s) for s in open_sigs]
+        for f in as_completed(futs):
+            f.result()
+    return signals
+
+
+def _watcher_loop():
+    """Background thread: polls open trades every `watcher_minutes`.
+
+    Skips its own work when:
+      • scanner is paused (manual or circuit breaker)
+      • watcher_minutes is 0 or >= loop_minutes (main loop handles it)
+    Otherwise fetches 1m candles, detects TP/DCA/SL, and executes DCA fills
+    inline — same pipeline the main loop uses, just on a faster interval.
+    """
+    while True:
+        try:
+            if not _scanner_running.is_set() or getattr(_b, "_bsc_sl_paused", False):
+                time.sleep(2); continue
+
+            with _config_lock:
+                cfg = dict(_b._bsc_cfg)
+
+            _watcher_min = int(cfg.get("watcher_minutes", 1) or 0)
+            _loop_min    = int(cfg.get("loop_minutes", 5) or 5)
+
+            # Watcher is only ACTIVE if it ticks faster than the main loop.
+            # Otherwise, idle — main loop does the work.
+            if _watcher_min <= 0 or _watcher_min >= _loop_min:
+                # Recheck every 10s — the user might change the sidebar value.
+                _b._bsc_watcher_event.wait(timeout=10)
+                _b._bsc_watcher_event.clear()
+                continue
+
+            t0 = time.time()
+            try:
+                with _log_lock:
+                    _open_snapshot = [s for s in _b._bsc_log["signals"]
+                                      if s.get("status") == "open"]
+                if _open_snapshot:
+                    _watcher_update_open_signals(_open_snapshot)
+
+                    # Execute any DCA triggers inline — same pipeline the main
+                    # loop uses. Only runs when auto-trading is enabled.
+                    _dca_pending_sigs = [s for s in _open_snapshot
+                                         if s.get("_dca_pending")]
+                    if _dca_pending_sigs:
+                        if cfg.get("trade_enabled"):
+                            for _dsig in _dca_pending_sigs:
+                                _execute_dca_fill(_dsig, cfg)
+                            with _log_lock:
+                                save_log(_b._bsc_log)
+                        else:
+                            for _dsig in _dca_pending_sigs:
+                                _append_error(
+                                    "trade",
+                                    f"[watcher] DCA trigger hit but "
+                                    f"auto-trading disabled; skipping add "
+                                    f"for {_dsig.get('symbol', '?')}",
+                                    symbol=_dsig.get("symbol", ""),
+                                )
+                                _dsig.pop("_dca_pending", None)
+                    else:
+                        # No DCA to place — still persist closed trades
+                        # (TP/SL) if any flipped during this tick.
+                        if any(s.get("status") != "open"
+                               for s in _open_snapshot):
+                            with _log_lock:
+                                save_log(_b._bsc_log)
+            except Exception as e:
+                _append_error("watcher", str(e))
+
+            elapsed = time.time() - t0
+            _b._bsc_watcher_last_ts  = int(time.time())
+            _b._bsc_watcher_last_dur = round(elapsed, 2)
+            sleep_sec = max(0, _watcher_min * 60 - elapsed)
+            _b._bsc_watcher_event.wait(timeout=sleep_sec)
+            _b._bsc_watcher_event.clear()
+        except Exception as e:
+            _append_error("watcher", f"outer loop: {e}")
+            time.sleep(5)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Background scanner thread
 # ─────────────────────────────────────────────────────────────────────────────
 def _check_sl_circuit_breaker():
@@ -2883,10 +3144,17 @@ def _bg_loop():
             # snapshot even if the user flushes mid-cycle. Any dicts that
             # got removed from the live list won't be re-added — we only
             # mutate dict fields, never reassign the list.
+            # When the watcher is ACTIVE (ticks faster than the main loop)
+            # it takes over open-trade updates + DCA execution — skip this
+            # block entirely to avoid duplicate candle fetches & double DCA.
+            _watcher_min = int(cfg.get("watcher_minutes", 1) or 0)
+            _loop_min    = int(cfg.get("loop_minutes", 5) or 5)
+            _watcher_active = 0 < _watcher_min < _loop_min
+
             with _log_lock:
                 _open_snapshot = [s for s in _b._bsc_log["signals"]
                                   if s.get("status") == "open"]
-            if _open_snapshot:
+            if _open_snapshot and not _watcher_active:
                 update_open_signals(_open_snapshot)   # in-place dict mutations
 
                 # ── DCA execution pass ───────────────────────────────────────
@@ -3081,6 +3349,14 @@ def _bg_loop():
                     sig["dca_enabled"]    = _dca_max_snap > 0
                     sig["dca_max"]        = _dca_max_snap
                     sig["dca_count"]      = 0
+                    # Snapshot DCA drop percentages so sidebar changes don't
+                    # retroactively affect this trade's trigger math.
+                    sig["dca_iso_distance_pct"] = float(
+                        cfg.get("dca_iso_distance_pct", 70.0) or 70.0
+                    )
+                    sig["dca_cross_drop_pct"]   = float(
+                        cfg.get("dca_cross_drop_pct",   7.0)  or 7.0
+                    )
                     sig["dca_fills"]      = [{
                         "price":    _entry_px,
                         "usdt":     _entry_usdt,
@@ -3113,6 +3389,11 @@ def _ensure_scanner():
     if _b._bsc_thread is None or not _b._bsc_thread.is_alive():
         t = threading.Thread(target=_bg_loop, daemon=True, name="okx-scanner")
         t.start(); _b._bsc_thread = t
+    # ── Start/restart the 1-minute open-trade watcher thread ─────────────────
+    if _b._bsc_watcher_thread is None or not _b._bsc_watcher_thread.is_alive():
+        wt = threading.Thread(target=_watcher_loop, daemon=True,
+                              name="okx-watcher")
+        wt.start(); _b._bsc_watcher_thread = wt
 
 # ─────────────────────────────────────────────────────────────────────────────
 # STREAMLIT UI
@@ -3520,6 +3801,48 @@ with st.sidebar:
             "final −3% rule can close the position.\n\n"
             "Editable whether or not Auto-Trading is enabled."
         ))
+
+    # ── DCA trigger drop percentages ─────────────────────────────────────────
+    # Two fields, shown based on margin mode. Both are snapshotted onto the
+    # signal at entry time so sidebar changes don't retroactively alter
+    # already-open trades.
+    if new_margin_mode == "isolated":
+        _cur_iso_pct = float(_snap_cfg.get("dca_iso_distance_pct", 70.0) or 70.0)
+        _cur_iso_pct = max(1.0, min(100.0, _cur_iso_pct))
+        new_dca_iso_distance_pct = st.number_input(
+            "DCA Trigger — Isolated (% of distance to liquidation)",
+            min_value=1.0, max_value=100.0,
+            value=float(_cur_iso_pct), step=1.0,
+            key="cfg_dca_iso_distance_pct",
+            help=(
+                "Only applies when Max DCA > 0 AND Margin Mode = Isolated.\n\n"
+                "DCA fires when price reaches X% of the distance from the "
+                "blended average entry down to the liquidation price. "
+                "Default 70% → DCA triggers 70% of the way to liquidation.\n\n"
+                "Example: 10× leverage → liquidation ~10% below avg. "
+                "70% × 10% = 7% drop below avg triggers the next DCA fill.\n\n"
+                "Lower values = DCA fires earlier (closer to avg). "
+                "Higher values = DCA fires later (closer to liquidation)."
+            ))
+        new_dca_cross_drop_pct = float(_snap_cfg.get("dca_cross_drop_pct", 7.0) or 7.0)
+    else:
+        _cur_cross_pct = float(_snap_cfg.get("dca_cross_drop_pct", 7.0) or 7.0)
+        _cur_cross_pct = max(0.1, min(50.0, _cur_cross_pct))
+        new_dca_cross_drop_pct = st.number_input(
+            "DCA Trigger — Cross (% fixed drop below avg)",
+            min_value=0.1, max_value=50.0,
+            value=float(_cur_cross_pct), step=0.5,
+            key="cfg_dca_cross_drop_pct",
+            help=(
+                "Only applies when Max DCA > 0 AND Margin Mode = Cross.\n\n"
+                "DCA fires at a fixed percentage drop below the current "
+                "blended average entry. Default 7%.\n\n"
+                "Example: avg entry $100, drop % = 7 → DCA triggers at $93. "
+                "After the fill, the next DCA uses the new (lower) blended "
+                "avg × (1 - drop%) as its trigger.\n\n"
+                "Higher values = wait for a deeper drawdown before adding."
+            ))
+        new_dca_iso_distance_pct = float(_snap_cfg.get("dca_iso_distance_pct", 70.0) or 70.0)
 
     # Notional preview — always shown (even when Auto-Trading is off) so the
     # user can see the effective trade size driven by Size × Leverage.
@@ -3936,6 +4259,27 @@ with st.sidebar:
             "separate, longer cooldown ('SL Cooldown (hrs)') so a freshly "
             "stopped-out coin is not re-entered too quickly."
         ))
+    # ── Open-Trade Watcher interval ──────────────────────────────────────────
+    # Runs a dedicated short-interval thread that only updates OPEN trades
+    # (1m candles, with tail/wick captured). When watcher < loop, the main
+    # loop skips its open-trade update so there's no duplicate work.
+    new_watcher_minutes = st.number_input(
+        "Open-Trade Check Interval (min)", min_value=0, max_value=60, step=1,
+        value=int(_snap_cfg.get("watcher_minutes", 1) or 0),
+        key="cfg_watcher_minutes",
+        help=(
+            "How often the 1-minute watcher checks open trades for TP hits "
+            "and DCA triggers, INDEPENDENTLY of the main scan.\n\n"
+            "  • 0  — Disabled. The main scan loop handles everything (legacy).\n"
+            "  • 1+ (but less than 'Loop (min)') — ACTIVE. A dedicated thread "
+            "polls open trades every N minutes using 1-minute candles. This "
+            "catches fast price spikes (via candle tail/wick) between main "
+            "scans and fires DCA / TP much sooner.\n\n"
+            "When ACTIVE, the main loop stops updating open trades itself — "
+            "no duplicate fetches, no double DCA execution.\n"
+            "When ≥ 'Loop (min)', this setting is ignored and the main loop "
+            "handles opens as before."
+        ))
     # ── SL-specific cooldown (per-coin blackout after SL hit) ────────────────
     new_sl_cooldown_hours = st.number_input(
         "SL Cooldown (hrs)", min_value=1, max_value=720, step=1,
@@ -4066,6 +4410,7 @@ with st.sidebar:
             "max_open_trades":    max(1, int(new_max_open_trades)),
             "max_super_trades":   max(1, int(new_max_super_trades)),
             "sl_cooldown_hours":  max(1, int(new_sl_cooldown_hours)),
+            "watcher_minutes":    max(0, min(60, int(new_watcher_minutes))),
             "watchlist": new_wl,
             # ── Auto-trading ─────────────────────────────────────────────────
             "trade_enabled":     bool(new_trade_enabled),
@@ -4083,6 +4428,8 @@ with st.sidebar:
             "trade_leverage":    int(new_trade_lev),
             "trade_margin_mode": new_margin_mode,
             "trade_max_dca":     max(0, min(6, int(new_trade_max_dca))),
+            "dca_iso_distance_pct": max(1.0, min(100.0, float(new_dca_iso_distance_pct))),
+            "dca_cross_drop_pct":   max(0.1, min(50.0,  float(new_dca_cross_drop_pct))),
         }
         with _config_lock: _b._bsc_cfg.clear(); _b._bsc_cfg.update(new_cfg)
         save_config(new_cfg)
@@ -4090,6 +4437,7 @@ with st.sidebar:
         if new_wl != _snap_cfg.get("watchlist", []):
             _b._bsc_symbol_cache["fetched_at"] = 0
         _b._bsc_rescan_event.set()   # wake bg thread immediately — no waiting for next cycle
+        _b._bsc_watcher_event.set()  # wake watcher so new watcher_minutes applies right away
         st.success(f"✅ Saved — {len(new_wl)} coins — rescanning now…"); st.rerun()
 
 # ─────────────────────────────────────────────────────────────────────────────
