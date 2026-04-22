@@ -5231,6 +5231,39 @@ def _build_signal_row(s: dict, is_open_table: bool = False,
         if s.get("original_entry") is not None \
         else s.get("signal_entry", s.get("entry", ""))
 
+    # ── Next DCA price column (Open Signals only) ────────────────────────────
+    # Shows the price at which the NEXT DCA add would trigger, using the
+    # signal's own snapshotted drop percentages (isolated / cross) so the
+    # value is consistent with what the watcher/main loop will actually use.
+    # Displayed ONLY when:
+    #   • Trade is still open
+    #   • DCA is enabled on the signal (dca_enabled=True)
+    #   • Ladder has slots left (dca_count < dca_max)
+    # Otherwise shown as "—".
+    next_dca_col = "—"
+    if status == "open":
+        _dca_en_row  = bool(s.get("dca_enabled", False))
+        _dca_max_row = int(s.get("dca_max", 0) or 0)
+        if _dca_en_row and _dca_max_row > 0 and _dca_count_row < _dca_max_row:
+            try:
+                _next_dca_px = _dca_compute_trigger(s, _snap_cfg)
+                if _next_dca_px and _next_dca_px > 0:
+                    # Auto-precision formatting matches Est Liquidity so low-
+                    # value coins (BASEDUSDT, etc.) show enough digits.
+                    if _next_dca_px >= 1:
+                        next_dca_col = f"{_next_dca_px:.4f}"
+                    elif _next_dca_px >= 0.01:
+                        next_dca_col = f"{_next_dca_px:.6f}"
+                    else:
+                        next_dca_col = f"{_next_dca_px:.8f}"
+                    # Append the ladder progress (e.g. "DCA 2/3") for context.
+                    next_dca_col = (
+                        f"{next_dca_col} "
+                        f"(DCA {_dca_count_row + 1}/{_dca_max_row})"
+                    )
+            except Exception:
+                next_dca_col = "—"
+
     if is_open_table:
         # Open-Signals-specific column order (27 columns — adds Original Entry
         # after Signal Entry for DCA trade visibility).
@@ -5246,6 +5279,7 @@ def _build_signal_row(s: dict, is_open_table: bool = False,
             "Current Status":  current_status_col,
             "Signal Entry":    _sig_entry_display,
             "Original Entry":  _orig_entry_display,
+            "Next DCA":        next_dca_col,
             "TP":              s.get("tp", ""),
             "SL":              s.get("sl", ""),
             "Est Liquidity":   est_liq_col,
@@ -5393,6 +5427,21 @@ _SIG_COL_CFG = {
                                "far a DCA ladder has averaged the position "
                                "down from the initial entry.\n\n"
                                "For non-DCA trades this matches Signal Entry."),
+    "Next DCA":       st.column_config.TextColumn(
+                          "🪜 Next DCA", width="medium",
+                          help="Price at which the NEXT DCA add will trigger "
+                               "on this trade, plus the ladder slot "
+                               "(e.g. \"DCA 2/3\" means the upcoming fire "
+                               "will be the 2nd DCA of a max-3 ladder).\n\n"
+                               "Computed from the blended average and the "
+                               "drop % snapshotted onto the signal at entry:\n"
+                               "  • Isolated → `dca_iso_distance_pct` % of the "
+                               "distance from avg to liquidation.\n"
+                               "  • Cross    → `dca_cross_drop_pct` % fixed "
+                               "drop below avg.\n\n"
+                               "Shown only when DCA is enabled on the trade "
+                               "and ladder slots remain (dca_count < dca_max). "
+                               "Otherwise \"—\"."),
     "Fill $":         st.column_config.NumberColumn(format="%.8f",
                           help="Actual market fill price (may differ from signal entry)"),
     "TP":             st.column_config.NumberColumn(format="%.8f"),
