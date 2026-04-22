@@ -709,19 +709,35 @@ def safe_get(url, params=None, _retries=4):
                     f"HTTP {r.status_code}: MEXC is blocking this server's IP. "
                     "Try Railway (railway.app) — uses residential IPs.")
             r.raise_for_status()
-            data = r.json()
+            # ── Debug: log first 300 chars of raw response for diagnosis ──────
+            _raw_snippet = r.text[:300] if hasattr(r, "text") else ""
+            try:
+                data = r.json()
+            except Exception as _je:
+                raise RuntimeError(
+                    f"MEXC non-JSON response from {url}: {_je} | raw={_raw_snippet!r}")
             # MEXC public endpoints use two response styles:
             #   • Newer: {"success": true,  "code": 200, "data": {...}}
             #   • Older: {"code": 0,        "data": {...}}   (no "success" key; code 0 = OK)
             # Only raise on an explicit application-level error: success is False
             # AND code is non-zero (code 0 means success in the older style).
+            # NOTE: MEXC sometimes returns code as STRING "0" — always compare as int.
             if isinstance(data, dict) and data.get("success") is False:
                 err_code = data.get("code", "?")
                 err_msg  = data.get("message", data.get("msg", ""))
-                if err_code != 0:   # code 0 = success in older MEXC format — ignore
+                try:
+                    err_code_int = int(err_code)
+                except (TypeError, ValueError):
+                    err_code_int = -1
+                if err_code_int not in (0, 200):  # 0 and 200 both mean success in MEXC
                     raise RuntimeError(f"MEXC API error {err_code}: {err_msg}")
+                # code 0 / 200 with success=false is contradictory — treat as OK
+                _append_error("http",
+                    f"Contradictory MEXC response (success=false, code={err_code}) from {url} "
+                    f"— treating as OK. raw={_raw_snippet!r}", endpoint=url)
             return data
-        except requests.exceptions.ConnectionError:
+        except requests.exceptions.ConnectionError as _ce:
+            _append_error("http", f"ConnectionError attempt {attempt+1}: {_ce}", endpoint=url)
             if attempt < _retries - 1: time.sleep(1); continue
             raise
     msg = f"Failed after {_retries} retries: {url}"
@@ -782,7 +798,16 @@ def get_symbols(watchlist: list) -> tuple:
     active  = set()
     ct_vals = {}
     data    = safe_get(f"{BASE}/api/v1/contract/detail")
-    for s in data.get("data", []):
+    # ── Diagnostic: log what the endpoint returned so we can debug format issues ─
+    _data_type  = type(data).__name__
+    _data_keys  = list(data.keys()) if isinstance(data, dict) else "not-a-dict"
+    _data_items = len(data.get("data", []) or []) if isinstance(data, dict) else 0
+    _append_error("http",
+        f"[diag] contract/detail → type={_data_type}, keys={_data_keys}, "
+        f"data_len={_data_items}, success={data.get('success') if isinstance(data,dict) else 'N/A'}, "
+        f"code={data.get('code') if isinstance(data,dict) else 'N/A'}",
+        endpoint="/api/v1/contract/detail")
+    for s in (data.get("data", []) if isinstance(data, dict) else []):
         inst_id = s.get("symbol", "")
         if inst_id.endswith("_USDT"):
             sym = _from_mexc(inst_id)
