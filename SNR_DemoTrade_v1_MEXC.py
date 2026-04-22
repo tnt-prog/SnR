@@ -1780,8 +1780,9 @@ def process(sym, cfg: dict, super_counter: dict = None, super_lock=None):
             m15_quick  = f_15m_q.result()[:-1]
             m1h_quick  = f_1h_q.result()[:-1]
 
-        if not m5_quick:
-            return None   # insufficient candle data — skip coin silently
+        # Guard: if ANY required timeframe returned too few candles, skip silently
+        if not m5_quick or not m15_quick:
+            return None
         closes_5m_q = [c["close"] for c in m5_quick]
         entry_q     = _pround(m5_quick[-1]["close"])
 
