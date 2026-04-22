@@ -2392,6 +2392,11 @@ def _init_signal_trade_snapshot(sig: dict, cfg: dict) -> None:
     sig["dca_cross_drop_pct"]   = float(
         cfg.get("dca_cross_drop_pct",   7.0)  or 7.0
     )
+    # Snapshot the TP/SL active at entry time so the Trade History column
+    # can show the original levels on the first line, even after later DCAs
+    # have recomputed sig["tp"] / sig["sl"].
+    _entry_tp_snap = float(sig.get("tp", 0) or 0)
+    _entry_sl_snap = float(sig.get("sl", 0) or 0)
     sig["dca_fills"]      = [{
         "price":    _entry_px,
         "usdt":     _entry_usdt,
@@ -2400,6 +2405,8 @@ def _init_signal_trade_snapshot(sig: dict, cfg: dict) -> None:
         "ts":       sig.get("timestamp", ""),
         "order_id": sig.get("order_id", "") or "",
         "dca_idx":  0,
+        "tp":       _entry_tp_snap,
+        "sl":       _entry_sl_snap,
     }] if _entry_px > 0 else []
     sig["avg_entry"]      = _entry_px
     sig["total_usdt"]     = _entry_usdt
@@ -2803,6 +2810,14 @@ def _execute_dca_fill_paper(sig: dict, cfg: dict) -> bool:
             sig["final_sl_price"] = None
             sig["sl"] = _dca_compute_trigger(sig, cfg)
 
+        # Snapshot the post-recompute TP/SL onto THIS DCA fill so the
+        # Trade History column can show what TP/SL were set for this add.
+        try:
+            fills[-1]["tp"] = float(sig.get("tp", 0) or 0)
+            fills[-1]["sl"] = float(sig.get("sl", 0) or 0)
+        except Exception:
+            pass
+
         # No order_id / algo_id change — paper trade has no OKX position.
         # Mark display-level status so the UI can reflect the paper fill.
         sig["order_status"] = "paper_filled"
@@ -2915,6 +2930,14 @@ def _execute_dca_fill(sig: dict, cfg: dict) -> bool:
             # while the ladder is still active. The actual SL check is
             # bypassed for DCA trades with remaining adds.
             sig["sl"] = _dca_compute_trigger(sig, cfg)
+
+        # Snapshot the post-recompute TP/SL onto THIS DCA fill so the
+        # Trade History column shows the exact TP/SL set after this add.
+        try:
+            fills[-1]["tp"] = float(sig.get("tp", 0) or 0)
+            fills[-1]["sl"] = float(sig.get("sl", 0) or 0)
+        except Exception:
+            pass
 
         # Update last-order/display fields so OKX Command / Order ID reflect
         # the newest add.
@@ -5024,6 +5047,72 @@ def _fmt_secs(secs: int) -> str:
         h, rem = divmod(secs, 3600); return f"{h}h {rem // 60}m"
     d, rem = divmod(secs, 86400);   return f"{d}d {rem // 3600}h"
 
+def _fmt_px_auto(px) -> str:
+    """Auto-precision price formatter — 4/6/8 decimals depending on magnitude."""
+    try:
+        p = float(px or 0)
+    except (TypeError, ValueError):
+        return "—"
+    if p <= 0:
+        return "—"
+    if p >= 1:      return f"{p:.4f}"
+    if p >= 0.01:   return f"{p:.6f}"
+    return f"{p:.8f}"
+
+
+def _fmt_trade_history(s: dict) -> str:
+    """Render a multi-line Trade History string for the Open / TP Hit /
+    SL Hit / DCA SL Hit tables.
+
+    Format (one line per fill — Entry then DCA 1, DCA 2, …):
+
+        Entry : $<price> | TP $<tp> | SL $<sl> | MM/DD HH:MM
+        DCA 1 : $<price> | TP $<tp> | SL $<sl> | MM/DD HH:MM
+        DCA 2 : $<price> | TP $<tp> | SL $<sl> | MM/DD HH:MM
+
+    Past fills that were recorded BEFORE we started storing per-fill TP/SL
+    show the abbreviated form (price + time only). Newer fills show the
+    full Entry/TP/SL/time line.
+
+    Returns "—" if there's nothing to show (no fills AND no entry data).
+    """
+    fills = s.get("dca_fills") or []
+    lines: list = []
+
+    if fills:
+        for f in fills:
+            idx   = int(f.get("dca_idx", 0) or 0)
+            label = "Entry" if idx == 0 else f"DCA {idx}"
+            px_s  = _fmt_px_auto(f.get("price", 0))
+            ts_s  = fmt_dubai(f.get("ts", "")) or "—"
+            tp_v  = f.get("tp")
+            sl_v  = f.get("sl")
+            _has_tp = tp_v is not None and _fmt_px_auto(tp_v) != "—"
+            _has_sl = sl_v is not None and _fmt_px_auto(sl_v) != "—"
+            if _has_tp and _has_sl:
+                lines.append(
+                    f"{label:<6}: ${px_s} | TP ${_fmt_px_auto(tp_v)} | "
+                    f"SL ${_fmt_px_auto(sl_v)} | {ts_s}"
+                )
+            else:
+                # Pre-migration fill — only price + time are reliable.
+                lines.append(f"{label:<6}: ${px_s} | {ts_s}")
+        return "\n".join(lines)
+
+    # No dca_fills array at all (legacy signal, never snapshotted). Fall
+    # back to sig-level entry/tp/sl for a single-line display.
+    _ent = s.get("original_entry") or s.get("signal_entry") or s.get("entry")
+    _tp  = s.get("tp")
+    _sl  = s.get("sl")
+    _ts  = fmt_dubai(s.get("timestamp", "")) or "—"
+    if _ent:
+        _px_s = _fmt_px_auto(_ent)
+        if _tp and _sl and _fmt_px_auto(_tp) != "—" and _fmt_px_auto(_sl) != "—":
+            return f"Entry : ${_px_s} | TP ${_fmt_px_auto(_tp)} | SL ${_fmt_px_auto(_sl)} | {_ts}"
+        return f"Entry : ${_px_s} | {_ts}"
+    return "—"
+
+
 def _build_signal_row(s: dict, is_open_table: bool = False,
                       show_pnl: bool = False) -> dict:
     """Convert one signal dict into a table row dict (all columns).
@@ -5407,6 +5496,16 @@ def _build_signal_row(s: dict, is_open_table: bool = False,
             except Exception:
                 next_dca_col = "—"
 
+    # ── Trade History column ────────────────────────────────────────────────
+    # Multi-line lifecycle: Entry line + one line per DCA fill. Each line
+    # shows price | TP | SL | time (going-forward; past DCAs w/o stored
+    # TP/SL show price | time only). Appears in Open / TP Hit / SL Hit /
+    # DCA SL Hit tables — closed trades retain the full ladder history.
+    try:
+        trade_history_col = _fmt_trade_history(s)
+    except Exception:
+        trade_history_col = "—"
+
     if is_open_table:
         # Open-Signals-specific column order (27 columns — adds Original Entry
         # after Signal Entry for DCA trade visibility).
@@ -5426,6 +5525,7 @@ def _build_signal_row(s: dict, is_open_table: bool = False,
             "Next DCA":        next_dca_col,
             "TP":              s.get("tp", ""),
             "SL":              s.get("sl", ""),
+            "Trade History":   trade_history_col,
             "Est Liquidity":   est_liq_col,
             "Duration":        duration_str,
             "TP $":            tp_usd_str,
@@ -5471,6 +5571,7 @@ def _build_signal_row(s: dict, is_open_table: bool = False,
         "TP $":           tp_usd_str,
         "SL":             s.get("sl", ""),
         "SL $":           sl_usd_str,
+        "Trade History":  trade_history_col,
         "Status":         status_icon,
         "Duration":       duration_str,
         "Close Time":     close_str,
@@ -5602,6 +5703,19 @@ _SIG_COL_CFG = {
                                "Otherwise \"—\"."),
     "Fill $":         st.column_config.NumberColumn(format="%.8f",
                           help="Actual market fill price (may differ from signal entry)"),
+    "Trade History":  st.column_config.TextColumn(
+                          "📜 Trade History", width="large",
+                          help="Full trade lifecycle — one line per fill:\n\n"
+                               "  • Entry : ${price} | TP ${tp} | SL ${sl} | {time}\n"
+                               "  • DCA N : ${price} | TP ${tp} | SL ${sl} | {time}\n\n"
+                               "Each DCA add is appended on a new line with the "
+                               "TP/SL that were in effect AFTER that add (post-"
+                               "recompute). Past DCAs recorded before this "
+                               "feature landed show only price and time — no "
+                               "fabricated TP/SL values.\n\n"
+                               "Closed trades (TP Hit / SL Hit / DCA SL Hit) "
+                               "retain the full ladder history for after-action "
+                               "review."),
     "TP":             st.column_config.NumberColumn(format="%.8f"),
     "TP $":           st.column_config.TextColumn(width="small"),
     "SL":             st.column_config.NumberColumn(format="%.8f"),
@@ -5622,6 +5736,23 @@ _SIG_COL_CFG = {
     "⚠️ SL Reason":  st.column_config.TextColumn(width="medium"),
 }
 
+def _style_alert_cell(val) -> str:
+    """Return CSS for the Alert column: orange + bold when the cell
+    contains a DCA tag (e.g. "DCA-1", "DCA-2/3"). Otherwise no styling.
+
+    Case-insensitive substring match — catches "DCA-N", "DCA N", "DCA
+    X/Y filled", etc.
+    """
+    try:
+        if val is None:
+            return ""
+        if "dca" in str(val).lower():
+            return "color: #FF8C00; font-weight: 700;"
+    except Exception:
+        pass
+    return ""
+
+
 def _render_sig_table(sig_list: list, header: str, empty_msg: str,
                       auto_height: bool = False, is_open_table: bool = False,
                       show_pnl: bool = False):
@@ -5629,14 +5760,40 @@ def _render_sig_table(sig_list: list, header: str, empty_msg: str,
             for s in sig_list]
     st.markdown(f"### {header} ({len(rows)})")
     if rows:
+        # Wrap the rows in a pandas DataFrame so we can apply Styler to color
+        # the whole Alert cell orange+bold when it contains DCA text. Fall
+        # back to plain dict rendering if pandas styling fails for any
+        # reason — keeps the table visible even on a styling hiccup.
+        try:
+            import pandas as _pd
+            _df = _pd.DataFrame(rows)
+            if "Alert" in _df.columns:
+                _styled = _df.style.applymap(
+                    _style_alert_cell, subset=["Alert"]
+                )
+                _render_obj = _styled
+            else:
+                _render_obj = _df
+        except Exception:
+            _render_obj = rows
+
         if auto_height:
             # Expand so ALL rows are visible without internal scrolling.
-            # Each row ≈ 35 px, header ≈ 38 px, +10 px buffer.
-            st.dataframe(rows, use_container_width=True, hide_index=True,
-                         height=len(rows) * 35 + 48,
+            # Each row ≈ 35 px, header ≈ 38 px, +10 px buffer. Trade History
+            # is multi-line (up to 1 entry + 6 DCAs = 7 lines ≈ 120 px), so
+            # give each row a roomier default when any trade has DCA'd.
+            _max_dca = max(
+                (int(s.get("dca_count", 0) or 0) for s in sig_list),
+                default=0,
+            )
+            _row_h = 35 + max(0, _max_dca) * 18  # +18 px per extra line
+            st.dataframe(_render_obj, use_container_width=True,
+                         hide_index=True,
+                         height=len(rows) * _row_h + 48,
                          column_config=_SIG_COL_CFG)
         else:
-            st.dataframe(rows, use_container_width=True, hide_index=True,
+            st.dataframe(_render_obj, use_container_width=True,
+                         hide_index=True,
                          column_config=_SIG_COL_CFG)
     else:
         st.info(empty_msg)
@@ -6427,7 +6584,7 @@ def _build_diagnostics_text() -> str:
     # ── Per-signal detail (all buckets) ─────────────────────────────────────
     def _dump_signal(s: dict):
         _sub(f"{s.get('symbol','?')}  ·  {_fmt_ts(s.get('timestamp',''))}")
-        _kv("status",             s.get("status", ""))
+        _kv("status",              s.get("status", ""))
         _kv("sector",              s.get("sector", ""))
         _kv("setup",               "Super" if s.get("is_super_setup") else "Normal")
         _kv("margin_mode",         s.get("order_margin_mode", "") or "—")
@@ -6441,72 +6598,59 @@ def _build_diagnostics_text() -> str:
         _kv("sl",                  s.get("sl", "—"))
         _kv("latest_price",        s.get("latest_price", "—"))
         _kv("price_alert_pct",     s.get("price_alert_pct", "—"))
-        _kv("price_alert (DL)",    s.get("price_alert", False))
         _kv("dca_enabled",         s.get("dca_enabled", False))
-        _kv("dca_max",             s.get("dca_max", 0))
         _kv("dca_count",           s.get("dca_count", 0))
+        _kv("dca_max",             s.get("dca_max", 0))
         _kv("dca_iso_distance_pct", s.get("dca_iso_distance_pct", "—"))
         _kv("dca_cross_drop_pct",   s.get("dca_cross_drop_pct", "—"))
-        _kv("total_notional",      s.get("total_notional", "—"))
-        # Compute next DCA price if applicable
-        try:
-            if (s.get("status") == "open"
-                    and s.get("dca_enabled")
-                    and int(s.get("dca_count", 0) or 0)
-                        < int(s.get("dca_max", 0) or 0)):
-                _next_px = _dca_compute_trigger(s, _snap_cfg)
-                _kv("next_dca_price (computed)", _next_px or "—")
-        except Exception:
-            pass
-        # DCA fill ladder
+        _kv("final_sl_price",      s.get("final_sl_price", "—"))
+        _kv("order_id",            s.get("order_id", "—") or "—")
+        _kv("algo_id",             s.get("algo_id",  "—") or "—")
+        _kv("order_status",        s.get("order_status", "—"))
+        _kv("order_error",         (s.get("order_error", "") or "")[:200])
+        _kv("timestamp",           _fmt_ts(s.get("timestamp", "")))
+        _kv("close_time",          _fmt_ts(s.get("close_time", "")))
+        _kv("close_price",         s.get("close_price", "—"))
         _fills = s.get("dca_fills") or []
         if _fills:
             _push("  dca_fills:")
-            for _i, _f in enumerate(_fills):
-                _tag = "entry" if _i == 0 else f"DCA-{_i}"
-                _push(f"    [{_i}] {_tag:<7} "
-                      f"px={_f.get('price','?')} "
-                      f"usdt={_f.get('usdt','?')} "
-                      f"notional={_f.get('notional','?')} "
-                      f"paper={_f.get('paper', False)} "
-                      f"order_id={_f.get('order_id','') or '—'} "
-                      f"ts={_fmt_ts(_f.get('ts',''))}")
-        _kv("order_id",            s.get("order_id", "") or "—")
-        _kv("algo_id",             s.get("algo_id",  "") or "—")
-        _kv("order_status",        s.get("order_status", "") or "—")
-        _kv("order_error",         (s.get("order_error", "") or "")[:200] or "—")
-        _kv("demo_mode",           s.get("demo_mode", False))
-        _kv("close_time",          _fmt_ts(s.get("close_time", "")))
-        _kv("close_price",         s.get("close_price", "—"))
-        # Entry criteria (compact)
-        _crit = s.get("criteria", {}) or {}
-        if _crit:
-            _push("  entry_criteria:")
-            for _ck in sorted(_crit.keys()):
-                _push(f"    {_ck:<22} : {_crit[_ck]}")
+            for _f in _fills:
+                _push(
+                    f"    - idx={_f.get('dca_idx', '?')}  "
+                    f"px={_f.get('price', '—')}  "
+                    f"usdt={_f.get('usdt', '—')}  "
+                    f"lev={_f.get('leverage', '—')}  "
+                    f"notional={_f.get('notional', '—')}  "
+                    f"tp={_f.get('tp', '—')}  "
+                    f"sl={_f.get('sl', '—')}  "
+                    f"ts={_fmt_ts(_f.get('ts', ''))}  "
+                    f"order_id={_f.get('order_id', '') or '—'}"
+                )
+        else:
+            _kv("dca_fills", "(none)")
 
-    _hdr("OPEN TRADES  (live)")
+    _hdr("SIGNALS · OPEN")
     if _open_sigs:
         for _s in _open_sigs:
             _dump_signal(_s)
     else:
         _push("  (none)")
 
-    _hdr("TP HIT TRADES")
+    _hdr("SIGNALS · TP HIT")
     if _tp_sigs:
         for _s in _tp_sigs:
             _dump_signal(_s)
     else:
         _push("  (none)")
 
-    _hdr("SL HIT TRADES  (non-DCA)")
+    _hdr("SIGNALS · SL HIT")
     if _sl_sigs:
         for _s in _sl_sigs:
             _dump_signal(_s)
     else:
         _push("  (none)")
 
-    _hdr("DCA SL HIT TRADES  (ladder exhausted)")
+    _hdr("SIGNALS · DCA SL HIT")
     if _dca_sl_sigs:
         for _s in _dca_sl_sigs:
             _dump_signal(_s)
@@ -6520,7 +6664,7 @@ def _build_diagnostics_text() -> str:
     else:
         _push("  (none)")
 
-    # ── Filter funnel (last scan) ───────────────────────────────────────────
+    # ── Filter funnel (last scan) ───────────────────────
     _hdr("FILTER FUNNEL (last scan)")
     try:
         with _filter_lock:
@@ -6530,7 +6674,7 @@ def _build_diagnostics_text() -> str:
             for _k in sorted(_fc_snap.keys()):
                 _v = _fc_snap[_k]
                 if _k == "scan_cfg":
-                    continue  # already dumped in CONFIGURATION
+                    continue
                 if isinstance(_v, list):
                     _v = f"[{len(_v)} items] " + ", ".join(str(x) for x in _v[:30])
                 _kv(_k, _v)
