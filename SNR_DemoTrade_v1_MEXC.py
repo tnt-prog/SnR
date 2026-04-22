@@ -2977,7 +2977,9 @@ def _bg_loop():
                     save_log(_b._msc_log)
             _b._msc_last_error = ""
         except Exception as e:
-            _b._msc_last_error = str(e)
+            import traceback as _tb
+            _full = _tb.format_exc()
+            _b._msc_last_error = f"{e} | traceback: {_full[-600:]}"
             _append_error("loop", str(e))
         elapsed   = time.time() - t0
         sleep_sec = max(0, cfg["loop_minutes"] * 60 - elapsed)
@@ -3972,6 +3974,7 @@ with st.sidebar:
 # MAIN AREA
 # ─────────────────────────────────────────────────────────────────────────────
 st.title("S&R — Crypto Intelligent Portal")
+st.caption("🔧 MEXC v2.2 — 2026-04-22")
 
 last_scan = health.get("last_scan_at", "never")
 if last_scan and last_scan != "never":
