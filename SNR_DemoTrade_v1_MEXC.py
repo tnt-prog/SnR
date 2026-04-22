@@ -620,42 +620,49 @@ def save_log(log):
 # ─────────────────────────────────────────────────────────────────────────────
 # Module-level shared state
 # ─────────────────────────────────────────────────────────────────────────────
+_MEXC_CODE_VERSION = "2.3"   # bump this on every deploy to force full re-init
+
+import builtins as _b_check
+_needs_init = (
+    not getattr(_b_check, "_mexc_scanner_globals_set", False) or
+    getattr(_b_check, "_mexc_code_version", "") != _MEXC_CODE_VERSION
+)
+
+if _needs_init:
+    import builtins as _b
+    # Stop the old background thread if it exists (version mismatch = stale thread)
+    _old_thread = getattr(_b, "_msc_thread", None)
+    _old_running = getattr(_b, "_msc_running", None)
+    if _old_running is not None:
+        _old_running.clear()   # signal old loop to exit at next sleep
+    _b._mexc_scanner_globals_set = True
+    _b._mexc_code_version = _MEXC_CODE_VERSION
+    _b._msc_cfg           = load_config()
+    _b._msc_log           = load_log()
+    _b._msc_log_lock      = threading.Lock()
+    _b._msc_running       = threading.Event()
+    _b._msc_running.set()
+    _b._msc_thread        = None
+    _b._msc_filter_counts = {}
+    _b._msc_filter_lock   = threading.Lock()
+    _b._msc_last_error    = ""
+    _b._msc_rescan_event  = threading.Event()
+    _b._msc_sl_paused     = False
+    _b._msc_api_conn_status = {
+        "status":      "untested",
+        "message":     "",
+        "tested_at":   None,
+        "demo_mode":   None,
+        "uid":         "",
+        "pos_mode":    "net_mode",
+        "acct_lv":     "2",
+    }
+    _b._msc_last_trade_raw  = {}
+    _b._msc_error_log       = []
+    _b._msc_error_log_lock  = threading.Lock()
+    _b._msc_symbol_cache  = {"symbols": [], "fetched_at": 0, "wl_key": "", "ct_val": {}}
+
 if "_mexc_scanner_initialised" not in st.session_state:
-    import builtins
-    if not getattr(builtins, "_mexc_scanner_globals_set", False):
-        import builtins as _b
-        _b._mexc_scanner_globals_set = True
-        _b._msc_cfg           = load_config()
-        _b._msc_log           = load_log()
-        _b._msc_log_lock      = threading.Lock()
-        _b._msc_running       = threading.Event()
-        _b._msc_running.set()
-        _b._msc_thread        = None
-        _b._msc_filter_counts = {}
-        _b._msc_filter_lock   = threading.Lock()
-        _b._msc_last_error    = ""
-        _b._msc_rescan_event  = threading.Event()   # set to skip sleep & rescan immediately
-        # ── Circuit-breaker halt flag ─────────────────────────────────────────
-        # Set to True by the background loop when the last 3 closed trades are
-        # all sl_hit. CONTRACT: once True, ONLY the manual "▶️ Resume Scanning"
-        # button (in the sidebar) may set this back to False. No TP hit, no
-        # cycle, no other event — manual resume only. Do not add any code path
-        # that clears this flag automatically.
-        _b._msc_sl_paused     = False
-        _b._msc_api_conn_status = {          # result of last "Test Connection" call
-            "status":      "untested",       # "untested" | "ok" | "error"
-            "message":     "",
-            "tested_at":   None,             # Dubai ISO timestamp
-            "demo_mode":   None,
-            "uid":         "",               # MEXC account UID on success
-            "pos_mode":    "net_mode",       # "net_mode" | "long_short_mode" (hedge)
-            "acct_lv":     "2",              # MEXC account level (1=Simple, 2=Single-margin…)
-        }
-        _b._msc_last_trade_raw  = {}         # full raw MEXC response from last order attempt
-        _b._msc_error_log       = []         # structured API error log (max 500 entries)
-        _b._msc_error_log_lock  = threading.Lock()
-        # D — symbol cache (also stores ctVal per symbol for position sizing)
-        _b._msc_symbol_cache  = {"symbols": [], "fetched_at": 0, "wl_key": "", "ct_val": {}}
     st.session_state["_mexc_scanner_initialised"] = True
 
 import builtins as _b
@@ -3974,7 +3981,7 @@ with st.sidebar:
 # MAIN AREA
 # ─────────────────────────────────────────────────────────────────────────────
 st.title("S&R — Crypto Intelligent Portal")
-st.caption("🔧 MEXC v2.2 — 2026-04-22")
+st.caption("🔧 MEXC v2.3 — 2026-04-22")
 
 last_scan = health.get("last_scan_at", "never")
 if last_scan and last_scan != "never":
