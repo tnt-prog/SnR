@@ -689,6 +689,20 @@ if "_scanner_initialised" not in st.session_state:
     st.session_state["_scanner_initialised"] = True
 
 import builtins as _b
+# ── Defensive hot-reload backfill ────────────────────────────────────────────
+# The main init block above is gated by a persistent builtins flag, so when
+# the app was already running before new attributes were added to the module,
+# those attributes won't exist on _b. Add any missing ones here so older
+# sessions keep working after a code update (no process restart required).
+if not hasattr(_b, "_bsc_watcher_thread"):
+    _b._bsc_watcher_thread = None
+if not hasattr(_b, "_bsc_watcher_event"):
+    _b._bsc_watcher_event = threading.Event()
+if not hasattr(_b, "_bsc_watcher_last_ts"):
+    _b._bsc_watcher_last_ts = 0
+if not hasattr(_b, "_bsc_watcher_last_dur"):
+    _b._bsc_watcher_last_dur = 0.0
+
 _cfg             = _b._bsc_cfg
 _log             = _b._bsc_log
 _log_lock        = _b._bsc_log_lock
