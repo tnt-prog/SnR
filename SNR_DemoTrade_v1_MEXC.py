@@ -1287,8 +1287,7 @@ def place_okx_manual_order(sym: str, entry: float, tp: float, sl: float,
             algo_id = ad.get("algoId", "")
 
             if not algo_resp.get("success", False):
-                algo_err = _okx_err(algo_resp) #
-                           else f"OCO: {ad.get('sCode')}: {ad.get('sMsg','')}"
+                algo_err = _okx_err(algo_resp)
                 _append_error("trade", f"OCO algo failed: {algo_err}",
                               symbol=sym, endpoint="/api/v1/private/order/submit")
                 return {"ordId": ord_id, "algoId": "", "sz": contracts,
@@ -2364,8 +2363,7 @@ def _place_dca_oco_algo(sig: dict, cfg: dict, new_tp: float,
         algo_resp = _trade_post("/api/v1/private/order/submit", algo_body, cfg)
         ad        = (algo_resp.get("data") or [{}])[0]
         if not algo_resp.get("success", False):
-            err = _okx_err(algo_resp) #
-                  else f"{ad.get('sCode')}: {ad.get('sMsg','')}"
+            err = _okx_err(algo_resp)
             _append_error("trade", f"DCA OCO algo failed: {err}",
                           symbol=sym, endpoint="/api/v1/private/order/submit")
             return ""
