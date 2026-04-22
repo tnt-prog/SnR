@@ -2341,6 +2341,75 @@ def _parse_iso_safe(ts_str: str):
 # ─────────────────────────────────────────────────────────────────────────────
 # DCA helpers (Dollar-Cost Averaging ladder — Isolated 70% / Cross fixed 7%)
 # ─────────────────────────────────────────────────────────────────────────────
+def _init_signal_trade_snapshot(sig: dict, cfg: dict) -> None:
+    """Snapshot trade + DCA config onto a freshly-created signal.
+
+    This MUST be called for every new signal the scanner adds to the log —
+    not just signals that pass through the auto-trading path — so that:
+
+      • Paper-mode / credential-less signals still carry `dca_enabled`,
+        `dca_max`, and the snapshotted drop percentages. Without this
+        snapshot, `_dca_compute_trigger` returns 0 → the Next DCA column
+        renders "—" for every open trade, and the paper-mode DCA simulator
+        has nothing to act on.
+      • `trade_usdt`, `trade_lev`, `order_margin_mode`, `demo_mode` reflect
+        what WOULD have been sent to OKX, so PnL, Margin Mode, and OKX
+        Command columns show meaningful values even without a live order.
+      • `avg_entry`, `dca_fills[0]`, `total_notional`, `original_entry` are
+        populated so DCA math works the instant a signal fires.
+
+    Idempotent-ish: the DCA fields are always (re)set to a fresh state for
+    fill 0. Callers in the auto-trade path call this AFTER overwriting
+    `entry` with the actual OKX fill price, so fill 0 reflects the real
+    execution price rather than the scanner's signal price.
+    """
+    _dca_max_snap = int(cfg.get("trade_max_dca", 0) or 0)
+    _dca_max_snap = max(0, min(6, _dca_max_snap))
+    _entry_px     = float(sig.get("entry", 0) or 0)
+    # Prefer values already set on the signal (from auto-trade path); else
+    # fall back to the current cfg so paper/no-creds signals still show
+    # what would have been used.
+    _entry_usdt   = float(sig.get("trade_usdt",
+                                  cfg.get("trade_usdt_amount", 0)) or 0)
+    _entry_lev    = int(sig.get("trade_lev",
+                                cfg.get("trade_leverage", 10)) or 10)
+    _entry_notnl  = _entry_usdt * _entry_lev if _entry_lev > 0 else 0.0
+
+    # Trade config — only set if not already populated by auto-trade path.
+    sig.setdefault("trade_usdt",        _entry_usdt)
+    sig.setdefault("trade_lev",         _entry_lev)
+    sig.setdefault("demo_mode",         bool(cfg.get("demo_mode", True)))
+    sig.setdefault("order_margin_mode",
+                   (cfg.get("trade_margin_mode", "isolated") or "isolated"))
+
+    # DCA state — always overwritten (this is the source of truth).
+    sig["dca_enabled"]    = _dca_max_snap > 0
+    sig["dca_max"]        = _dca_max_snap
+    sig["dca_count"]      = 0
+    sig["dca_iso_distance_pct"] = float(
+        cfg.get("dca_iso_distance_pct", 70.0) or 70.0
+    )
+    sig["dca_cross_drop_pct"]   = float(
+        cfg.get("dca_cross_drop_pct",   7.0)  or 7.0
+    )
+    sig["dca_fills"]      = [{
+        "price":    _entry_px,
+        "usdt":     _entry_usdt,
+        "leverage": _entry_lev,
+        "notional": _entry_notnl,
+        "ts":       sig.get("timestamp", ""),
+        "order_id": sig.get("order_id", "") or "",
+        "dca_idx":  0,
+    }] if _entry_px > 0 else []
+    sig["avg_entry"]      = _entry_px
+    sig["total_usdt"]     = _entry_usdt
+    sig["total_notional"] = _entry_notnl
+    sig["original_entry"] = _entry_px
+    # final_sl_price is populated only after the DCA ladder is fully
+    # exhausted (dca_count == dca_max).
+    sig["final_sl_price"] = None
+
+
 def _dca_compute_trigger(sig: dict, cfg: dict = None) -> float:
     """Compute the next-DCA trigger price for an open signal.
 
@@ -3402,6 +3471,12 @@ def _bg_loop():
                             # queue_limit entries within the same scan batch.
                             skip.add(sig["symbol"])
                         else:
+                            # Snapshot trade + DCA config onto EVERY new signal,
+                            # regardless of whether an OKX order will be placed.
+                            # This guarantees paper-mode / credential-less signals
+                            # still carry dca_enabled / dca_max / drop % so the
+                            # Next DCA column and paper DCA simulator work.
+                            _init_signal_trade_snapshot(sig, cfg)
                             _b._bsc_log["signals"].append(sig)
                             skip.add(sig["symbol"])
                             _added_syms.append(sig["symbol"])
@@ -3460,43 +3535,15 @@ def _bg_loop():
                         sig["tp"]           = result["actual_tp"]
                         sig["sl"]           = result["actual_sl"]
                         sig["signal_entry"] = sig.get("entry")  # keep original for reference
-                    # ── DCA state initialization ────────────────────────────
-                    # Snapshot the DCA config at entry time so later sidebar
-                    # changes don't retroactively alter already-open trades.
-                    # Fill 0 IS the original entry (same price, margin, lev).
-                    _dca_max_snap = int(cfg.get("trade_max_dca", 0) or 0)
-                    _dca_max_snap = max(0, min(6, _dca_max_snap))
-                    _entry_px     = float(sig.get("entry", 0) or 0)
-                    _entry_usdt   = float(sig.get("trade_usdt", 0) or 0)
-                    _entry_lev    = int(sig.get("trade_lev",   0) or 0)
-                    _entry_notnl  = _entry_usdt * _entry_lev if _entry_lev > 0 else 0.0
-                    sig["dca_enabled"]    = _dca_max_snap > 0
-                    sig["dca_max"]        = _dca_max_snap
-                    sig["dca_count"]      = 0
-                    # Snapshot DCA drop percentages so sidebar changes don't
-                    # retroactively affect this trade's trigger math.
-                    sig["dca_iso_distance_pct"] = float(
-                        cfg.get("dca_iso_distance_pct", 70.0) or 70.0
-                    )
-                    sig["dca_cross_drop_pct"]   = float(
-                        cfg.get("dca_cross_drop_pct",   7.0)  or 7.0
-                    )
-                    sig["dca_fills"]      = [{
-                        "price":    _entry_px,
-                        "usdt":     _entry_usdt,
-                        "leverage": _entry_lev,
-                        "notional": _entry_notnl,
-                        "ts":       sig.get("timestamp", ""),
-                        "order_id": sig.get("order_id", ""),
-                        "dca_idx":  0,
-                    }] if _entry_px > 0 else []
-                    sig["avg_entry"]      = _entry_px
-                    sig["total_usdt"]     = _entry_usdt
-                    sig["total_notional"] = _entry_notnl
-                    sig["original_entry"] = _entry_px
-                    # final_sl_price is populated only after the DCA ladder is
-                    # fully exhausted (dca_count == dca_max).
-                    sig["final_sl_price"] = None
+                    # ── DCA state (re)initialization ────────────────────────
+                    # The helper was already called once before append() with the
+                    # scanner's signal price. Now that OKX has filled and
+                    # (potentially) corrected `entry`, re-run it so fill 0 /
+                    # avg_entry / original_entry reflect the ACTUAL execution
+                    # price, and trade_usdt / trade_lev / order_margin_mode are
+                    # left as-is (setdefault preserves the values set above from
+                    # cfg / OKX result).
+                    _init_signal_trade_snapshot(sig, cfg)
                 with _log_lock:
                     save_log(_b._bsc_log)
             _b._bsc_last_error = ""
