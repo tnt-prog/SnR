@@ -5231,6 +5231,28 @@ def _build_signal_row(s: dict, is_open_table: bool = False,
         if s.get("original_entry") is not None \
         else s.get("signal_entry", s.get("entry", ""))
 
+    # ── Current Price column (Open Signals only) ─────────────────────────────
+    # Live latest close, refreshed every Open-Trade Check cycle by
+    # `_update_one_signal` (main loop) and `_watcher_update_one_signal`
+    # (1-minute watcher) — both write `sig["latest_price"] = candles[-1].close`
+    # on every scan. Auto-precision formatting so small-value coins show
+    # enough digits.
+    current_price_col = "—"
+    if status == "open":
+        _latest_px = s.get("latest_price")
+        if _latest_px is not None:
+            try:
+                _lp = float(_latest_px)
+                if _lp > 0:
+                    if _lp >= 1:
+                        current_price_col = f"{_lp:.4f}"
+                    elif _lp >= 0.01:
+                        current_price_col = f"{_lp:.6f}"
+                    else:
+                        current_price_col = f"{_lp:.8f}"
+            except (TypeError, ValueError):
+                pass
+
     # ── Next DCA price column (Open Signals only) ────────────────────────────
     # Shows the price at which the NEXT DCA add would trigger, using the
     # signal's own snapshotted drop percentages (isolated / cross) so the
@@ -5279,6 +5301,7 @@ def _build_signal_row(s: dict, is_open_table: bool = False,
             "Current Status":  current_status_col,
             "Signal Entry":    _sig_entry_display,
             "Original Entry":  _orig_entry_display,
+            "Current Price":   current_price_col,
             "Next DCA":        next_dca_col,
             "TP":              s.get("tp", ""),
             "SL":              s.get("sl", ""),
@@ -5427,6 +5450,20 @@ _SIG_COL_CFG = {
                                "far a DCA ladder has averaged the position "
                                "down from the initial entry.\n\n"
                                "For non-DCA trades this matches Signal Entry."),
+    "Current Price":  st.column_config.TextColumn(
+                          "💹 Current Price", width="small",
+                          help="Live latest close for the symbol, refreshed "
+                               "on every Open-Trade Check cycle — both the "
+                               "main loop and the 1-minute watcher write "
+                               "`latest_price` onto the signal from the most "
+                               "recent 1m candle close.\n\n"
+                               "Compare against Next DCA to see how close the "
+                               "next DCA trigger is. Precision auto-scales "
+                               "(4/6/8 decimals) so low-value coins still "
+                               "show enough digits to read meaningfully.\n\n"
+                               "Shows \"—\" only on the very first cycle after "
+                               "a signal fires, before any candle fetch has "
+                               "populated the field."),
     "Next DCA":       st.column_config.TextColumn(
                           "🪜 Next DCA", width="medium",
                           help="Price at which the NEXT DCA add will trigger "
