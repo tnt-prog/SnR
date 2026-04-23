@@ -2916,6 +2916,39 @@ def _execute_dca_fill(sig: dict, cfg: dict) -> bool:
     """
     sym = sig.get("symbol", "?")
     try:
+        # ── Change 3: verify OKX still holds an open position before adding.
+        # If the position was closed externally (manual close, OCO triggered)
+        # skip the DCA, mark the signal closed, and log clearly.
+        try:
+            _pos_chk = _trade_get("/api/v5/account/positions",
+                                  {"instType": "SWAP", "instId": _to_okx(sym)},
+                                  cfg)
+            if _pos_chk.get("code") == "0":
+                _live_pos = [p for p in _pos_chk.get("data", [])
+                             if float(p.get("pos", 0) or 0) != 0]
+                if not _live_pos:
+                    _append_error(
+                        "trade",
+                        f"DCA aborted for {sym} — no open OKX position found. "
+                        f"Position may have been closed externally (manual close "
+                        f"or OCO hit). Marking signal as closed.",
+                        symbol=sym,
+                        endpoint="/api/v5/account/positions",
+                    )
+                    sig["status"]      = "sl_hit"
+                    sig["close_price"] = float(sig.get("latest_price") or
+                                               sig.get("avg_entry") or
+                                               sig.get("entry") or 0)
+                    sig["close_time"]  = dubai_now().isoformat()
+                    sig.pop("_dca_pending", None)
+                    return False
+        except Exception as _pos_exc:
+            # Position check failed — proceed with DCA rather than blocking.
+            _append_error("trade",
+                          f"DCA position pre-check failed for {sym}: {_pos_exc} "
+                          f"— proceeding with DCA anyway.",
+                          symbol=sym, endpoint="/api/v5/account/positions")
+
         dca_usdt = _dca_next_usdt(sig)
         if dca_usdt <= 0:
             sig.pop("_dca_pending", None)
@@ -3029,36 +3062,22 @@ def _execute_dca_fill(sig: dict, cfg: dict) -> bool:
 
         # Cancel old OCO and place fresh one at new levels, sized to the
         # TOTAL contract count across all fills.
-        total_contracts = sum(int(f.get("sz", 0) or 0) for f in fills)
-        # fill 0 (original entry) stored its sz in sig["order_sz"] historically
-        # — reconstruct total: contracts from each DCA fill plus the initial
-        # entry (stored separately before we started appending fills).
-        _entry_contracts = 0
-        try:
-            if fills:
-                # First fill record may lack 'sz' (we didn't capture it at entry).
-                # Derive contract count from the initial sig order_sz set after
-                # the first place_okx_order.
-                _entry_contracts = int(fills[0].get("sz", 0) or 0)
-        except Exception:
-            pass
-        # If the entry fill didn't store sz, reconstruct from initial sig fields.
-        # dca_fills[0] was populated BEFORE we tracked contract counts; use
-        # sig["order_sz"] snapshot that existed at entry (but we've now
-        # overwritten it). As a simple rule: reconstruct total from notional / (ct_val * price).
-        try:
-            _ct_val = float(sig.get("order_ct_val", 0) or 0)
-            if _ct_val > 0:
-                total_contracts = 0
-                for f in fills:
-                    _fp = float(f.get("price", 0) or 0)
-                    _fn = float(f.get("notional", 0) or 0)
-                    if _fp > 0 and _fn > 0:
-                        total_contracts += max(1, int(_fn / (_ct_val * _fp)))
-        except Exception:
-            pass
+        # Change 2: per-fill reconstruction — use sz where captured (fill-0
+        # now carries sz since Change 1); fall back to notional math only for
+        # fills that still lack it (pre-Change-1 open trades in the log).
+        _ct_val = float(sig.get("order_ct_val", 0) or 0)
+        total_contracts = 0
+        for f in fills:
+            _fz = int(f.get("sz", 0) or 0)
+            if _fz > 0:
+                total_contracts += _fz
+            elif _ct_val > 0:
+                _fp = float(f.get("price", 0) or 0)
+                _fn = float(f.get("notional", 0) or 0)
+                if _fp > 0 and _fn > 0:
+                    total_contracts += max(1, int(_fn / (_ct_val * _fp)))
         if total_contracts <= 0:
-            total_contracts = fill_sz
+            total_contracts = fill_sz   # last-resort: latest DCA fill only
 
         _old_algo = sig.get("algo_id", "")
         if _old_algo:
@@ -3426,6 +3445,19 @@ def _watcher_loop():
                                          if s.get("_dca_pending")]
                     if _dca_pending_sigs:
                         for _dsig in _dca_pending_sigs:
+                            # Change 4: if live trading is ON but order_id is
+                            # missing the entry order failed — skip DCA and log
+                            # clearly rather than silently paper-simulating.
+                            if cfg.get("trade_enabled") and not _dsig.get("order_id"):
+                                _append_error(
+                                    "trade",
+                                    f"DCA skipped for {_dsig.get('symbol','?')} — "
+                                    f"trade_enabled is ON but order_id is empty. "
+                                    f"Entry order may have failed. Check Error Log.",
+                                    symbol=_dsig.get("symbol", ""),
+                                )
+                                _dsig.pop("_dca_pending", None)
+                                continue
                             _is_paper = (not cfg.get("trade_enabled")
                                          or not _dsig.get("order_id"))
                             if _is_paper:
@@ -3520,6 +3552,19 @@ def _bg_loop():
                     # Real fill when auto-trading is ON AND the sig has a
                     # live OKX order_id to anchor to; otherwise paper sim.
                     for _dsig in _dca_pending_sigs:
+                        # Change 4: if live trading is ON but order_id is
+                        # missing the entry order failed — skip DCA and log
+                        # clearly rather than silently paper-simulating.
+                        if cfg.get("trade_enabled") and not _dsig.get("order_id"):
+                            _append_error(
+                                "trade",
+                                f"DCA skipped for {_dsig.get('symbol','?')} — "
+                                f"trade_enabled is ON but order_id is empty. "
+                                f"Entry order may have failed. Check Error Log.",
+                                symbol=_dsig.get("symbol", ""),
+                            )
+                            _dsig.pop("_dca_pending", None)
+                            continue
                         _is_paper = (not cfg.get("trade_enabled")
                                      or not _dsig.get("order_id"))
                         if _is_paper:
@@ -3694,6 +3739,10 @@ def _bg_loop():
                     # left as-is (setdefault preserves the values set above from
                     # cfg / OKX result).
                     _init_signal_trade_snapshot(sig, cfg)
+                    # ── Change 1: backfill sz into fill-0 so OCO contract
+                    # count is exact on every future DCA for this trade.
+                    if sig.get("dca_fills") and sig.get("order_sz"):
+                        sig["dca_fills"][0]["sz"] = int(sig["order_sz"])
                 with _log_lock:
                     save_log(_b._bsc_log)
             _b._bsc_last_error = ""
@@ -5963,6 +6012,127 @@ _queue_sigs   = [s for s in filtered_sorted if s.get("status") == "queue_limit"]
 # ── Table 1: Open Signals ───────────────────────────────────────────────────────
 _render_sig_table(_open_sigs,  "🔵 Open Signals",  "No open signals right now.",
                   auto_height=True, is_open_table=True, show_pnl=True)
+
+# ── OKX Live Positions (inline, auto-fetch) ────────────────────────────────────
+# Shown only when auto-trading is ON. Fetches on every render using a dedicated
+# session key so it always reflects the current OKX state independently of the
+# manual-refresh expander panel below.
+_inline_trade_on = _snap_cfg.get("trade_enabled", False)
+_inline_has_creds = bool(
+    _snap_cfg.get("api_key") and _snap_cfg.get("api_secret")
+    and _snap_cfg.get("api_passphrase")
+)
+if _inline_trade_on and _inline_has_creds:
+    # Auto-fetch on every render into a dedicated key.
+    try:
+        _inline_pos_resp = _trade_get(
+            "/api/v5/account/positions", {"instType": "SWAP"}, _snap_cfg
+        )
+        st.session_state["okx_inline_pos_data"] = _inline_pos_resp
+        st.session_state["okx_inline_pos_ts"] = dubai_now().strftime(
+            "%d %b %Y  %H:%M:%S GST"
+        )
+    except Exception as _inline_exc:
+        st.session_state["okx_inline_pos_data"] = None
+        _append_error("trade", f"Inline positions fetch failed: {_inline_exc}",
+                      endpoint="/api/v5/account/positions")
+
+    _inline_pos_data = st.session_state.get("okx_inline_pos_data")
+    _inline_pos_ts   = st.session_state.get("okx_inline_pos_ts", "")
+    _env_inline      = "🟡 Demo" if _snap_cfg.get("demo_mode", True) else "🔴 Live"
+
+    st.markdown(
+        f"**📡 OKX Positions (Live)**"
+        f"<span style='font-size:0.8em; color:gray; margin-left:12px;'>"
+        f"auto-fetched · {_inline_pos_ts} · {_env_inline}</span>",
+        unsafe_allow_html=True,
+    )
+
+    if _inline_pos_data is None:
+        st.warning("⚠️ Could not fetch OKX positions — check Error Log.")
+    elif _inline_pos_data.get("code") != "0":
+        st.error(f"OKX error: {_inline_pos_data.get('msg', 'Unknown error')}")
+    else:
+        _inline_positions = [
+            p for p in _inline_pos_data.get("data", [])
+            if float(p.get("pos", 0) or 0) != 0
+        ]
+
+        # Build set of open signal symbols for the Match column.
+        _open_sig_syms = {s.get("symbol", "") for s in _open_sigs}
+
+        if _inline_positions:
+            _inline_rows = []
+            _ghost_syms  = []   # on OKX but no matching open signal
+            for _p in _inline_positions:
+                _inst   = _p.get("instId", "")
+                # Normalise OKX instId (BTC-USDT-SWAP) → signal symbol (BTCUSDT)
+                _sym_norm = _inst.replace("-USDT-SWAP", "USDT").replace("-", "")
+                _upnl     = float(_p.get("upl",      0) or 0)
+                _upnl_pct = float(_p.get("uplRatio", 0) or 0) * 100
+                _liq_px   = float(_p.get("liqPx",    0) or 0)
+                _mgn_mode = _p.get("mgnMode", "cross")
+                _margin   = float(_p.get("margin", 0) or 0) or float(_p.get("imr", 0) or 0)
+                _matched  = _sym_norm in _open_sig_syms or _inst in _open_sig_syms
+                if not _matched:
+                    _ghost_syms.append(_inst)
+                _inline_rows.append({
+                    "Symbol":     _inst,
+                    "Contracts":  int(_p.get("pos", 0) or 0),
+                    "Avg Entry":  float(_p.get("avgPx",       0) or 0),
+                    "Mark Price": float(_p.get("markPx",      0) or 0),
+                    "Unreal PnL": round(_upnl, 4),
+                    "PnL %":      f"{_upnl_pct:+.2f}%",
+                    "Leverage":   f"{_p.get('lever', '')}×",
+                    "Liq Price":  _liq_px if _liq_px > 0 else "—",
+                    "Mode":       _mgn_mode.capitalize(),
+                    "Match":      "✅" if _matched else "⚠️ no signal",
+                })
+
+            st.dataframe(
+                _inline_rows,
+                use_container_width=True,
+                hide_index=True,
+                height=len(_inline_rows) * 35 + 48,
+                column_config={
+                    "Avg Entry":  st.column_config.NumberColumn(format="%.6f"),
+                    "Mark Price": st.column_config.NumberColumn(format="%.6f"),
+                    "Liq Price":  st.column_config.NumberColumn(format="%.6f"),
+                    "Unreal PnL": st.column_config.NumberColumn(
+                                      "Unreal PnL $", format="%.4f"),
+                },
+            )
+
+            # Warn for signals that have no OKX position.
+            _sig_no_pos = [
+                s.get("symbol", "") for s in _open_sigs
+                if s.get("symbol", "") not in _open_sig_syms - {
+                    _p2.replace("-USDT-SWAP", "USDT").replace("-", "")
+                    for _p2 in [_r["Symbol"] for _r in _inline_rows]
+                }
+            ]
+            # Simpler: find open signals whose symbol has no OKX position row.
+            _okx_norm_syms = {
+                r["Symbol"].replace("-USDT-SWAP", "USDT").replace("-", "")
+                for r in _inline_rows
+            }
+            _unmatched_sigs = [
+                s.get("symbol", "") for s in _open_sigs
+                if s.get("symbol", "") not in _okx_norm_syms
+            ]
+            if _ghost_syms:
+                st.caption(
+                    f"⚠️ {len(_ghost_syms)} OKX position(s) have no matching open signal: "
+                    + ", ".join(_ghost_syms)
+                )
+            if _unmatched_sigs:
+                st.caption(
+                    f"⚠️ {len(_unmatched_sigs)} open signal(s) have no matching OKX position: "
+                    + ", ".join(_unmatched_sigs)
+                )
+        else:
+            st.info("No open SWAP positions on OKX right now.")
+
 st.divider()
 
 # ── Table 2: TP Hit ─────────────────────────────────────────────────────────────
