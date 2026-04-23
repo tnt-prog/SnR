@@ -5230,6 +5230,16 @@ col_h1, col_h2, col_h3 = st.columns([3, 1, 1])
 col_h1.caption(f"Last scan: {last_scan}   |   Auto-refresh every 30 s   |   🕐 Dubai / GST (UTC+4)")
 if col_h2.button("🔄 Refresh", key="manual_refresh"): st.rerun()
 
+# ── Auto-refresh every 30 seconds (JS injection — no extra package needed) ────
+# Injects a tiny script into a zero-height iframe; after 30 s it reloads the
+# parent Streamlit page so the UI always shows the latest scan results without
+# the user having to click the Refresh button.
+import streamlit.components.v1 as _stc
+_stc.html(
+    "<script>setTimeout(function(){window.parent.location.reload();},30000);</script>",
+    height=0,
+)
+
 # ── API connection status badge ───────────────────────────────────────────────
 _api_cs   = getattr(_b, "_bsc_api_conn_status",
                     {"status": "untested", "message": "", "tested_at": None,
