@@ -6869,59 +6869,141 @@ if (
         ema_cross_lbl = (f"F10 — EMA{sc.get('ema_cross_fast_15m',12)}>EMA{sc.get('ema_cross_slow_15m',21)} 15m"
                           if sc.get("use_ema_cross_15m", True) else "F10 — EMA Cross (off)")
 
-        # Build funnel rows — only include MACD/SAR timeframes that are enabled
-        funnel_data = [
-            (f"Watchlist ({total})",       total),
-            (pre_lbl,                      after_pre),
-            ("Entered Deep Scan",          checked),
-            (f"After {pdz15m_lbl}",        after_f2),
-            (f"After {pdz5m_lbl}",         after_f3),
-            (f"After {f4_lbl}",            after_f4),
-            (f"After {f5_lbl}",            after_f5),
-            (f"After {ema_lbl}",           after_f6),
-        ]
-        # F7 MACD — add a row per enabled timeframe
-        _prev_macd = after_f6
-        for _tf, _key, _after in [
-            ("3m",  "use_macd_3m",  after_f7_macd_3m),
-            ("5m",  "use_macd_5m",  after_f7_macd_5m),
-            ("15m", "use_macd_15m", after_f7_macd_15m),
+        # ── Table-style funnel (replaces Plotly chart) ─────────────────────
+        def _funnel_table_html(rows, total_n):
+            """Render the filter funnel as a readable HTML table."""
+            _css = (
+                "<style>"
+                ".ftbl{width:100%;border-collapse:collapse;font-size:13px;margin-bottom:1rem;}"
+                ".ftbl th{font-size:11px;font-weight:500;padding:6px 10px;"
+                "border-bottom:1px solid #30363d;color:#8b949e;text-align:left;}"
+                ".ftbl td{padding:7px 10px;border-bottom:1px solid #21262d;"
+                "color:#e6edf3;vertical-align:middle;}"
+                ".ftbl tr:last-child td{border-bottom:none;}"
+                ".ftbl tr.total-row td{background:#161b22;font-weight:500;}"
+                ".ftbl tr.signal-row td{background:#0d1117;font-weight:500;}"
+                ".ft-stage{font-size:12px;color:#8b949e;margin-top:2px;}"
+                ".ft-on{display:inline-block;font-size:10px;padding:1px 7px;"
+                "border-radius:4px;background:#1f3d5c;color:#79c0ff;font-weight:500;}"
+                ".ft-off{display:inline-block;font-size:10px;padding:1px 7px;"
+                "border-radius:4px;background:#21262d;color:#8b949e;font-weight:500;}"
+                ".ft-in{color:#8b949e;}"
+                ".ft-rem{color:#3fb950;font-weight:500;}"
+                ".ft-drop0{color:#8b949e;}"
+                ".ft-drop1{color:#d29922;font-weight:500;}"
+                ".ft-drop2{color:#f85149;font-weight:500;}"
+                ".ft-bar-wrap{display:inline-block;width:90px;height:7px;"
+                "background:#21262d;border-radius:4px;vertical-align:middle;margin-right:6px;}"
+                ".ft-bar{height:7px;border-radius:4px;background:#388bfd;}"
+                "</style>"
+            )
+            _hdr = (
+                "<table class='ftbl'>"
+                "<thead><tr>"
+                "<th style='width:32%'>Stage</th>"
+                "<th style='width:9%'>Status</th>"
+                "<th style='width:35%'>In → Dropped → Remaining</th>"
+                "<th style='width:24%'>Survival</th>"
+                "</tr></thead><tbody>"
+            )
+            _body = ""
+            for _stage, _status, _in, _dropped, _rem, _pct, _desc, _row_cls in rows:
+                _badge = f"<span class='ft-on'>ON</span>" if _status == "on" else (
+                         f"<span class='ft-off'>OFF</span>" if _status == "off" else "")
+                _drop_cls = "ft-drop0" if _dropped == 0 else (
+                            "ft-drop2" if _dropped > 20 else "ft-drop1")
+                _drop_str = (f"<span class='{_drop_cls}'>{_dropped} dropped</span>"
+                             if _dropped > 0 else "<span class='ft-drop0'>—</span>")
+                _flow = (f"<span class='ft-in'>{_in}</span>"
+                         f" <span style='color:#8b949e'>→</span> "
+                         f"{_drop_str}"
+                         f" <span style='color:#8b949e'>→</span> "
+                         f"<span class='ft-rem'>{_rem}</span>")
+                _bar_w = max(1, _pct)
+                _bar = (f"<div class='ft-bar-wrap'>"
+                        f"<div class='ft-bar' style='width:{_bar_w}%'></div></div>"
+                        f"<span style='font-size:12px;color:#8b949e'>{_pct}%</span>")
+                _stage_cell = (_stage if not _desc else
+                               f"{_stage}<div class='ft-stage'>{_desc}</div>")
+                _row_style = f" class='{_row_cls}'" if _row_cls else ""
+                _body += (f"<tr{_row_style}>"
+                          f"<td>{_stage_cell}</td>"
+                          f"<td>{_badge}</td>"
+                          f"<td>{_flow}</td>"
+                          f"<td>{_bar}</td>"
+                          f"</tr>")
+            return _css + _hdr + _body + "</tbody></table>"
+
+        # Build rows: (stage, status, in_n, dropped, remaining, pct, desc, row_css_class)
+        def _pct(n): return round(n / total * 100) if total > 0 else 0
+        _ft_rows = []
+        _ft_rows.append(("Watchlist", "", total, 0, total, 100, "Starting pool", "total-row"))
+        _ft_rows.append(("\u26a1 Bulk pre-filter",
+                         "on" if sc.get("use_pre_filter", True) else "off",
+                         total, pre_out_n, after_pre, _pct(after_pre),
+                         "Volume \xb7 price vs 24h low", ""))
+        _blacklisted = after_pre - checked
+        _ft_rows.append(("Cooldown / blacklist", "on",
+                         after_pre, _blacklisted, checked, _pct(checked),
+                         "SL cooldown \xb7 open trades", ""))
+        _ft_rows.append((pdz15m_lbl,
+                         "on" if sc.get("use_pdz_15m", True) else "off",
+                         checked, fc.get("f2_pdz15m", 0), after_f2, _pct(after_f2),
+                         "Premium \xb7 Equil \xb7 BandA \xb7 BandB", ""))
+        _ft_rows.append((pdz5m_lbl,
+                         "on" if sc.get("use_pdz_5m", True) else "off",
+                         after_f2, fc.get("f3_pdz5m", 0), after_f3, _pct(after_f3),
+                         "Same logic on 5m candles", ""))
+        _ft_rows.append((f4_lbl,
+                         "on" if sc.get("use_rsi_5m", True) else "off",
+                         after_f3, fc.get("f4_rsi5m", 0), after_f4, _pct(after_f4),
+                         "5m RSI floor", ""))
+        _ft_rows.append((f5_lbl,
+                         "on" if sc.get("use_rsi_1h", True) else "off",
+                         after_f4, fc.get("f5_rsi1h", 0), after_f5, _pct(after_f5),
+                         "1h RSI range", ""))
+        _ft_rows.append((ema_lbl,
+                         "on" if ema_parts else "off",
+                         after_f5, fc.get("f6_ema", 0), after_f6, _pct(after_f6),
+                         "Price above EMA", ""))
+        # F7 MACD — per enabled timeframe
+        _ft_prev = after_f6
+        for _tf, _key, _dkey, _aftn in [
+            ("3m",  "use_macd_3m",  "f7_macd_3m",  after_f7_macd_3m),
+            ("5m",  "use_macd_5m",  "f7_macd_5m",  after_f7_macd_5m),
+            ("15m", "use_macd_15m", "f7_macd_15m", after_f7_macd_15m),
         ]:
             if sc.get(_key, True):
-                funnel_data.append((f"F7 — MACD \U0001f7e2\u2191 {_tf}", _after))
-                _prev_macd = _after
-            # If disabled keep running value the same (no row added, count unchanged)
-        # F8 SAR — add a row per enabled timeframe
-        _prev_sar = _prev_macd
-        for _tf, _key, _after in [
-            ("3m",  "use_sar_3m",  after_f8_sar_3m),
-            ("5m",  "use_sar_5m",  after_f8_sar_5m),
-            ("15m", "use_sar_15m", after_f8_sar_15m),
+                _ft_rows.append((f"F7 \u2014 MACD {_tf}", "on",
+                                 _ft_prev, fc.get(_dkey, 0), _aftn, _pct(_aftn),
+                                 "MACD histogram bullish crossover", ""))
+                _ft_prev = _aftn
+        # F8 SAR — per enabled timeframe
+        for _tf, _key, _dkey, _aftn in [
+            ("3m",  "use_sar_3m",  "f8_sar_3m",  after_f8_sar_3m),
+            ("5m",  "use_sar_5m",  "f8_sar_5m",  after_f8_sar_5m),
+            ("15m", "use_sar_15m", "f8_sar_15m", after_f8_sar_15m),
         ]:
             if sc.get(_key, True):
-                funnel_data.append((f"F8 — SAR {_tf}", _after))
-                _prev_sar = _after
+                _ft_rows.append((f"F8 \u2014 SAR {_tf}", "on",
+                                 _ft_prev, fc.get(_dkey, 0), _aftn, _pct(_aftn),
+                                 "Price above Parabolic SAR", ""))
+                _ft_prev = _aftn
+        _ft_rows.append((vol_lbl,
+                         "on" if sc.get("use_vol_spike") else "off",
+                         after_f8_sar_15m, fc.get("f9_vol", 0), after_f9, _pct(after_f9),
+                         "Volume spike check", ""))
+        _ft_rows.append((ema_cross_lbl,
+                         "on" if sc.get("use_ema_cross_15m", True) else "off",
+                         after_f9, fc.get("f10_ema_cross", 0), after_f10, _pct(after_f10),
+                         "Fast EMA above slow EMA 15m", ""))
+        _ft_rows.append(("\u26a0\ufe0f Empty candle drop", "on",
+                         after_f10, fc.get("f_empty_data", 0), after_empty, _pct(after_empty),
+                         "Missing timeframe data", ""))
+        _ft_rows.append(("\u2705 Signals generated", "", after_empty, 0, after_empty,
+                         _pct(after_empty), "Passed all active filters", "signal-row"))
 
-        funnel_data.append((f"After {vol_lbl}",           after_f9))
-        funnel_data.append((f"After {ema_cross_lbl}",     after_f10))
-        funnel_data.append(("After \u26a0\ufe0f Empty Candle Drop", after_empty))
-
-        # Colour palette — generate enough colours for variable row count
-        _palette = ["#1f6feb","#388bfd","#58a6ff","#79c0ff","#a5d6ff",
-                    "#3fb950","#56d364","#7ee787","#40c8b8","#26a69a",
-                    "#d29922","#e3b341","#f0a500","#f85149","#ff6b6b"]
-        _colours = (_palette * ((len(funnel_data) // len(_palette)) + 1))[:len(funnel_data)]
-
-        fig_funnel = go.Figure(go.Funnel(
-            y=[d[0] for d in funnel_data],
-            x=[d[1] for d in funnel_data],
-            marker=dict(color=_colours),
-            textinfo="value+percent initial",
-        ))
-        fig_funnel.update_layout(
-            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-            font=dict(color="#e6edf3"), margin=dict(t=10,b=10,l=10,r=10), height=500)
-        st.plotly_chart(fig_funnel, use_container_width=True)
+        st.markdown(_funnel_table_html(_ft_rows, total), unsafe_allow_html=True)
         col_a, col_b, col_c = st.columns(3)
         col_a.metric("Pre-filtered out ⚡", pre_out_n, help="Removed cheaply — no candle API calls used")
         col_b.metric("Deep scanned 🔬",     checked,   help="Received full multi-timeframe candle analysis")
@@ -7031,13 +7113,40 @@ if (
             ("🟢 New Signals Fired",           len(_new_sig_s),       _coin_str(_new_sig_s)),
         ]
 
+        # Build dropped counts per stage for the coin-level table
+        _stage_drop_counts = {
+            "⚡ After Bulk Pre-filter":  pre_out_n,
+            "🔬 Entered Deep Scan":     _blacklisted,
+            f"After {pdz15m_lbl}":      fc.get("f2_pdz15m", 0),
+            f"After {pdz5m_lbl}":       fc.get("f3_pdz5m",  0),
+            f"After {f4_lbl}":          fc.get("f4_rsi5m",  0),
+            f"After {f5_lbl}":          fc.get("f5_rsi1h",  0),
+            f"After {ema_lbl}":         fc.get("f6_ema",    0),
+        }
+        for _tf2, _key2, _dk2 in [("3m","use_macd_3m","f7_macd_3m"),
+                                   ("5m","use_macd_5m","f7_macd_5m"),
+                                   ("15m","use_macd_15m","f7_macd_15m")]:
+            if sc.get(_key2, True):
+                _stage_drop_counts[f"F7 — MACD 🟢↑ {_tf2}"] = fc.get(_dk2, 0)
+        for _tf2, _key2, _dk2 in [("3m","use_sar_3m","f8_sar_3m"),
+                                   ("5m","use_sar_5m","f8_sar_5m"),
+                                   ("15m","use_sar_15m","f8_sar_15m")]:
+            if sc.get(_key2, True):
+                _stage_drop_counts[f"F8 — SAR {_tf2}"] = fc.get(_dk2, 0)
+        _stage_drop_counts[f"After {vol_lbl}"]       = fc.get("f9_vol", 0)
+        _stage_drop_counts[f"After {ema_cross_lbl}"] = fc.get("f10_ema_cross", 0)
+
         st.dataframe(
-            [{"Filter Stage": r[0], "Count": r[1], "Qualified Coins": r[2]} for r in stage_rows],
+            [{"Filter Stage": r[0],
+              "Remaining": r[1],
+              "Dropped": _stage_drop_counts.get(r[0], "—"),
+              "Qualified Coins": r[2]} for r in stage_rows],
             use_container_width=True,
             hide_index=True,
             column_config={
                 "Filter Stage":    st.column_config.TextColumn(width="medium"),
-                "Count":           st.column_config.NumberColumn(width="small"),
+                "Remaining":       st.column_config.NumberColumn(width="small"),
+                "Dropped":         st.column_config.NumberColumn(width="small"),
                 "Qualified Coins": st.column_config.TextColumn(width="large"),
             }
         )
