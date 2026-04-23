@@ -5203,25 +5203,127 @@ m9.metric("⏳ Queued",     queue_count, help=f"Signals detected while the {_max
 if getattr(_b, "_bsc_last_error", ""):
     st.warning(f"⚠️ {_b._bsc_last_error}")
 
-# ── Active filter badges ───────────────────────────────────────────────────────
-badges = []
-if _snap_cfg.get("use_pdz_15m", True): badges.append(f"🎯 F2 — PDZ 15m")
-if _snap_cfg.get("use_pdz_5m",  True): badges.append(f"🎯 F3 — PDZ 5m")
-if _snap_cfg.get("use_rsi_5m",  True): badges.append(f"📈 F4 — 5m RSI ≥{_snap_cfg.get('rsi_5m_min',30)}")
-if _snap_cfg.get("use_rsi_1h",  True): badges.append(f"📈 F5 — 1h RSI {_snap_cfg.get('rsi_1h_min',30)}–{_snap_cfg.get('rsi_1h_max',95)}")
-if _snap_cfg.get("use_ema_3m"):    badges.append(f"📉 F6 — EMA{_snap_cfg.get('ema_period_3m',12)} 3m")
-if _snap_cfg.get("use_ema_5m"):    badges.append(f"📉 F6 — EMA{_snap_cfg.get('ema_period_5m',12)} 5m")
-if _snap_cfg.get("use_ema_15m"):   badges.append(f"📉 F6 — EMA{_snap_cfg.get('ema_period_15m',12)} 15m")
-_macd_tfs = [tf for tf, k in [("3m","use_macd_3m"),("5m","use_macd_5m"),("15m","use_macd_15m")] if _snap_cfg.get(k, True)]
-if _macd_tfs: badges.append(f"📊 F7 — MACD 🟢↑ {' · '.join(_macd_tfs)}")
-_sar_tfs  = [tf for tf, k in [("3m","use_sar_3m"), ("5m","use_sar_5m"), ("15m","use_sar_15m")] if _snap_cfg.get(k, True)]
-if _sar_tfs:  badges.append(f"🪂 F8 — SAR {' · '.join(_sar_tfs)}")
-if _snap_cfg.get("use_vol_spike"): badges.append(
-    f"📦 F9 — Vol ≥{_snap_cfg.get('vol_spike_mult',2.0)}× / {_snap_cfg.get('vol_spike_lookback',20)} 15m")
-if _snap_cfg.get("use_ema_cross_15m", True):
-    badges.append(f"📉 F10 — EMA{_snap_cfg.get('ema_cross_fast_15m',12)}>EMA{_snap_cfg.get('ema_cross_slow_15m',21)} 15m")
-st.markdown("**Active Filters:**")
-st.caption("  |  ".join(badges) if badges else "No advanced filters enabled")
+# ── Active config + filter panel ───────────────────────────────────────────────
+def _cfg_panel(cfg: dict) -> str:
+    """Render a full configuration + active-filter summary as HTML."""
+    _c = cfg  # shorthand
+
+    # ── helpers ────────────────────────────────────────────────────────────────
+    def _pill(text, active=True):
+        bg  = "#1f3d5c" if active else "#21262d"
+        col = "#79c0ff" if active else "#8b949e"
+        return (f"<span style='display:inline-block;font-size:11px;"
+                f"padding:2px 9px;border-radius:12px;margin:2px 3px 2px 0;"
+                f"background:{bg};color:{col};font-weight:500'>{text}</span>")
+
+    def _pill_off(text):
+        return _pill(text, active=False)
+
+    def _kv_cell(label, value, highlight=False):
+        vc = "#79c0ff" if highlight else "#e6edf3"
+        return (f"<td style='padding:6px 14px 6px 0;vertical-align:top;white-space:nowrap;'>"
+                f"<span style='font-size:11px;color:#8b949e'>{label}</span><br>"
+                f"<span style='font-size:13px;font-weight:500;color:{vc}'>{value}</span></td>")
+
+    def _section(title):
+        return (f"<tr><td colspan='20' style='padding:10px 0 4px 0;"
+                f"font-size:11px;font-weight:500;color:#8b949e;"
+                f"border-top:1px solid #30363d;letter-spacing:0.05em'>"
+                f"{title}</td></tr>")
+
+    # ── collect values ─────────────────────────────────────────────────────────
+    margin   = str(_c.get("trade_margin_mode", "isolated")).capitalize()
+    lev      = int(_c.get("trade_leverage", 10))
+    usdt     = float(_c.get("trade_usdt_amount", 5.0))
+    tp_pct   = float(_c.get("tp_pct", 1.2))
+    sl_pct   = float(_c.get("sl_pct", 3.0))
+    max_open = int(_c.get("max_open_trades", 15))
+    max_sup  = int(_c.get("max_super_trades", 1))
+    demo     = bool(_c.get("demo_mode", True))
+    loop_m   = int(_c.get("loop_minutes", 4))
+    cooldown = int(_c.get("cooldown_minutes", 2))
+    sl_cool  = float(_c.get("sl_cooldown_hours", 6))
+
+    dca_en   = bool(_c.get("dca_enabled", True))
+    dca_max  = int(_c.get("trade_max_dca", 4))
+    iso_dist = float(_c.get("dca_iso_distance_pct", 70.0))
+    cross_d  = float(_c.get("dca_cross_drop_pct", 7.0))
+    pdz_buf  = tp_pct   # buffer = tp_pct (Change #1)
+
+    # liq distance for isolated
+    liq_pct  = round(1.0 / lev * 100, 1)
+    dca_trig = round((1.0 / lev) * (iso_dist / 100.0) * 100, 2)
+
+    # ── filter badge lists ─────────────────────────────────────────────────────
+    filter_pills = []
+    def _fpill(text, on): filter_pills.append(_pill(text, on))
+    _fpill(f"F2 PDZ 15m",                       _c.get("use_pdz_15m", True))
+    _fpill(f"F3 PDZ 5m",                        _c.get("use_pdz_5m",  True))
+    _fpill(f"F4 RSI5m ≥{_c.get('rsi_5m_min',30)}",  _c.get("use_rsi_5m",  True))
+    _fpill(f"F5 RSI1h {_c.get('rsi_1h_min',30)}–{_c.get('rsi_1h_max',95)}", _c.get("use_rsi_1h", True))
+    _fpill(f"F6 EMA{_c.get('ema_period_3m',12)} 3m",  _c.get("use_ema_3m"))
+    _fpill(f"F6 EMA{_c.get('ema_period_5m',12)} 5m",  _c.get("use_ema_5m"))
+    _fpill(f"F6 EMA{_c.get('ema_period_15m',12)} 15m", _c.get("use_ema_15m"))
+    _macd_on = [tf for tf, k in [("3m","use_macd_3m"),("5m","use_macd_5m"),("15m","use_macd_15m")] if _c.get(k, True)]
+    _fpill(f"F7 MACD {' · '.join(_macd_on) if _macd_on else 'off'}", bool(_macd_on))
+    _sar_on  = [tf for tf, k in [("3m","use_sar_3m"),("5m","use_sar_5m"),("15m","use_sar_15m")] if _c.get(k, True)]
+    _fpill(f"F8 SAR {' · '.join(_sar_on) if _sar_on else 'off'}", bool(_sar_on))
+    _fpill(f"F9 Vol ≥{_c.get('vol_spike_mult',2.0)}× / {_c.get('vol_spike_lookback',20)}",
+           _c.get("use_vol_spike"))
+    _fpill(f"F10 EMA{_c.get('ema_cross_fast_15m',12)}>EMA{_c.get('ema_cross_slow_15m',21)} 15m",
+           _c.get("use_ema_cross_15m", True))
+
+    # ── build HTML ─────────────────────────────────────────────────────────────
+    _mode_col = "#f85149" if demo else "#3fb950"
+    _mode_lbl = "DEMO" if demo else "LIVE"
+    _html = (
+        f"<div style='background:#161b22;border:1px solid #30363d;"
+        f"border-radius:8px;padding:14px 18px;margin-bottom:12px;'>"
+        f"<div style='display:flex;align-items:center;gap:10px;margin-bottom:10px;'>"
+        f"<span style='font-size:13px;font-weight:500;color:#e6edf3'>Scanner Config</span>"
+        f"<span style='font-size:11px;font-weight:500;padding:2px 8px;"
+        f"border-radius:10px;background:{_mode_col}22;color:{_mode_col}'>{_mode_lbl}</span>"
+        f"</div>"
+        f"<table style='border-collapse:collapse;width:100%'><tbody>"
+    )
+
+    # Row 1 — Trade setup
+    _html += _section("TRADE SETUP")
+    _html += "<tr>"
+    _html += _kv_cell("Margin",        margin)
+    _html += _kv_cell("Leverage",      f"{lev}×",        highlight=True)
+    _html += _kv_cell("Trade Size",    f"${usdt} USDT")
+    _html += _kv_cell("TP",            f"{tp_pct}%",     highlight=True)
+    _html += _kv_cell("SL (cross)",    f"{sl_pct}%")
+    _html += _kv_cell("Liq distance",  f"{liq_pct}%")
+    _html += _kv_cell("Max open",      str(max_open))
+    _html += _kv_cell("Max super",     str(max_sup))
+    _html += _kv_cell("Loop",          f"{loop_m} min")
+    _html += _kv_cell("Cooldown",      f"{cooldown} min")
+    _html += _kv_cell("SL cooldown",   f"{sl_cool}h")
+    _html += "</tr>"
+
+    # Row 2 — DCA setup
+    _html += _section("DCA SETUP")
+    _html += "<tr>"
+    _dca_col = "#3fb950" if dca_en else "#8b949e"
+    _html += _kv_cell("DCA enabled",   f"<span style='color:{_dca_col}'>"
+                                        f"{'YES' if dca_en else 'NO'}</span>")
+    _html += _kv_cell("Max DCAs",      str(dca_max),     highlight=True)
+    _html += _kv_cell("Trigger (iso)", f"{iso_dist}%",   highlight=True)
+    _html += _kv_cell("Trigger drop",  f"{dca_trig}% below avg entry")
+    _html += _kv_cell("Trigger (cross)", f"{cross_d}% drop")
+    _html += _kv_cell("PDZ buffer",    f"{pdz_buf}% (= TP%)")
+    _html += "</tr>"
+
+    # Row 3 — Active filters
+    _html += _section("ACTIVE FILTERS")
+    _html += f"<tr><td colspan='20' style='padding:4px 0 2px 0'>{''.join(filter_pills)}</td></tr>"
+
+    _html += "</tbody></table></div>"
+    return _html
+
+st.markdown(_cfg_panel(_snap_cfg), unsafe_allow_html=True)
 
 # ── Shared PnL helper ──────────────────────────────────────────────────────
 # Single source of truth for per-signal PnL ($). Used by:
