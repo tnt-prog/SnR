@@ -7065,17 +7065,19 @@ if (
         _super_demoted_s = set(fc.get("super_cap_demoted_syms", []))
         _returned_syms = _new_sig_s | _blk_active_s | _blk_cool_s | _blk_sl_cool_s
 
-        # Fixed opening rows
+        # stage_rows: (stage_name, in_count, remaining_count, coin_str)
+        # dropped = in_count - remaining_count (computed at render time)
         stage_rows = [
-            ("⚡ After Bulk Pre-filter",  len(_pre),      _coin_str(_pre)),
-            ("🔬 Entered Deep Scan",      len(_chk),      _coin_str(_chk)),
-            (f"After {pdz15m_lbl}",       len(_after_f2), _coin_str(_after_f2)),
-            (f"After {pdz5m_lbl}",        len(_after_f3), _coin_str(_after_f3)),
-            (f"After {f4_lbl}",           len(_after_f4), _coin_str(_after_f4)),
-            (f"After {f5_lbl}",           len(_after_f5), _coin_str(_after_f5)),
-            (f"After {ema_lbl}",          len(_after_f6), _coin_str(_after_f6)),
+            ("⚡ After Bulk Pre-filter",  total,       len(_pre),      _coin_str(_pre)),
+            ("🔬 Entered Deep Scan",      len(_pre),   len(_chk),      _coin_str(_chk)),
+            (f"After {pdz15m_lbl}",       len(_chk),   len(_after_f2), _coin_str(_after_f2)),
+            (f"After {pdz5m_lbl}",        len(_after_f2), len(_after_f3), _coin_str(_after_f3)),
+            (f"After {f4_lbl}",           len(_after_f3), len(_after_f4), _coin_str(_after_f4)),
+            (f"After {f5_lbl}",           len(_after_f4), len(_after_f5), _coin_str(_after_f5)),
+            (f"After {ema_lbl}",          len(_after_f5), len(_after_f6), _coin_str(_after_f6)),
         ]
         # F7 MACD — one row per enabled timeframe
+        _sr_prev = _after_f6
         for _tf, _key, _after_set in [
             ("3m",  "use_macd_3m",  _after_f7_macd_3m),
             ("5m",  "use_macd_5m",  _after_f7_macd_5m),
@@ -7084,9 +7086,10 @@ if (
             if sc.get(_key, True):
                 stage_rows.append((
                     f"F7 — MACD \U0001f7e2\u2191 {_tf}",
-                    len(_after_set),
+                    len(_sr_prev), len(_after_set),
                     _coin_str(_after_set),
                 ))
+                _sr_prev = _after_set
         # F8 SAR — one row per enabled timeframe
         for _tf, _key, _after_set in [
             ("3m",  "use_sar_3m",  _after_f8_sar_3m),
@@ -7096,57 +7099,37 @@ if (
             if sc.get(_key, True):
                 stage_rows.append((
                     f"F8 — SAR {_tf}",
-                    len(_after_set),
+                    len(_sr_prev), len(_after_set),
                     _coin_str(_after_set),
                 ))
+                _sr_prev = _after_set
         # Fixed closing rows
         stage_rows += [
-            (f"After {vol_lbl}",               len(_after_f9),        _coin_str(_after_f9)),
-            (f"After {ema_cross_lbl}",         len(_after_f10),       _coin_str(_after_f10)),
-            ("⚠️ Dropped — Empty Candle Data", len(_fempty),          ", ".join(sorted(_fempty)) if _fempty else "—"),
-            ("💥 Dropped — Process Error",     _process_err_count,    "See API Error Log below ↓"),
-            ("✅ Returned Signal",             len(_returned_syms),   _coin_str(_returned_syms)),
-            ("⭐ Super cap demoted → F3-F10",  len(_super_demoted_s), _coin_str(_super_demoted_s)),
-            ("🔵 Blocked — Open trade exists", len(_blk_active_s),    _coin_str(_blk_active_s)),
-            ("🟡 Blocked — TP Cooldown",       len(_blk_cool_s),      _coin_str(_blk_cool_s)),
-            ("🔴 Blocked — SL Cooldown (24h)", len(_blk_sl_cool_s),   _coin_str(_blk_sl_cool_s)),
-            ("🟢 New Signals Fired",           len(_new_sig_s),       _coin_str(_new_sig_s)),
+            (f"After {vol_lbl}",               len(_sr_prev),         len(_after_f9),   _coin_str(_after_f9)),
+            (f"After {ema_cross_lbl}",         len(_after_f9),        len(_after_f10),  _coin_str(_after_f10)),
+            ("⚠️ Dropped — Empty Candle Data", len(_after_f10),       len(_fempty),     ", ".join(sorted(_fempty)) if _fempty else "—"),
+            ("💥 Dropped — Process Error",     "—", _process_err_count, "See API Error Log below ↓"),
+            ("✅ Returned Signal",             "—", len(_returned_syms),   _coin_str(_returned_syms)),
+            ("⭐ Super cap demoted → F3-F10",  "—", len(_super_demoted_s), _coin_str(_super_demoted_s)),
+            ("🔵 Blocked — Open trade exists", "—", len(_blk_active_s),    _coin_str(_blk_active_s)),
+            ("🟡 Blocked — TP Cooldown",       "—", len(_blk_cool_s),      _coin_str(_blk_cool_s)),
+            ("🔴 Blocked — SL Cooldown (24h)", "—", len(_blk_sl_cool_s),   _coin_str(_blk_sl_cool_s)),
+            ("🟢 New Signals Fired",           "—", len(_new_sig_s),       _coin_str(_new_sig_s)),
         ]
 
-        # Build dropped counts per stage for the coin-level table
-        _stage_drop_counts = {
-            "⚡ After Bulk Pre-filter":  pre_out_n,
-            "🔬 Entered Deep Scan":     _blacklisted,
-            f"After {pdz15m_lbl}":      fc.get("f2_pdz15m", 0),
-            f"After {pdz5m_lbl}":       fc.get("f3_pdz5m",  0),
-            f"After {f4_lbl}":          fc.get("f4_rsi5m",  0),
-            f"After {f5_lbl}":          fc.get("f5_rsi1h",  0),
-            f"After {ema_lbl}":         fc.get("f6_ema",    0),
-        }
-        for _tf2, _key2, _dk2 in [("3m","use_macd_3m","f7_macd_3m"),
-                                   ("5m","use_macd_5m","f7_macd_5m"),
-                                   ("15m","use_macd_15m","f7_macd_15m")]:
-            if sc.get(_key2, True):
-                _stage_drop_counts[f"F7 — MACD 🟢↑ {_tf2}"] = fc.get(_dk2, 0)
-        for _tf2, _key2, _dk2 in [("3m","use_sar_3m","f8_sar_3m"),
-                                   ("5m","use_sar_5m","f8_sar_5m"),
-                                   ("15m","use_sar_15m","f8_sar_15m")]:
-            if sc.get(_key2, True):
-                _stage_drop_counts[f"F8 — SAR {_tf2}"] = fc.get(_dk2, 0)
-        _stage_drop_counts[f"After {vol_lbl}"]       = fc.get("f9_vol", 0)
-        _stage_drop_counts[f"After {ema_cross_lbl}"] = fc.get("f10_ema_cross", 0)
-
         st.dataframe(
-            [{"Filter Stage": r[0],
-              "Remaining": r[1],
-              "Dropped": _stage_drop_counts.get(r[0], "—"),
-              "Qualified Coins": r[2]} for r in stage_rows],
+            [{"Filter Stage":    r[0],
+              "In":              r[1],
+              "Dropped":         (r[1] - r[2]) if isinstance(r[1], int) and isinstance(r[2], int) else "—",
+              "Remaining":       r[2],
+              "Qualified Coins": r[3]} for r in stage_rows],
             use_container_width=True,
             hide_index=True,
             column_config={
                 "Filter Stage":    st.column_config.TextColumn(width="medium"),
-                "Remaining":       st.column_config.NumberColumn(width="small"),
+                "In":              st.column_config.NumberColumn(width="small"),
                 "Dropped":         st.column_config.NumberColumn(width="small"),
+                "Remaining":       st.column_config.NumberColumn(width="small"),
                 "Qualified Coins": st.column_config.TextColumn(width="large"),
             }
         )
