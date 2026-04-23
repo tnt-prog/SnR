@@ -129,6 +129,8 @@ DEFAULT_CONFIG: dict = {
     "vol_spike_lookback": 20,
     "use_pdz_5m":            True,   # F3 — PDZ (5m)
     "use_pdz_15m":           True,   # F2 — PDZ (15m)
+    "use_atr_filter":        False,  # F5b — ATR(14) 15m TP-reachability filter
+    "atr_mode":              "Normal",  # "Strict" (≤1.5×) | "Normal" (≤2.0×) | "Relaxed" (≤3.0×)
     "use_ema_cross_15m":     True,   # F10 — 15m EMA crossover (fast > slow)
     "ema_cross_fast_15m":    12,
     "ema_cross_slow_15m":    21,
@@ -1624,6 +1626,29 @@ def _pround(x, sig=6):
     except Exception:
         return x
 
+def calc_atr(candles: list, period: int = 14) -> list:
+    """
+    Average True Range (ATR) using Wilder's smoothing.
+    Returns a list of ATR values (same length as candles minus the warm-up).
+    Each candle must have 'high', 'low', 'close' keys.
+    """
+    if len(candles) < period + 1:
+        return []
+    trs = []
+    for i in range(1, len(candles)):
+        h = candles[i]["high"]
+        l = candles[i]["low"]
+        pc = candles[i - 1]["close"]
+        trs.append(max(h - l, abs(h - pc), abs(l - pc)))
+    if len(trs) < period:
+        return []
+    # Seed with simple average of first `period` TRs
+    atr = [sum(trs[:period]) / period]
+    for tr in trs[period:]:
+        atr.append((atr[-1] * (period - 1) + tr) / period)
+    return atr
+
+
 def calc_rsi_series(closes, period=14):
     if len(closes) < period + 2: return []
     deltas = [closes[i]-closes[i-1] for i in range(1, len(closes))]
@@ -1818,6 +1843,7 @@ def _reset_filter_counts():
         "f3_pdz5m":         0,   # F3 — PDZ 5m
         "f4_rsi5m":         0,   # F4 — 5m RSI
         "f5_rsi1h":         0,   # F5 — 1h RSI
+        "f5b_atr":          0,   # F5b — ATR(14) 15m TP-reachability
         "f6_ema_3m":        0,   # F6 — EMA 3m
         "f6_ema_5m":        0,   # F6 — EMA 5m
         "f6_ema_15m":       0,   # F6 — EMA 15m
@@ -1845,6 +1871,7 @@ def _reset_filter_counts():
         "f3_elim_syms":           [],
         "f4_elim_syms":           [],
         "f5_elim_syms":           [],
+        "f5b_elim_syms":          [],
         "f6_ema_3m_elim_syms":    [],
         "f6_ema_5m_elim_syms":    [],
         "f6_ema_15m_elim_syms":   [],
@@ -2090,6 +2117,26 @@ def process(sym, cfg: dict, super_counter: dict = None, super_lock=None):
             _record_elim("f5_rsi1h", "f5_elim_syms", sym)
             return None
 
+        # ── F5b: ATR(14) 15m — TP reachability filter ───────────────────────
+        # ratio = (TP distance %) / (ATR %)
+        # Strict: ratio ≤ 1.5  → TP within 1.5× ATR (very reachable)
+        # Normal: ratio ≤ 2.0  → TP within 2× ATR
+        # Relaxed: ratio ≤ 3.0 → TP within 3× ATR
+        atr_15m_val = None
+        atr_ratio_val = None
+        if cfg.get("use_atr_filter", False):
+            _atr_series = calc_atr(m15, 14)
+            if _atr_series and entry > 0:
+                atr_15m_val   = _atr_series[-1]
+                _tp_dist_pct  = float(cfg.get("tp_pct", 1.5))  # TP% from config
+                _atr_pct      = (atr_15m_val / entry) * 100.0
+                atr_ratio_val = (_tp_dist_pct / _atr_pct) if _atr_pct > 0 else None
+                _atr_thresh   = {"Strict": 1.5, "Normal": 2.0, "Relaxed": 3.0}.get(
+                                    cfg.get("atr_mode", "Normal"), 2.0)
+                if atr_ratio_val is not None and atr_ratio_val > _atr_thresh:
+                    _record_elim("f5b_atr", "f5b_elim_syms", sym)
+                    return None
+
         # ── F6: EMA (per-timeframe tracking) ────────────────────────────────
         ema_3m_val = ema_5m_val = ema_15m_val = None
         if cfg.get("use_ema_3m"):
@@ -2231,6 +2278,8 @@ def process(sym, cfg: dict, super_counter: dict = None, super_lock=None):
             "pdz_zone_1h":  pdz_zone_1h  if cfg.get("use_pdz_15m", True) else "—",
             "ema_cross_12_15m": ema_cross_12_15m_val if cfg.get("use_ema_cross_15m", True) else "—",
             "ema_cross_21_15m": ema_cross_21_15m_val if cfg.get("use_ema_cross_15m", True) else "—",
+            "atr_15m":          round(atr_15m_val, 8)  if atr_15m_val   is not None else "—",
+            "atr_ratio":        round(atr_ratio_val, 3) if atr_ratio_val is not None else "—",
         }
 
         return {
@@ -4572,6 +4621,37 @@ with st.sidebar:
                                      disabled=not new_use_rsi_1h)
     st.divider()
 
+    # ── F5b: ATR(14) 15m TP-Reachability Filter ────────────────────────────────
+    st.markdown("**📐 F5b — ATR Filter** (15m TP reachability)",
+                help=(
+                    "F5b — ATR(14) TP-Reachability Filter\n\n"
+                    "Rejects coins whose TP target is too far relative to the current "
+                    "Average True Range (ATR) on the 15m timeframe.\n\n"
+                    "Formula: ratio = TP% / ATR%\n\n"
+                    "  • Strict  (≤1.5×) — TP must be within 1.5× the ATR. "
+                    "Only coins where the market regularly moves at least TP/1.5 per candle pass.\n"
+                    "  • Normal  (≤2.0×) — TP within 2× ATR. Balanced setting.\n"
+                    "  • Relaxed (≤3.0×) — TP within 3× ATR. Accepts coins with lower volatility.\n\n"
+                    "A higher ratio means TP is harder to reach given current market movement. "
+                    "ATR is computed on 15m candles (already fetched) — no extra API call."
+                ))
+    new_use_atr_filter = st.checkbox(
+        "Enable F5b — ATR Filter",
+        value=bool(_snap_cfg.get("use_atr_filter", False)), key="cfg_use_atr_filter")
+    new_atr_mode = st.selectbox(
+        "ATR Mode",
+        options=["Strict", "Normal", "Relaxed"],
+        index=["Strict", "Normal", "Relaxed"].index(_snap_cfg.get("atr_mode", "Normal")),
+        key="cfg_atr_mode",
+        disabled=not new_use_atr_filter,
+        help="Strict=ratio≤1.5  ·  Normal=ratio≤2.0  ·  Relaxed=ratio≤3.0")
+    _atr_thresh_disp = {"Strict": "≤1.5×", "Normal": "≤2.0×", "Relaxed": "≤3.0×"}.get(new_atr_mode, "≤2.0×")
+    if new_use_atr_filter:
+        st.caption(f"✅ ATR filter ON — {new_atr_mode} mode: TP%/ATR% {_atr_thresh_disp}")
+    else:
+        st.caption("⚫ ATR filter disabled")
+    st.divider()
+
     # ── F6: EMA Selection ──────────────────────────────────────────────────────
     st.markdown("**📉 F6 — EMA Selection** (price must be above EMA)",
                 help=(
@@ -4952,6 +5032,8 @@ with st.sidebar:
             "use_pre_filter":      bool(new_use_pre_filter),
             "use_rsi_5m":          bool(new_use_rsi_5m),
             "use_rsi_1h":          bool(new_use_rsi_1h),
+            "use_atr_filter":      bool(new_use_atr_filter),
+            "atr_mode":            new_atr_mode,
             # filter parameters
             "rsi_5m_min": int(new_rsi5_min),
             "rsi_1h_min": int(new_rsi1h_min), "rsi_1h_max": int(new_rsi1h_max),
@@ -5265,6 +5347,7 @@ def _cfg_panel(cfg: dict) -> str:
     _fpill(f"F3 PDZ 5m",                        _c.get("use_pdz_5m",  True))
     _fpill(f"F4 RSI5m ≥{_c.get('rsi_5m_min',30)}",  _c.get("use_rsi_5m",  True))
     _fpill(f"F5 RSI1h {_c.get('rsi_1h_min',30)}–{_c.get('rsi_1h_max',95)}", _c.get("use_rsi_1h", True))
+    _fpill(f"F5b ATR {_c.get('atr_mode','Normal')}", _c.get("use_atr_filter", False))
     _fpill(f"F6 EMA{_c.get('ema_period_3m',12)} 3m",  _c.get("use_ema_3m"))
     _fpill(f"F6 EMA{_c.get('ema_period_5m',12)} 5m",  _c.get("use_ema_5m"))
     _fpill(f"F6 EMA{_c.get('ema_period_15m',12)} 15m", _c.get("use_ema_15m"))
@@ -5741,7 +5824,9 @@ def _build_signal_row(s: dict, is_open_table: bool = False,
         f"• PDZ 5m    : {pdz_5m_val}\n"
         f"• PDZ 15m   : {pdz_15m_val}\n"
         f"• EMA12 15m : {_cv(crit.get('ema_cross_12_15m'))}\n"
-        f"• EMA21 15m : {_cv(crit.get('ema_cross_21_15m'))}"
+        f"• EMA21 15m : {_cv(crit.get('ema_cross_21_15m'))}\n"
+        f"• ATR 15m   : {_cv(crit.get('atr_15m'))}\n"
+        f"• ATR ratio : {_cv(crit.get('atr_ratio'))}"
     ) if crit else "—"
 
     max_lev   = s.get("max_lev", get_max_leverage(s.get("symbol", "")))
@@ -5960,12 +6045,49 @@ def _build_signal_row(s: dict, is_open_table: bool = False,
     except Exception:
         trade_history_col = "—"
 
+    # ── Difficulty column (Open Signals only) ────────────────────────────────
+    # Ratio = (remaining TP distance %) / (ATR% at entry time)
+    # Uses atr_ratio stored in criteria at signal open. Difficulty reflects
+    # how far price still needs to travel vs. typical 15m market movement:
+    #   🟢 Easy   — ratio ≤ 1.5  (TP within 1.5× ATR — market moves this far routinely)
+    #   🟡 Medium — ratio ≤ 2.5  (moderate stretch — achievable but needs a push)
+    #   🔴 Hard   — ratio >  2.5 (TP far beyond typical volatility)
+    diff_col = "—"
+    if status == "open":
+        _atr_ratio_s = crit.get("atr_ratio")
+        _entry_d = float(s.get("entry", 0) or 0)
+        _tp_d    = float(s.get("tp",    0) or 0)
+        _latest  = s.get("latest_price")
+        try:
+            # Try to use live ratio (remaining TP% vs stored ATR%)
+            # Fall back to the stored atr_ratio if live price unavailable
+            if _atr_ratio_s not in (None, "—") and _latest is not None and _entry_d > 0:
+                _latest_f  = float(_latest)
+                _rem_tp_pct = ((_tp_d - _latest_f) / _latest_f * 100.0) if _latest_f > 0 else None
+                # Reconstruct ATR% from stored ratio and TP% at entry
+                _tp_pct_orig = ((_tp_d - _entry_d) / _entry_d * 100.0) if _entry_d > 0 else None
+                _ratio_orig  = float(_atr_ratio_s)
+                _atr_pct_orig = (_tp_pct_orig / _ratio_orig) if (_tp_pct_orig and _ratio_orig > 0) else None
+                if _rem_tp_pct is not None and _atr_pct_orig and _atr_pct_orig > 0:
+                    _live_ratio = _rem_tp_pct / _atr_pct_orig
+                    if _live_ratio <= 1.5:   diff_col = "🟢 Easy"
+                    elif _live_ratio <= 2.5: diff_col = "🟡 Medium"
+                    else:                    diff_col = "🔴 Hard"
+            elif _atr_ratio_s not in (None, "—"):
+                _r = float(_atr_ratio_s)
+                if _r <= 1.5:   diff_col = "🟢 Easy"
+                elif _r <= 2.5: diff_col = "🟡 Medium"
+                else:           diff_col = "🔴 Hard"
+        except (TypeError, ValueError):
+            diff_col = "—"
+
     if is_open_table:
-        # Open-Signals-specific column order (27 columns — adds Original Entry
-        # after Signal Entry for DCA trade visibility).
+        # Open-Signals-specific column order — adds Difficulty as first column
+        # and Original Entry after Signal Entry for DCA trade visibility.
         # TP Hit / SL Hit / DCA SL Hit / Queue Limit tables use the non-Open
         # branch below.
         row: dict = {
+            "Difficulty":      diff_col,
             "Time (GST)":      ts_str,
             "Symbol":          s.get("symbol", ""),
             "Alert":           alert_col,
@@ -6046,6 +6168,16 @@ def _build_signal_row(s: dict, is_open_table: bool = False,
 
 # Shared column_config used by all four tables
 _SIG_COL_CFG = {
+    "Difficulty":     st.column_config.TextColumn(
+                          "🎯 Difficulty", width="small",
+                          help="TP reachability relative to ATR(14) on 15m at entry time.\n\n"
+                               "🟢 Easy   — TP within 1.5× ATR (market moves this far routinely)\n"
+                               "🟡 Medium — TP within 2.5× ATR (achievable with a good push)\n"
+                               "🔴 Hard   — TP beyond 2.5× ATR (needs unusually strong move)\n\n"
+                               "Updates live: ratio is recomputed from remaining TP distance "
+                               "vs. the ATR% measured at entry, so it gets easier as price "
+                               "moves toward TP. Shows '—' when ATR was not computed (ATR "
+                               "filter disabled at entry time)."),
     "Alert":          st.column_config.TextColumn(
                           "🚨 Alert", width="small",
                           help="🔴 DL = price ≥3% below entry  |  🔴 TL = open ≥2 hours"),
@@ -6946,7 +7078,8 @@ if (
         after_f3  = after_f2  - fc.get("f3_pdz5m",  0)
         after_f4  = after_f3  - fc.get("f4_rsi5m",  0)
         after_f5  = after_f4  - fc.get("f5_rsi1h",  0)
-        after_f6_ema_3m  = after_f5         - fc.get("f6_ema_3m",  0)
+        after_f5b = after_f5  - fc.get("f5b_atr",   0)
+        after_f6_ema_3m  = after_f5b        - fc.get("f6_ema_3m",  0)
         after_f6_ema_5m  = after_f6_ema_3m  - fc.get("f6_ema_5m",  0)
         after_f6_ema_15m = after_f6_ema_5m  - fc.get("f6_ema_15m", 0)
         after_f6         = after_f6_ema_15m  # final EMA stage output
@@ -6975,6 +7108,10 @@ if (
         f4_lbl     = f"F4 — 5m RSI \u2265{sc.get('rsi_5m_min',30)}" if sc.get("use_rsi_5m", True) else "F4 — 5m RSI (off)"
         f5_lbl     = (f"F5 — 1h RSI {sc.get('rsi_1h_min',30)}\u2013{sc.get('rsi_1h_max',95)}"
                       if sc.get("use_rsi_1h", True) else "F5 — 1h RSI (off)")
+        _atr_mode_lbl = sc.get("atr_mode", "Normal")
+        _atr_thresh_lbl = {"Strict": "≤1.5×", "Normal": "≤2.0×", "Relaxed": "≤3.0×"}.get(_atr_mode_lbl, "≤2.0×")
+        f5b_lbl    = (f"F5b — ATR(14) 15m {_atr_mode_lbl} {_atr_thresh_lbl}"
+                      if sc.get("use_atr_filter", False) else "F5b — ATR (off)")
         ema_parts = []
         if sc.get("use_ema_3m"):  ema_parts.append(f"3m EMA{sc.get('ema_period_3m',12)}")
         if sc.get("use_ema_5m"):  ema_parts.append(f"5m EMA{sc.get('ema_period_5m',12)}")
@@ -7078,8 +7215,12 @@ if (
                          "on" if sc.get("use_rsi_1h", True) else "off",
                          after_f4, fc.get("f5_rsi1h", 0), after_f5, _pct(after_f5),
                          "1h RSI range", ""))
+        _ft_rows.append((f5b_lbl,
+                         "on" if sc.get("use_atr_filter", False) else "off",
+                         after_f5, fc.get("f5b_atr", 0), after_f5b, _pct(after_f5b),
+                         f"TP%/ATR% ratio {_atr_thresh_lbl}", ""))
         # F6 EMA — per enabled timeframe
-        _ft_prev_ema = after_f5
+        _ft_prev_ema = after_f5b
         for _ema_tf, _ema_key, _ema_pkey, _ema_dkey, _ema_aftn in [
             ("3m",  "use_ema_3m",  "ema_period_3m",  "f6_ema_3m",  after_f6_ema_3m),
             ("5m",  "use_ema_5m",  "ema_period_5m",  "f6_ema_5m",  after_f6_ema_5m),
@@ -7093,7 +7234,7 @@ if (
                 _ft_prev_ema = _ema_aftn
         if not ema_parts:
             _ft_rows.append(("F6 \u2014 EMA (off)", "off",
-                             after_f5, 0, after_f5, _pct(after_f5),
+                             after_f5b, 0, after_f5b, _pct(after_f5b),
                              "All EMA timeframes disabled", ""))
         # F7 MACD — per enabled timeframe
         _ft_prev = after_f6
@@ -7155,6 +7296,7 @@ if (
         _f3e  = set(fc.get("f3_elim_syms",  []))
         _f4e  = set(fc.get("f4_elim_syms",  []))
         _f5e  = set(fc.get("f5_elim_syms",  []))
+        _f5be = set(fc.get("f5b_elim_syms", []))
         _f6e_3m  = set(fc.get("f6_ema_3m_elim_syms",  []))
         _f6e_5m  = set(fc.get("f6_ema_5m_elim_syms",  []))
         _f6e_15m = set(fc.get("f6_ema_15m_elim_syms", []))
@@ -7174,7 +7316,8 @@ if (
         _after_f3        = _after_f2     - _f3e
         _after_f4        = _after_f3     - _f4e
         _after_f5        = _after_f4     - _f5e
-        _after_f6_ema_3m  = _after_f5        - (_f6e_3m  if sc.get("use_ema_3m")  else set())
+        _after_f5b       = _after_f5    - (_f5be if sc.get("use_atr_filter", False) else set())
+        _after_f6_ema_3m  = _after_f5b       - (_f6e_3m  if sc.get("use_ema_3m")  else set())
         _after_f6_ema_5m  = _after_f6_ema_3m - (_f6e_5m  if sc.get("use_ema_5m")  else set())
         _after_f6_ema_15m = _after_f6_ema_5m - (_f6e_15m if sc.get("use_ema_15m") else set())
         _after_f6         = _after_f6_ema_15m
@@ -7208,9 +7351,10 @@ if (
             (f"After {pdz5m_lbl}",        len(_after_f2), len(_after_f3), _coin_str(_after_f3)),
             (f"After {f4_lbl}",           len(_after_f3), len(_after_f4), _coin_str(_after_f4)),
             (f"After {f5_lbl}",           len(_after_f4), len(_after_f5), _coin_str(_after_f5)),
+            (f"After {f5b_lbl}",          len(_after_f5), len(_after_f5b), _coin_str(_after_f5b)),
         ]
         # F6 EMA — one row per enabled timeframe
-        _sr_ema_prev = _after_f5
+        _sr_ema_prev = _after_f5b
         for _ema_tf, _ema_key, _ema_pkey, _ema_after_set in [
             ("3m",  "use_ema_3m",  "ema_period_3m",  _after_f6_ema_3m),
             ("5m",  "use_ema_5m",  "ema_period_5m",  _after_f6_ema_5m),
@@ -7224,7 +7368,7 @@ if (
                 ))
                 _sr_ema_prev = _ema_after_set
         if not ema_parts:
-            stage_rows.append(("F6 — EMA (off)", len(_after_f5), len(_after_f5), _coin_str(_after_f5)))
+            stage_rows.append(("F6 — EMA (off)", len(_after_f5b), len(_after_f5b), _coin_str(_after_f5b)))
         stage_rows += [
         ]
         # F7 MACD — one row per enabled timeframe
@@ -7457,7 +7601,7 @@ def _build_diagnostics_text() -> str:
     _kv("legacy_migration_last_count", getattr(_b, "_bsc_legacy_migration_last_count", "n/a"))
     _kv("legacy_migration_last_ts",    _fmt_ts(getattr(_b, "_bsc_legacy_migration_last_ts", "")))
 
-    # ── Configuration (redacted) ─────────────────────────────────────────────
+    # ── Configuration (redacted) ──────────────────────────────────────────────
     _hdr("CONFIGURATION (API credentials redacted)")
     try:
         _cfg_snap_local = _redact(dict(_snap_cfg))
@@ -7468,10 +7612,10 @@ def _build_diagnostics_text() -> str:
         if isinstance(_v, list):
             _v = f"[{len(_v)} items] " + ", ".join(str(x) for x in _v[:20])
             if len(_cfg_snap_local[_k]) > 20:
-                _v += f" … (+{len(_cfg_snap_local[_k]) - 20} more)"
+                _v += " … (+" + str(len(_cfg_snap_local[_k]) - 20) + " more)"
         _kv(_k, _v)
 
-    # ── Signal bucket counts ────────────────────────────────────────────────
+    # ── Signal bucket counts ────────────────────────────────────────────────────────
     _hdr("SIGNAL COUNTS")
     _kv("open",        len(_open_sigs))
     _kv("tp_hit",      len(_tp_sigs))
@@ -7480,9 +7624,9 @@ def _build_diagnostics_text() -> str:
     _kv("queue_limit", len(_queue_sigs))
     _kv("total",       len(signals))
 
-    # ── Per-signal detail (all buckets) ─────────────────────────────────────
+    # ── Per-signal detail (all buckets) ───────────────────────────────────────────
     def _dump_signal(s: dict):
-        _sub(f"{s.get('symbol','?')}  ·  {_fmt_ts(s.get('timestamp',''))}")
+        _sub(s.get("symbol","?") + "  ·  " + _fmt_ts(s.get("timestamp","")))
         _kv("status",              s.get("status", ""))
         _kv("sector",              s.get("sector", ""))
         _kv("setup",               "Super" if s.get("is_super_setup") else "Normal")
@@ -7516,20 +7660,23 @@ def _build_diagnostics_text() -> str:
         if _fills:
             _push("  dca_fills:")
             for _f in _fills:
+                _idx = _f.get("dca_idx", "?")
+                _px  = str(_f.get("price",    "—"))
+                _us  = str(_f.get("usdt",     "—"))
+                _lv  = str(_f.get("leverage", "—"))
+                _nt  = str(_f.get("notional", "—"))
+                _tp2 = str(_f.get("tp",       "—"))
+                _sl2 = str(_f.get("sl",       "—"))
+                _oi  = str(_f.get("order_id", "") or "—")
+                _ts2 = _fmt_ts(_f.get("ts", ""))
                 _push(
-                    f"    - idx={_f.get('dca_idx', '?')}  "
-                    f"px={_f.get('price', '—')}  "
-                    f"usdt={_f.get('usdt', '—')}  "
-                    f"lev={_f.get('leverage', '—')}  "
-                    f"notional={_f.get('notional', '—')}  "
-                    f"tp={_f.get('tp', '—')}  "
-                    f"sl={_f.get('sl', '—')}  "
-                    f"ts={_fmt_ts(_f.get('ts', ''))}  "
-                    f"order_id={_f.get('order_id', '') or '—'}"
+                    "    - idx=" + str(_idx) + "  px=" + _px + "  usdt=" + _us + "  "
+                    "lev=" + _lv + "  notional=" + _nt + "  "
+                    "tp=" + _tp2 + "  sl=" + _sl2 + "  ts=" + _ts2 + "  order_id=" + _oi
                 )
         else:
             _kv("dca_fills", "(none)")
-        # ── Entry criteria (filters that qualified this signal) ────────────
+        # ── Entry criteria ──────────────────────────────────────────────────────────────────
         _crit = s.get("criteria") or {}
         if _crit:
             _push("  criteria:")
@@ -7551,13 +7698,15 @@ def _build_diagnostics_text() -> str:
                 ("vol_ratio",       "vol_ratio"),
                 ("ema_cross_12_15m","ema_cross_12_15m"),
                 ("ema_cross_21_15m","ema_cross_21_15m"),
+                ("atr_15m",         "atr_15m"),
+                ("atr_ratio",       "atr_ratio"),
             ]
             for _ck, _ck_key in _crit_keys:
                 if _ck_key in _crit:
                     _cv = _crit[_ck_key]
                     if isinstance(_cv, float):
                         _cv = f"{_cv:.4f}"
-                    _push(f"    {_ck:<24} : {_cv}")
+                    _push("    " + f"{_ck:<24}" + " : " + str(_cv))
         else:
             _push("  criteria                         : (none stored)")
 
@@ -7596,7 +7745,7 @@ def _build_diagnostics_text() -> str:
     else:
         _push("  (none)")
 
-    # ── Filter funnel (last scan) ───────────────────────
+    # ── Filter funnel (last scan) ──────────────────────────────────────────────────
     _hdr("FILTER FUNNEL (last scan)")
     try:
         with _filter_lock:
@@ -7608,14 +7757,14 @@ def _build_diagnostics_text() -> str:
                 if _k == "scan_cfg":
                     continue
                 if isinstance(_v, list):
-                    _v = f"[{len(_v)} items] " + ", ".join(str(x) for x in _v[:30])
+                    _v = "[" + str(len(_v)) + " items] " + ", ".join(str(x) for x in _v[:30])
                 _kv(_k, _v)
         else:
             _push("  (no scan has completed yet)")
     except Exception as _fex:
-        _push(f"  <error reading filter counts: {_fex}>")
+        _push("  <error reading filter counts: " + str(_fex) + ">")
 
-    # ── API errors (recent) ─────────────────────────────────
+    # ── API errors (recent) ───────────────────────────────────────────────────────
     _hdr("API ERRORS (recent)")
     try:
         _err_log = list(_b._bsc_log.get("api_errors", []) or []) if hasattr(_b, "_bsc_log") else []
@@ -7623,21 +7772,21 @@ def _build_diagnostics_text() -> str:
             for _e in _err_log[-50:]:
                 if isinstance(_e, dict):
                     _push(
-                        f"  {_fmt_ts(_e.get('ts',''))}  "
-                        f"{_e.get('type','?')}  "
-                        f"{str(_e.get('msg',''))[:200]}"
+                        "  " + _fmt_ts(_e.get("ts","")) + "  "
+                        + str(_e.get("type","?")) + "  "
+                        + str(_e.get("msg",""))[:200]
                     )
                 else:
-                    _push(f"  {str(_e)[:240]}")
+                    _push("  " + str(_e)[:240])
         else:
             _push("  (none)")
     except Exception as _err_ex:
-        _push(f"  <error reading api_errors: {_err_ex}>")
+        _push("  <error reading api_errors: " + str(_err_ex) + ">")
 
     return "\n".join(_lines)
 
 
-# ── Download Diagnostics button ────────────────────────────────────────────────
+# ── Download Diagnostics button ────────────────────────────────────────────────────────────
 try:
     _diag_text = _build_diagnostics_text()
     _diag_fname = "diagnostics_" + dubai_now().strftime("%Y%m%d_%H%M%S") + ".txt"
@@ -7650,4 +7799,4 @@ try:
         help="Full plain-text snapshot of app state: config, signals, DCA fills, filter funnel, API errors.",
     )
 except Exception as _dex:
-    st.warning(f"Diagnostics unavailable: {_dex}")
+    st.warning("Diagnostics unavailable: " + str(_dex))
