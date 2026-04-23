@@ -1858,6 +1858,9 @@ def _reset_filter_counts():
         "super_cap_demoted_syms": [],
         "f_sl_cooldown_syms":     [],
         "blocked_by_sl_cooldown_syms": [],
+        # ── Flush/scan timing (used to keep funnel hidden until a full post-flush scan) ─
+        "flushed_at":        0.0,
+        "scan_completed_at": 0.0,
     }
     with _filter_lock:
         _filter_counts.clear()
@@ -2326,6 +2329,8 @@ def scan(cfg: dict, super_slots_remaining: int = None, skip_symbols: set = None)
             if r and r != "error":
                 results.append(r)
 
+    with _filter_lock:
+        _filter_counts["scan_completed_at"] = time.time()
     return sorted(results, key=lambda x: x["symbol"]), _filter_counts.get("errors", 0)
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -4895,6 +4900,8 @@ with st.sidebar:
         #     is reinitialised to zero-state, keeping the same object reference
         #     that the scanner thread uses — avoids the split-reference bug)
         _reset_filter_counts()
+        with _filter_lock:
+            _filter_counts["flushed_at"] = time.time()
         # 3 — API error log
         with getattr(_b, "_bsc_error_log_lock", threading.Lock()):
             if hasattr(_b, "_bsc_error_log"):
@@ -6813,7 +6820,10 @@ if signals:
 # Deep-copy under lock so background thread can't mutate lists mid-render
 with _filter_lock:
     fc = {k: (list(v) if isinstance(v, list) else v) for k, v in _filter_counts.items()}
-if fc.get("total_watchlist", 0) > 0:
+if (
+    fc.get("total_watchlist", 0) > 0
+    and fc.get("scan_completed_at", 0.0) >= fc.get("flushed_at", 0.0)
+):
     with st.expander("🔬 Last scan filter funnel"):
         total     = fc.get("total_watchlist", 0)
         pre_out_n = fc.get("pre_filtered_out", 0)
