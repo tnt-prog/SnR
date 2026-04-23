@@ -4875,36 +4875,12 @@ with st.sidebar:
 # ─────────────────────────────────────────────────────────────────────────────
 st.title("S&R — Crypto Intelligent Portal")
 
-# ── OKX Account Summary ────────────────────────────────────────────────────────
-_acct_has_creds = bool(
-    _snap_cfg.get("api_key") and _snap_cfg.get("api_secret")
-    and _snap_cfg.get("api_passphrase")
-)
-if _acct_has_creds:
-    try:
-        _bal_resp = _trade_get("/api/v5/account/balance", {"ccy": "USDT"}, _snap_cfg)
-        if _bal_resp.get("code") == "0":
-            _bal_d   = _bal_resp["data"][0]
-            _bal_det = _bal_d.get("details", [{}])[0]
-            _avail   = float(_bal_det.get("availBal", 0) or 0)
-            _tot_eq  = float(_bal_d.get("totalEq",   0) or 0)
-            _invested = _tot_eq - _avail
-            _upl     = float(_bal_det.get("upl",     0) or 0)
-            _upl_sign = "+" if _upl >= 0 else ""
-            _ac1, _ac2, _ac3 = st.columns(3)
-            _ac1.metric("💰 Available",      f"${_avail:,.2f} USDT")
-            _ac2.metric("📊 Invested",       f"${_invested:,.2f} USDT")
-            _ac3.metric("📈 Unrealized PnL", f"${_upl_sign}{_upl:,.2f} USDT")
-    except Exception:
-        pass
-
-# ── Total Realized PnL banner ──────────────────────────────────────────────
-# Prominent all-time total at the top of the page. Sums realized PnL across
-# every closed signal (tp_hit + sl_hit + dca_sl_hit) using the same formula
-# as the 24h summary and the per-row PnL column:
+# ── Total Realized PnL computation ─────────────────────────────────────────────
+# Moved above the account summary box so _total_pnl is available for the
+# Realized PnL metric card. Display banner (st.markdown) remains below.
+# Sums realized PnL across every closed signal (tp_hit + sl_hit + dca_sl_hit):
 #   • DCA trades  → (close / avg_entry − 1) × total_notional
 #   • Non-DCA     → (close / entry     − 1) × (trade_usdt × trade_lev)
-# Green = net gain, red = net loss, grey = no closed trades yet.
 def _pnl_topline(sig: dict, usdt_fb: float, lev_fb: int):
     try:
         _close = float(sig.get("close_price") or 0)
@@ -4956,6 +4932,35 @@ for _s in signals:
         _total_pnl_loss += _v
         _total_sl_ct    += 1
 
+# ── OKX Account Summary ────────────────────────────────────────────────────────
+_acct_has_creds = bool(
+    _snap_cfg.get("api_key") and _snap_cfg.get("api_secret")
+    and _snap_cfg.get("api_passphrase")
+)
+if _acct_has_creds:
+    try:
+        _bal_resp = _trade_get("/api/v5/account/balance", {"ccy": "USDT"}, _snap_cfg)
+        if _bal_resp.get("code") == "0":
+            _bal_d   = _bal_resp["data"][0]
+            _bal_det = _bal_d.get("details", [{}])[0]
+            _avail   = float(_bal_det.get("availBal", 0) or 0)
+            _tot_eq  = float(_bal_d.get("totalEq",   0) or 0)
+            _invested = _tot_eq - _avail
+            _upl     = float(_bal_det.get("upl",     0) or 0)
+            _upl_sign = "+" if _upl >= 0 else ""
+            _ac1, _ac2, _ac3, _ac4 = st.columns(4)
+            _rpnl_sign = "+" if _total_pnl >= 0 else ""
+            _ac1.metric("💰 Available",      f"${_avail:,.2f} USDT")
+            _ac2.metric("📊 Invested",       f"${_invested:,.2f} USDT")
+            _ac3.metric("📈 Unrealized PnL", f"${_upl_sign}{_upl:,.2f} USDT")
+            _ac4.metric("💵 Realized PnL",   f"${_rpnl_sign}{_total_pnl:,.2f} USDT")
+    except Exception:
+        pass
+
+# ── Total Realized PnL banner ──────────────────────────────────────────────
+# _pnl_topline() and accumulation loop moved above the account summary box
+# so _total_pnl is available for the Realized PnL metric card.
+# Display banner only — computation already done above.
 _closed_total = _total_tp_ct + _total_sl_ct + _total_dca_sl_ct
 if _closed_total == 0:
     _total_color = "#9CA3AF"
