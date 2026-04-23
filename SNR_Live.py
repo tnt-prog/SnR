@@ -6217,12 +6217,122 @@ if _inline_trade_on and _inline_has_creds:
 
 st.divider()
 
+# ── OKX Closed Positions history (single fetch, shared by TP + SL tables) ──────
+# Fetched once per render when auto-trading is ON; stored in two session-state
+# keys (_okx_tp_hist / _okx_sl_hist) split by close reason so each table can
+# render independently without a second API call.
+#   type "2" / "4"       → TP / partial-TP  → fulfilled orders table
+#   type "1" / "5" / "3" → SL / liquidated / manual → SL closed table
+_hist_trade_on   = _snap_cfg.get("trade_enabled", False)
+_hist_has_creds  = bool(
+    _snap_cfg.get("api_key") and _snap_cfg.get("api_secret")
+    and _snap_cfg.get("api_passphrase")
+)
+if _hist_trade_on and _hist_has_creds:
+    try:
+        _ph_resp = _trade_get(
+            "/api/v5/account/positions-history",
+            {"instType": "SWAP", "limit": "100"},
+            _snap_cfg,
+        )
+        _ph_ts = dubai_now().strftime("%d %b %Y  %H:%M:%S GST")
+        if _ph_resp.get("code") == "0":
+            _ph_all = _ph_resp.get("data", [])
+            st.session_state["okx_tp_hist"]   = [
+                p for p in _ph_all if p.get("type") in ("2", "4")
+            ]
+            st.session_state["okx_sl_hist"]   = [
+                p for p in _ph_all if p.get("type") in ("1", "3", "5")
+            ]
+            st.session_state["okx_hist_ts"]   = _ph_ts
+        else:
+            st.session_state["okx_tp_hist"]  = None
+            st.session_state["okx_sl_hist"]  = None
+            st.session_state["okx_hist_ts"]  = _ph_ts
+    except Exception as _ph_exc:
+        st.session_state["okx_tp_hist"]  = None
+        st.session_state["okx_sl_hist"]  = None
+        _append_error("trade", f"Positions-history fetch failed: {_ph_exc}",
+                      endpoint="/api/v5/account/positions-history")
+
 # ── Table 2: TP Hit ─────────────────────────────────────────────────────────────
 # show_pnl=True → realized gain column, using close_price (= TP level).
 # For DCA trades, the row naturally picks up DCA-N in Alert, blended avg in
 # Signal Entry, original entry in Original Entry, and cumulative Order Size.
 _render_sig_table(_tp_sigs,    "✅ TP Hit",         "No TP hits yet.",
                   show_pnl=True)
+
+# ── OKX Fulfilled Orders (auto-trading only) ────────────────────────────────────
+if _hist_trade_on and _hist_has_creds:
+    _tp_hist      = st.session_state.get("okx_tp_hist")
+    _hist_ts_tp   = st.session_state.get("okx_hist_ts", "")
+    _env_hist     = "🟡 Demo" if _snap_cfg.get("demo_mode", True) else "🔴 Live"
+
+    st.markdown(
+        f"**📋 OKX Fulfilled Orders**"
+        f"<span style='font-size:0.8em; color:gray; margin-left:12px;'>"
+        f"auto-fetched · {_hist_ts_tp} · {_env_hist}</span>",
+        unsafe_allow_html=True,
+    )
+
+    if _tp_hist is None:
+        st.warning("⚠️ Could not fetch OKX position history — check Error Log.")
+    elif not _tp_hist:
+        st.info("No fulfilled (TP-closed) positions found in the last 100 records.")
+    else:
+        # Build set of TP signal symbols for the Match column.
+        _tp_sig_syms = {s.get("symbol", "") for s in _tp_sigs}
+        _tp_close_map = {
+            "2": "Take Profit",
+            "4": "Partial TP",
+        }
+        _tp_rows = []
+        _tp_ghost_syms = []
+        for _ph in _tp_hist:
+            _inst_tp   = _ph.get("instId", "")
+            _sym_tp    = _inst_tp.replace("-USDT-SWAP", "USDT").replace("-", "")
+            _rpnl_tp   = float(_ph.get("realizedPnl", 0) or 0)
+            _close_ts_tp = ""
+            try:
+                _close_ts_tp = datetime.fromtimestamp(
+                    int(_ph.get("uTime", 0)) / 1000,
+                    tz=dubai_now().tzinfo
+                ).strftime("%d %b %Y  %H:%M GST")
+            except Exception:
+                pass
+            _matched_tp = _sym_tp in _tp_sig_syms or _inst_tp in _tp_sig_syms
+            if not _matched_tp:
+                _tp_ghost_syms.append(_inst_tp)
+            _tp_rows.append({
+                "Symbol":       _inst_tp,
+                "Direction":    _ph.get("direction", "").capitalize(),
+                "Close Reason": _tp_close_map.get(_ph.get("type", ""), "TP"),
+                "Contracts":    int(float(_ph.get("closeTotalPos", 0) or 0)),
+                "Avg Entry":    float(_ph.get("openAvgPx",  0) or 0),
+                "Close Price":  float(_ph.get("closeAvgPx", 0) or 0),
+                "Realized PnL": round(_rpnl_tp, 4),
+                "Close Time":   _close_ts_tp,
+                "Match":        "✅" if _matched_tp else "⚠️ no signal",
+            })
+
+        st.dataframe(
+            _tp_rows,
+            use_container_width=True,
+            hide_index=True,
+            height=len(_tp_rows) * 35 + 48,
+            column_config={
+                "Avg Entry":    st.column_config.NumberColumn(format="%.6f"),
+                "Close Price":  st.column_config.NumberColumn(format="%.6f"),
+                "Realized PnL": st.column_config.NumberColumn(
+                                    "Realized PnL $", format="%.4f"),
+            },
+        )
+        if _tp_ghost_syms:
+            st.caption(
+                f"⚠️ {len(_tp_ghost_syms)} OKX fulfilled position(s) have no matching TP signal: "
+                + ", ".join(_tp_ghost_syms)
+            )
+
 st.divider()
 
 # ── Table 3: SL Hit (non-DCA trades only) ──────────────────────────────────────
@@ -6230,6 +6340,80 @@ st.divider()
 # the dedicated "DCA SL Hit" table below, not this one.
 _render_sig_table(_sl_sigs,    "❌ SL Hit",         "No SL hits yet.",
                   show_pnl=True)
+
+# ── OKX Liquidated / SL Closed Orders (auto-trading only) ───────────────────────
+if _hist_trade_on and _hist_has_creds:
+    _sl_hist      = st.session_state.get("okx_sl_hist")
+    _hist_ts_sl   = st.session_state.get("okx_hist_ts", "")
+    _env_hist_sl  = "🟡 Demo" if _snap_cfg.get("demo_mode", True) else "🔴 Live"
+
+    st.markdown(
+        f"**📋 OKX Liquidated / SL Closed Orders**"
+        f"<span style='font-size:0.8em; color:gray; margin-left:12px;'>"
+        f"auto-fetched · {_hist_ts_sl} · {_env_hist_sl}</span>",
+        unsafe_allow_html=True,
+    )
+
+    if _sl_hist is None:
+        st.warning("⚠️ Could not fetch OKX position history — check Error Log.")
+    elif not _sl_hist:
+        st.info("No SL-closed or liquidated positions found in the last 100 records.")
+    else:
+        # Build combined set of SL signal symbols for the Match column.
+        _sl_sig_syms = {s.get("symbol", "") for s in _sl_sigs + _dca_sl_sigs}
+        _sl_close_map = {
+            "1": "Stop-Loss",
+            "3": "Manual Close",
+            "5": "Liquidated",
+        }
+        _sl_rows = []
+        _sl_ghost_syms = []
+        for _ph in _sl_hist:
+            _inst_sl   = _ph.get("instId", "")
+            _sym_sl    = _inst_sl.replace("-USDT-SWAP", "USDT").replace("-", "")
+            _rpnl_sl   = float(_ph.get("realizedPnl", 0) or 0)
+            _close_ts_sl = ""
+            try:
+                _close_ts_sl = datetime.fromtimestamp(
+                    int(_ph.get("uTime", 0)) / 1000,
+                    tz=dubai_now().tzinfo
+                ).strftime("%d %b %Y  %H:%M GST")
+            except Exception:
+                pass
+            _reason_sl  = _sl_close_map.get(_ph.get("type", ""), "SL")
+            _matched_sl = _sym_sl in _sl_sig_syms or _inst_sl in _sl_sig_syms
+            if not _matched_sl:
+                _sl_ghost_syms.append(_inst_sl)
+            _sl_rows.append({
+                "Symbol":       _inst_sl,
+                "Direction":    _ph.get("direction", "").capitalize(),
+                "Close Reason": _reason_sl,
+                "Contracts":    int(float(_ph.get("closeTotalPos", 0) or 0)),
+                "Avg Entry":    float(_ph.get("openAvgPx",  0) or 0),
+                "Close Price":  float(_ph.get("closeAvgPx", 0) or 0),
+                "Realized PnL": round(_rpnl_sl, 4),
+                "Close Time":   _close_ts_sl,
+                "Match":        "✅" if _matched_sl else "⚠️ no signal",
+            })
+
+        st.dataframe(
+            _sl_rows,
+            use_container_width=True,
+            hide_index=True,
+            height=len(_sl_rows) * 35 + 48,
+            column_config={
+                "Avg Entry":    st.column_config.NumberColumn(format="%.6f"),
+                "Close Price":  st.column_config.NumberColumn(format="%.6f"),
+                "Realized PnL": st.column_config.NumberColumn(
+                                    "Realized PnL $", format="%.4f"),
+            },
+        )
+        if _sl_ghost_syms:
+            st.caption(
+                f"⚠️ {len(_sl_ghost_syms)} OKX SL/liquidated position(s) have no matching signal: "
+                + ", ".join(_sl_ghost_syms)
+            )
+
 st.divider()
 
 # ── Table 4: DCA SL Hit (ladder-exhausted closures) ────────────────────────────
