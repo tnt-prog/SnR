@@ -4939,21 +4939,30 @@ _acct_has_creds = bool(
 )
 if _acct_has_creds:
     try:
-        _bal_resp = _trade_get("/api/v5/account/balance", {"ccy": "USDT"}, _snap_cfg)
+        _bal_resp  = _trade_get("/api/v5/account/balance", {"ccy": "USDT"}, _snap_cfg)
+        # Fetch realized PnL directly from OKX settled position history.
+        # limit=100 covers the most recent closed positions (~last 3 months).
+        _hist_resp = _trade_get("/api/v5/account/positions-history",
+                                {"instType": "SWAP", "limit": "100"}, _snap_cfg)
         if _bal_resp.get("code") == "0":
             _bal_d   = _bal_resp["data"][0]
             _bal_det = _bal_d.get("details", [{}])[0]
             _avail   = float(_bal_det.get("availBal", 0) or 0)
             _tot_eq  = float(_bal_d.get("totalEq",   0) or 0)
             _invested = _tot_eq - _avail
-            _upl     = float(_bal_det.get("upl",     0) or 0)
+            _upl      = float(_bal_det.get("upl",    0) or 0)
             _upl_sign = "+" if _upl >= 0 else ""
+            # Sum OKX-settled realizedPnl across returned position records.
+            _realized = 0.0
+            if _hist_resp.get("code") == "0":
+                for _hp in _hist_resp.get("data", []):
+                    _realized += float(_hp.get("realizedPnl", 0) or 0)
+            _rpnl_sign = "+" if _realized >= 0 else ""
             _ac1, _ac2, _ac3, _ac4 = st.columns(4)
-            _rpnl_sign = "+" if _total_pnl >= 0 else ""
             _ac1.metric("💰 Available",      f"${_avail:,.2f} USDT")
             _ac2.metric("📊 Invested",       f"${_invested:,.2f} USDT")
             _ac3.metric("📈 Unrealized PnL", f"${_upl_sign}{_upl:,.2f} USDT")
-            _ac4.metric("💵 Realized PnL",   f"${_rpnl_sign}{_total_pnl:,.2f} USDT")
+            _ac4.metric("💵 Realized PnL",   f"${_rpnl_sign}{_realized:,.2f} USDT")
     except Exception:
         pass
 
