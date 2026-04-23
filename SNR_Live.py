@@ -193,6 +193,13 @@ DEFAULT_CONFIG: dict = {
     # double-execution. When 0 or ≥ loop_minutes, watcher is disabled and
     # main loop handles open-trade checks as before (legacy behaviour).
     "watcher_minutes":       1,
+    # ── Hours of operation (GST / Dubai UTC+4) ────────────────────────────────
+    # When enabled, new signal scanning is paused outside the defined window.
+    # Open-trade monitoring (TP/SL/DCA) always runs regardless of this setting.
+    # Supports midnight-crossing windows (e.g. start=22, end=06).
+    "scan_hour_enabled":     False,
+    "scan_hour_start":       0,    # 0–23 GST
+    "scan_hour_end":         23,   # 0–23 GST
         "watchlist": [
         "XPDUSDT","WIFUSDT","PIUSDT","EDGEUSDT","RECALLUSDT","SUSHIUSDT","RAVEUSDT","XLMUSDT","DASHUSDT","TRUSTUSDT",
         "GPSUSDT","CROUSDT","ACUUSDT","UNIUSDT","STRKUSDT","NEIROUSDT","ZKPUSDT","APEUSDT","MSTRUSDT","ENJUSDT",
@@ -3617,6 +3624,23 @@ def _bg_loop():
                 cooled = cooled_tp | cooled_sl
                 active = {s["symbol"] for s in _b._bsc_log["signals"] if s["status"]=="open"}
 
+            # ── Hours of operation gate ──────────────────────────────────────
+            # If the user has enabled the hours filter, skip the new-signal
+            # scan phase when we are outside the configured GST window.
+            # Open-trade monitoring (Phase 1 above + watcher thread) is NOT
+            # gated — it continues around the clock regardless of this setting.
+            if cfg.get("scan_hour_enabled", False):
+                _now_h   = dubai_now().hour
+                _h_start = int(cfg.get("scan_hour_start", 0))
+                _h_end   = int(cfg.get("scan_hour_end", 23))
+                if _h_start <= _h_end:
+                    _in_window = _h_start <= _now_h <= _h_end
+                else:          # window crosses midnight (e.g. 22 → 06)
+                    _in_window = _now_h >= _h_start or _now_h <= _h_end
+                if not _in_window:
+                    time.sleep(60)   # wait a minute then re-check
+                    continue         # skip scan, keep loop alive
+
             # Pass the full skip set (TP cooldown ∪ SL cooldown ∪ currently open)
             # into scan() so these coins are dropped pre-deep-scan.
             _pre_scan_skip = cooled | active
@@ -4743,6 +4767,47 @@ with st.sidebar:
             )
     st.divider()
 
+    # ── Hours of Operation ────────────────────────────────────────────────────
+    st.markdown("**🕐 Hours of Operation (GST)**",
+                help=(
+                    "Restrict new signal scanning to a specific time window "
+                    "(Dubai / GST, UTC+4).\n\n"
+                    "When enabled, the scanner pauses new signal detection "
+                    "outside the defined window. Open-trade monitoring "
+                    "(TP / SL / DCA) always runs 24/7 regardless of this setting.\n\n"
+                    "Midnight-crossing windows are supported — e.g. Start 22, "
+                    "End 06 means the scanner is active 22:00–23:59 and "
+                    "00:00–06:00 GST."
+                ))
+    new_scan_hour_enabled = st.checkbox(
+        "Enable hours of operation",
+        value=bool(_snap_cfg.get("scan_hour_enabled", False)),
+        key="cfg_scan_hour_enabled",
+    )
+    _sh1, _sh2 = st.columns(2)
+    new_scan_hour_start = _sh1.number_input(
+        "From (GST)", min_value=0, max_value=23, step=1,
+        value=int(_snap_cfg.get("scan_hour_start", 0)),
+        key="cfg_scan_hour_start",
+        disabled=not new_scan_hour_enabled,
+    )
+    new_scan_hour_end = _sh2.number_input(
+        "Until (GST)", min_value=0, max_value=23, step=1,
+        value=int(_snap_cfg.get("scan_hour_end", 23)),
+        key="cfg_scan_hour_end",
+        disabled=not new_scan_hour_enabled,
+    )
+    if new_scan_hour_enabled:
+        _s = int(new_scan_hour_start)
+        _e = int(new_scan_hour_end)
+        if _s == _e:
+            st.caption("⚠️ Start and End are the same — scanner will only run during that single hour.")
+        elif _s < _e:
+            st.caption(f"Active: {_s:02d}:00 – {_e:02d}:59 GST")
+        else:
+            st.caption(f"Active: {_s:02d}:00 – 23:59 and 00:00 – {_e:02d}:59 GST (crosses midnight)")
+    st.divider()
+
     st.markdown("**💾 Data Storage**")
     _is_temp = str(_SCRIPT_DIR).startswith(str(pathlib.Path(__import__("tempfile").gettempdir())))
     if _is_temp:
@@ -4841,6 +4906,9 @@ with st.sidebar:
             "max_super_trades":   max(1, int(new_max_super_trades)),
             "sl_cooldown_hours":  max(1, int(new_sl_cooldown_hours)),
             "watcher_minutes":    max(0, min(60, int(new_watcher_minutes))),
+            "scan_hour_enabled":  bool(new_scan_hour_enabled),
+            "scan_hour_start":    int(new_scan_hour_start),
+            "scan_hour_end":      int(new_scan_hour_end),
             "watchlist": new_wl,
             # ── Auto-trading ─────────────────────────────────────────────────
             "trade_enabled":     bool(new_trade_enabled),
