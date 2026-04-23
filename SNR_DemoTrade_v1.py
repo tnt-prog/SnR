@@ -6212,7 +6212,7 @@ def _style_alert_cell(val) -> str:
 
 def _render_sig_table(sig_list: list, header: str, empty_msg: str,
                       auto_height: bool = False, is_open_table: bool = False,
-                      show_pnl: bool = False):
+                      show_pnl: bool = False, scroll_height: int = None):
     rows = [_build_signal_row(s, is_open_table=is_open_table, show_pnl=show_pnl)
             for s in sig_list]
     st.markdown(f"### {header} ({len(rows)})")
@@ -6234,7 +6234,14 @@ def _render_sig_table(sig_list: list, header: str, empty_msg: str,
         except Exception:
             _render_obj = rows
 
-        if auto_height:
+        if scroll_height is not None:
+            # Fixed-height scrollable table — internal vertical scroll bar,
+            # the rest of the page stays still.
+            st.dataframe(_render_obj, use_container_width=True,
+                         hide_index=True,
+                         height=scroll_height,
+                         column_config=_SIG_COL_CFG)
+        elif auto_height:
             # Expand so ALL rows are visible without internal scrolling.
             # Each row ≈ 35 px, header ≈ 38 px, +10 px buffer. Streamlit's
             # dataframe auto-expands individual cells that contain newlines
@@ -6265,7 +6272,7 @@ _queue_sigs   = [s for s in filtered_sorted if s.get("status") == "queue_limit"]
 
 # ── Table 1: Open Signals ───────────────────────────────────────────────────────
 _render_sig_table(_open_sigs,  "🔵 Open Signals",  "No open signals right now.",
-                  auto_height=True, is_open_table=True, show_pnl=True)
+                  scroll_height=450, is_open_table=True, show_pnl=True)
 
 # ── OKX Live Positions (inline, auto-fetch) ────────────────────────────────────
 # Shown only when auto-trading is ON. Fetches on every render using a dedicated
