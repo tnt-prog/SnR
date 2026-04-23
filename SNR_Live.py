@@ -3638,7 +3638,12 @@ def _bg_loop():
                 else:          # window crosses midnight (e.g. 22 → 06)
                     _in_window = _now_h >= _h_start or _now_h <= _h_end
                 if not _in_window:
-                    time.sleep(60)   # wait a minute then re-check
+                    # Use the rescan event so a Save & Apply that changes the
+                    # window re-checks immediately rather than waiting 60 s.
+                    # If the event fires but we're still outside the window,
+                    # the next loop cycle will hit this gate again straight away.
+                    _rescan_event.wait(timeout=60)
+                    _rescan_event.clear()
                     continue         # skip scan, keep loop alive
 
             # Pass the full skip set (TP cooldown ∪ SL cooldown ∪ currently open)
@@ -4806,6 +4811,35 @@ with st.sidebar:
             st.caption(f"Active: {_s:02d}:00 – {_e:02d}:59 GST")
         else:
             st.caption(f"Active: {_s:02d}:00 – 23:59 and 00:00 – {_e:02d}:59 GST (crosses midnight)")
+
+    # ── Live gate status (reads from the RUNNING config, not the UI widgets) ──
+    # This is the source of truth — it shows what the scanner thread actually
+    # sees. If this says Disabled but your checkbox is ticked, you haven't
+    # pressed Save & Apply yet.
+    _live_hour_enabled = _snap_cfg.get("scan_hour_enabled", False)
+    _live_h_start      = int(_snap_cfg.get("scan_hour_start", 0))
+    _live_h_end        = int(_snap_cfg.get("scan_hour_end", 23))
+    _live_now_h        = dubai_now().hour
+    _live_now_str      = dubai_now().strftime("%H:%M GST")
+    if not _live_hour_enabled:
+        st.info(f"⚪ Gate: **Disabled** — scanner runs 24/7  ·  Now: {_live_now_str}")
+    else:
+        if _live_h_start <= _live_h_end:
+            _live_in_window = _live_h_start <= _live_now_h <= _live_h_end
+        else:
+            _live_in_window = _live_now_h >= _live_h_start or _live_now_h <= _live_h_end
+        if _live_in_window:
+            st.success(
+                f"🟢 Gate: **IN WINDOW** — scanning active  ·  "
+                f"Now: {_live_now_str}  ·  "
+                f"Window: {_live_h_start:02d}:00 – {_live_h_end:02d}:59"
+            )
+        else:
+            st.warning(
+                f"🔴 Gate: **BLOCKED** — scan suppressed  ·  "
+                f"Now: {_live_now_str}  ·  "
+                f"Window: {_live_h_start:02d}:00 – {_live_h_end:02d}:59"
+            )
     st.divider()
 
     st.markdown("**💾 Data Storage**")
