@@ -1818,7 +1818,9 @@ def _reset_filter_counts():
         "f3_pdz5m":         0,   # F3 — PDZ 5m
         "f4_rsi5m":         0,   # F4 — 5m RSI
         "f5_rsi1h":         0,   # F5 — 1h RSI
-        "f6_ema":           0,   # F6 — EMA
+        "f6_ema_3m":        0,   # F6 — EMA 3m
+        "f6_ema_5m":        0,   # F6 — EMA 5m
+        "f6_ema_15m":       0,   # F6 — EMA 15m
         # F7 MACD — per timeframe
         "f7_macd_3m":       0,
         "f7_macd_5m":       0,
@@ -1843,7 +1845,9 @@ def _reset_filter_counts():
         "f3_elim_syms":           [],
         "f4_elim_syms":           [],
         "f5_elim_syms":           [],
-        "f6_elim_syms":           [],
+        "f6_ema_3m_elim_syms":    [],
+        "f6_ema_5m_elim_syms":    [],
+        "f6_ema_15m_elim_syms":   [],
         "f7_macd_3m_elim_syms":   [],
         "f7_macd_5m_elim_syms":   [],
         "f7_macd_15m_elim_syms":  [],
@@ -2086,24 +2090,24 @@ def process(sym, cfg: dict, super_counter: dict = None, super_lock=None):
             _record_elim("f5_rsi1h", "f5_elim_syms", sym)
             return None
 
-        # ── F6: EMA ───────────────────────────────────────────────────────────
+        # ── F6: EMA (per-timeframe tracking) ────────────────────────────────
         ema_3m_val = ema_5m_val = ema_15m_val = None
         if cfg.get("use_ema_3m"):
             ema = calc_ema(closes_3m, max(2, int(cfg.get("ema_period_3m", 12))))
             if not ema or entry < ema[-1]:
-                _record_elim("f6_ema", "f6_elim_syms", sym)
+                _record_elim("f6_ema_3m", "f6_ema_3m_elim_syms", sym)
                 return None
             ema_3m_val = _pround(ema[-1])
         if cfg.get("use_ema_5m"):
             ema = calc_ema(closes_5m, max(2, int(cfg.get("ema_period_5m", 12))))
             if not ema or entry < ema[-1]:
-                _record_elim("f6_ema", "f6_elim_syms", sym)
+                _record_elim("f6_ema_5m", "f6_ema_5m_elim_syms", sym)
                 return None
             ema_5m_val = _pround(ema[-1])
         if cfg.get("use_ema_15m"):
             ema = calc_ema(closes_15m, max(2, int(cfg.get("ema_period_15m", 12))))
             if not ema or entry < ema[-1]:
-                _record_elim("f6_ema", "f6_elim_syms", sym)
+                _record_elim("f6_ema_15m", "f6_ema_15m_elim_syms", sym)
                 return None
             ema_15m_val = _pround(ema[-1])
 
@@ -6935,7 +6939,10 @@ if (
         after_f3  = after_f2  - fc.get("f3_pdz5m",  0)
         after_f4  = after_f3  - fc.get("f4_rsi5m",  0)
         after_f5  = after_f4  - fc.get("f5_rsi1h",  0)
-        after_f6  = after_f5  - fc.get("f6_ema",    0)
+        after_f6_ema_3m  = after_f5         - fc.get("f6_ema_3m",  0)
+        after_f6_ema_5m  = after_f6_ema_3m  - fc.get("f6_ema_5m",  0)
+        after_f6_ema_15m = after_f6_ema_5m  - fc.get("f6_ema_15m", 0)
+        after_f6         = after_f6_ema_15m  # final EMA stage output
         # F7 MACD — per timeframe running totals
         after_f7_macd_3m  = after_f6  - fc.get("f7_macd_3m",  0)
         after_f7_macd_5m  = after_f7_macd_3m  - fc.get("f7_macd_5m",  0)
@@ -7064,10 +7071,23 @@ if (
                          "on" if sc.get("use_rsi_1h", True) else "off",
                          after_f4, fc.get("f5_rsi1h", 0), after_f5, _pct(after_f5),
                          "1h RSI range", ""))
-        _ft_rows.append((ema_lbl,
-                         "on" if ema_parts else "off",
-                         after_f5, fc.get("f6_ema", 0), after_f6, _pct(after_f6),
-                         "Price above EMA", ""))
+        # F6 EMA — per enabled timeframe
+        _ft_prev_ema = after_f5
+        for _ema_tf, _ema_key, _ema_pkey, _ema_dkey, _ema_aftn in [
+            ("3m",  "use_ema_3m",  "ema_period_3m",  "f6_ema_3m",  after_f6_ema_3m),
+            ("5m",  "use_ema_5m",  "ema_period_5m",  "f6_ema_5m",  after_f6_ema_5m),
+            ("15m", "use_ema_15m", "ema_period_15m", "f6_ema_15m", after_f6_ema_15m),
+        ]:
+            if sc.get(_ema_key):
+                _ema_lbl = f"F6 \u2014 EMA{sc.get(_ema_pkey, 12)} {_ema_tf}"
+                _ft_rows.append((_ema_lbl, "on",
+                                 _ft_prev_ema, fc.get(_ema_dkey, 0), _ema_aftn, _pct(_ema_aftn),
+                                 f"Price above EMA{sc.get(_ema_pkey, 12)} on {_ema_tf}", ""))
+                _ft_prev_ema = _ema_aftn
+        if not ema_parts:
+            _ft_rows.append(("F6 \u2014 EMA (off)", "off",
+                             after_f5, 0, after_f5, _pct(after_f5),
+                             "All EMA timeframes disabled", ""))
         # F7 MACD — per enabled timeframe
         _ft_prev = after_f6
         for _tf, _key, _dkey, _aftn in [
@@ -7128,7 +7148,9 @@ if (
         _f3e  = set(fc.get("f3_elim_syms",  []))
         _f4e  = set(fc.get("f4_elim_syms",  []))
         _f5e  = set(fc.get("f5_elim_syms",  []))
-        _f6e  = set(fc.get("f6_elim_syms",  []))
+        _f6e_3m  = set(fc.get("f6_ema_3m_elim_syms",  []))
+        _f6e_5m  = set(fc.get("f6_ema_5m_elim_syms",  []))
+        _f6e_15m = set(fc.get("f6_ema_15m_elim_syms", []))
         # F7 MACD — per timeframe elimination sets
         _f7e_3m  = set(fc.get("f7_macd_3m_elim_syms",  []))
         _f7e_5m  = set(fc.get("f7_macd_5m_elim_syms",  []))
@@ -7145,7 +7167,10 @@ if (
         _after_f3        = _after_f2     - _f3e
         _after_f4        = _after_f3     - _f4e
         _after_f5        = _after_f4     - _f5e
-        _after_f6        = _after_f5     - _f6e
+        _after_f6_ema_3m  = _after_f5        - (_f6e_3m  if sc.get("use_ema_3m")  else set())
+        _after_f6_ema_5m  = _after_f6_ema_3m - (_f6e_5m  if sc.get("use_ema_5m")  else set())
+        _after_f6_ema_15m = _after_f6_ema_5m - (_f6e_15m if sc.get("use_ema_15m") else set())
+        _after_f6         = _after_f6_ema_15m
         # MACD per timeframe — only subtract if that timeframe is enabled
         _after_f7_macd_3m  = _after_f6          - (_f7e_3m  if sc.get("use_macd_3m",  True) else set())
         _after_f7_macd_5m  = _after_f7_macd_3m  - (_f7e_5m  if sc.get("use_macd_5m",  True) else set())
@@ -7176,7 +7201,24 @@ if (
             (f"After {pdz5m_lbl}",        len(_after_f2), len(_after_f3), _coin_str(_after_f3)),
             (f"After {f4_lbl}",           len(_after_f3), len(_after_f4), _coin_str(_after_f4)),
             (f"After {f5_lbl}",           len(_after_f4), len(_after_f5), _coin_str(_after_f5)),
-            (f"After {ema_lbl}",          len(_after_f5), len(_after_f6), _coin_str(_after_f6)),
+        ]
+        # F6 EMA — one row per enabled timeframe
+        _sr_ema_prev = _after_f5
+        for _ema_tf, _ema_key, _ema_pkey, _ema_after_set in [
+            ("3m",  "use_ema_3m",  "ema_period_3m",  _after_f6_ema_3m),
+            ("5m",  "use_ema_5m",  "ema_period_5m",  _after_f6_ema_5m),
+            ("15m", "use_ema_15m", "ema_period_15m", _after_f6_ema_15m),
+        ]:
+            if sc.get(_ema_key):
+                stage_rows.append((
+                    f"F6 — EMA{sc.get(_ema_pkey, 12)} {_ema_tf}",
+                    len(_sr_ema_prev), len(_ema_after_set),
+                    _coin_str(_ema_after_set),
+                ))
+                _sr_ema_prev = _ema_after_set
+        if not ema_parts:
+            stage_rows.append(("F6 — EMA (off)", len(_after_f5), len(_after_f5), _coin_str(_after_f5)))
+        stage_rows += [
         ]
         # F7 MACD — one row per enabled timeframe
         _sr_prev = _after_f6
