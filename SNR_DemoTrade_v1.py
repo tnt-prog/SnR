@@ -1732,7 +1732,7 @@ def calc_parabolic_sar(candles: list, af_start=0.02, af_step=0.02, af_max=0.20):
 # ─────────────────────────────────────────────────────────────────────────────
 # F12 — Premium / Discount / Equilibrium zone  (DZSAFM Pine Script logic)
 # ─────────────────────────────────────────────────────────────────────────────
-def calc_pdz_zone(candles: list, price: float) -> tuple:
+def calc_pdz_zone(candles: list, price: float, buffer_pct: float = 0.015) -> tuple:
     """
     Compute Smart Money Premium/Discount/Equilibrium zones from up to the last
     50 candles on a given timeframe (mirrors the DZSAFM TradingView indicator exactly).
@@ -1746,8 +1746,8 @@ def calc_pdz_zone(candles: list, price: float) -> tuple:
       • Discount zone                         → QUALIFIES  (greatest room to pump)
       • Equilibrium zone                      → REJECTED   (indecision, risky)
       • Premium zone                          → REJECTED   (no upward room)
-      • Band A (equil_top < price < prem_bot) → QUALIFIES if room ≥ 1.5 %
-      • Band B (disc_top  < price < equil_bot)→ QUALIFIES if room ≥ 1.5 %
+      • Band A (equil_top < price < prem_bot) → QUALIFIES if room ≥ buffer_pct (= tp_pct)
+      • Band B (disc_top  < price < equil_bot)→ QUALIFIES if room ≥ buffer_pct (= tp_pct)
 
     Returns (qualifies: bool, zone_label: str)
     """
@@ -1777,8 +1777,8 @@ def calc_pdz_zone(candles: list, price: float) -> tuple:
     equil_bottom   = 0.475 * H + 0.525 * L  # bottom edge of Equilibrium zone
     discount_top   = 0.05  * H + 0.95  * L  # top edge of Discount zone
 
-    band_a_ceil = premium_bottom * (1 - 0.015)   # 1.5% below Premium boundary
-    band_b_ceil = equil_bottom   * (1 - 0.015)   # 1.5% below Equilibrium boundary
+    band_a_ceil = premium_bottom * (1 - buffer_pct)   # buffer below Premium boundary
+    band_b_ceil = equil_bottom   * (1 - buffer_pct)   # buffer below Equilibrium boundary
 
     if price <= discount_top:
         # Fully inside Discount zone — best long setup
@@ -1960,13 +1960,13 @@ def process(sym, cfg: dict, super_counter: dict = None, super_lock=None):
         pdz_zone_1h        = "—"
         is_super_eligible  = False
         if cfg.get("use_pdz_15m", True):
-            pdz_pass_15m, pdz_zone_15m = calc_pdz_zone(m15_quick, entry_q)
+            pdz_pass_15m, pdz_zone_15m = calc_pdz_zone(m15_quick, entry_q, float(cfg.get("tp_pct", 1.2)) / 100.0)
             if pdz_zone_15m == "Discount":
                 # 15m is Discount — now we need 1h also in Discount for Super
                 # (if 1h fetch failed, can't verify → treat as not-super, fall
                 # through to F3-F10 rather than blocking entry).
                 if m1h_quick:
-                    _, pdz_zone_1h = calc_pdz_zone(m1h_quick, entry_q)
+                    _, pdz_zone_1h = calc_pdz_zone(m1h_quick, entry_q, float(cfg.get("tp_pct", 1.2)) / 100.0)
                 if pdz_zone_1h == "Discount":
                     is_super_eligible = True      # ⭐ BOTH 15m and 1h Discount
                 # else: only 15m Discount (not 1h) → fall through to F3-F10
@@ -2030,7 +2030,7 @@ def process(sym, cfg: dict, super_counter: dict = None, super_lock=None):
         # ── F3: PDZ 5m ────────────────────────────────────────────────────────
         pdz_zone_5m = "—"
         if cfg.get("use_pdz_5m", True):
-            pdz_pass_5m, pdz_zone_5m = calc_pdz_zone(m5_quick, entry_q)
+            pdz_pass_5m, pdz_zone_5m = calc_pdz_zone(m5_quick, entry_q, float(cfg.get("tp_pct", 1.2)) / 100.0)
             if not pdz_pass_5m:
                 _record_elim("f3_pdz5m", "f3_elim_syms", sym)
                 return None
@@ -2507,20 +2507,22 @@ def _dca_compute_trigger(sig: dict, cfg: dict = None) -> float:
     the signal at entry time so later sidebar changes don't retroactively
     alter already-open trades:
 
-      Isolated: `dca_iso_distance_pct` % = DISTANCE FROM LIQUIDATION toward
-                entry, measured as a fraction of the entry-to-liq range.
-                10 → fires very close to liquidation (aggressive).
-                95 → fires very close to entry (conservative).
+      Isolated: `dca_iso_distance_pct` % = HOW FAR PRICE MUST DROP from
+                avg_entry toward liquidation before next DCA fires, expressed
+                as a fraction of the full entry-to-liq range.
+                10 → fires very close to entry (conservative / early).
+                80 → fires 80% of the way toward liquidation (aggressive).
+                95 → fires almost at liquidation (very aggressive).
 
                 Formula:
-                  dca_drop % = (1 / leverage) × (1 − iso_dist / 100)
+                  dca_drop % = (1 / leverage) × (iso_dist / 100)
                   DCA price  = avg_entry × (1 − dca_drop %)
 
                 Example — entry $100 · 10× → liq ≈ $90:
-                  iso_dist=10  →  drop 9%    →  DCA at $91
+                  iso_dist=10  →  drop 1%    →  DCA at $99
                   iso_dist=50  →  drop 5%    →  DCA at $95
-                  iso_dist=70  →  drop 3%    →  DCA at $97
-                  iso_dist=95  →  drop 0.5%  →  DCA at $99.50
+                  iso_dist=80  →  drop 8%    →  DCA at $92
+                  iso_dist=95  →  drop 9.5%  →  DCA at $90.50
 
       Cross:    `dca_cross_drop_pct` % fixed drop below blended avg (default 7%).
                 Leverage-independent.
@@ -2541,10 +2543,10 @@ def _dca_compute_trigger(sig: dict, cfg: dict = None) -> float:
         iso_dist = float(sig.get("dca_iso_distance_pct",
                                  cfg.get("dca_iso_distance_pct", 70.0)) or 70.0)
         iso_dist = max(10.0, min(95.0, iso_dist))  # clamp to dropdown range
-        # New semantic: iso_dist = % DISTANCE ABOVE LIQUIDATION toward entry.
-        # drop_pct = (1/lev) × (1 − iso_dist/100)
-        # At 10×, iso_dist=70 → drop 3% → trigger at entry × 0.97.
-        dca_drop_pct = (1.0 / lev) * (1.0 - iso_dist / 100.0)
+        # iso_dist = % of the entry-to-liq range price must drop before next DCA fires.
+        # drop_pct = (1/lev) × (iso_dist/100)
+        # At 20×, iso_dist=80 → drop 4% → trigger at entry × 0.96.
+        dca_drop_pct = (1.0 / lev) * (iso_dist / 100.0)
     else:
         cross_drop = float(sig.get("dca_cross_drop_pct",
                                    cfg.get("dca_cross_drop_pct", 7.0)) or 7.0)
@@ -7274,6 +7276,37 @@ def _build_diagnostics_text() -> str:
                 )
         else:
             _kv("dca_fills", "(none)")
+        # ── Entry criteria (filters that qualified this signal) ────────────
+        _crit = s.get("criteria") or {}
+        if _crit:
+            _push("  criteria:")
+            _crit_keys = [
+                ("pdz_zone_15m",    "pdz_zone_15m"),
+                ("pdz_zone_1h",     "pdz_zone_1h"),
+                ("pdz_zone_5m",     "pdz_zone_5m"),
+                ("rsi_5m",          "rsi_5m"),
+                ("rsi_1h",          "rsi_1h"),
+                ("ema_3m",          "ema_3m"),
+                ("ema_5m",          "ema_5m"),
+                ("ema_15m",         "ema_15m"),
+                ("macd_3m",         "macd_3m"),
+                ("macd_5m",         "macd_5m"),
+                ("macd_15m",        "macd_15m"),
+                ("sar_3m",          "sar_3m"),
+                ("sar_5m",          "sar_5m"),
+                ("sar_15m",         "sar_15m"),
+                ("vol_ratio",       "vol_ratio"),
+                ("ema_cross_12_15m","ema_cross_12_15m"),
+                ("ema_cross_21_15m","ema_cross_21_15m"),
+            ]
+            for _ck, _ck_key in _crit_keys:
+                if _ck_key in _crit:
+                    _cv = _crit[_ck_key]
+                    if isinstance(_cv, float):
+                        _cv = f"{_cv:.4f}"
+                    _push(f"    {_ck:<24} : {_cv}")
+        else:
+            _push("  criteria                         : (none stored)")
 
     _hdr("SIGNALS · OPEN")
     if _open_sigs:
