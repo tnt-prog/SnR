@@ -3521,6 +3521,122 @@ def _watcher_update_open_signals(signals):
     return signals
 
 
+def _okx_sync_open_signals(open_snapshot: list, cfg: dict) -> bool:
+    """Sync open signals against OKX positions-history (one API call).
+
+    For each open signal that has an order_id (live OKX trade), checks whether
+    OKX has already closed that position (TP, SL, liquidation, or manual).
+    Mutates signals in-place and returns True if any signal was updated.
+
+    Close-type mapping (OKX positions-history 'type' field):
+        2 / 4         → tp_hit    (Take-Profit / Partial TP)
+        1 / 3 / 5     → sl_hit    (Stop-Loss / Liquidation / ADL)
+        anything else → closed_okx (manually closed on OKX)
+    """
+    # Only run when auto-trading is ON and credentials are present
+    if not cfg.get("trade_enabled"):
+        return False
+    if not (cfg.get("api_key") and cfg.get("api_secret") and cfg.get("api_passphrase")):
+        return False
+
+    # Only consider signals that have a live OKX order_id
+    live_sigs = [s for s in open_snapshot
+                 if s.get("status") == "open" and s.get("order_id")]
+    if not live_sigs:
+        return False
+
+    try:
+        ph_resp = _trade_get(
+            "/api/v5/account/positions-history",
+            {"instType": "SWAP", "limit": "50"},
+            cfg,
+        )
+        if ph_resp.get("code") != "0":
+            return False
+
+        ph_data = ph_resp.get("data", [])
+        if not ph_data:
+            return False
+
+        # Build lookup: instId → list of closed position records
+        ph_by_inst: dict = {}
+        for rec in ph_data:
+            inst = rec.get("instId", "")
+            if inst:
+                ph_by_inst.setdefault(inst, []).append(rec)
+
+        _updated = False
+        _close_type_map = {
+            "2": "tp_hit",
+            "4": "tp_hit",
+            "1": "sl_hit",
+            "3": "sl_hit",
+            "5": "sl_hit",
+        }
+
+        for sig in live_sigs:
+            sym      = sig.get("symbol", "")
+            inst_id  = _to_okx(sym)   # e.g. "BTCUSDT" → "BTC-USDT-SWAP"
+            records  = ph_by_inst.get(inst_id, [])
+            if not records:
+                continue
+
+            # Parse signal entry time as ms timestamp for comparison
+            try:
+                _entry_ms = int(_parse_iso_safe(sig["timestamp"]).timestamp() * 1000)
+            except Exception:
+                _entry_ms = 0
+
+            # Find the most recent closed record AFTER this signal's entry
+            _match = None
+            for rec in records:
+                try:
+                    _rec_ms = int(rec.get("uTime", 0) or 0)
+                except Exception:
+                    _rec_ms = 0
+                if _rec_ms > _entry_ms:
+                    if _match is None or _rec_ms > int(_match.get("uTime", 0) or 0):
+                        _match = rec
+
+            if _match is None:
+                continue
+
+            # Determine new status
+            _close_type  = str(_match.get("type", ""))
+            _new_status  = _close_type_map.get(_close_type, "closed_okx")
+            _close_px    = float(_match.get("closeAvgPx", 0) or 0) or None
+            _close_ts    = ""
+            try:
+                _close_ts = to_dubai(datetime.fromtimestamp(
+                    int(_match.get("uTime", 0)) / 1000, tz=timezone.utc
+                )).isoformat()
+            except Exception:
+                pass
+
+            # Guard: only update if still open (watcher may have already closed it)
+            if sig.get("status") != "open":
+                continue
+
+            sig["status"]      = _new_status
+            sig["close_price"] = _close_px if _close_px else sig.get("tp" if _new_status == "tp_hit" else "sl")
+            sig["close_time"]  = _close_ts
+            sig.pop("price_alert", None)
+            sig.pop("_dca_pending", None)
+            _append_error(
+                "trade",
+                f"OKX sync: {sym} marked {_new_status} "
+                f"(OKX type={_close_type}, closeAvgPx={_close_px})",
+                symbol=sym,
+            )
+            _updated = True
+
+        return _updated
+
+    except Exception as _sync_exc:
+        _append_error("watcher", f"OKX sync error: {_sync_exc}")
+        return False
+
+
 def _watcher_loop():
     """Background thread: polls open trades every `watcher_minutes`.
 
@@ -3556,6 +3672,14 @@ def _watcher_loop():
                                       if s.get("status") == "open"]
                 if _open_snapshot:
                     _watcher_update_open_signals(_open_snapshot)
+
+                    # ── OKX sync: close signals whose positions OKX already closed ──
+                    # Runs one positions-history API call to catch TP/SL/manual
+                    # closures that happened on OKX but weren't detected by candles.
+                    _sync_updated = _okx_sync_open_signals(_open_snapshot, cfg)
+                    if _sync_updated:
+                        with _log_lock:
+                            save_log(_b._bsc_log)
 
                     # Execute any DCA triggers inline. Uses the REAL fill
                     # pipeline when auto-trading is ON and the signal has a
@@ -5739,6 +5863,7 @@ def _build_signal_row(s: dict, is_open_table: bool = False,
         "sl_hit":      "❌ SL Hit",
         "dca_sl_hit":  "❌ DCA SL Hit",
         "queue_limit": "⏳ Queue Limit",
+        "closed_okx":  "🟠 Closed on OKX",
     }.get(status, status)
 
     # Alert column — only meaningful for open trades.
@@ -6462,11 +6587,12 @@ def _signal_tables_fragment():
                [s for s in _frag_signals if s.get("sector") == _frag_sector]
     filtered_sorted = sorted(filtered, key=lambda x: x.get("timestamp", ""), reverse=True)
 
-    _open_sigs    = [s for s in filtered_sorted if s.get("status") == "open"]
-    _tp_sigs      = [s for s in filtered_sorted if s.get("status") == "tp_hit"]
-    _sl_sigs      = [s for s in filtered_sorted if s.get("status") == "sl_hit"]
-    _dca_sl_sigs  = [s for s in filtered_sorted if s.get("status") == "dca_sl_hit"]
-    _queue_sigs   = [s for s in filtered_sorted if s.get("status") == "queue_limit"]
+    _open_sigs      = [s for s in filtered_sorted if s.get("status") == "open"]
+    _tp_sigs        = [s for s in filtered_sorted if s.get("status") == "tp_hit"]
+    _sl_sigs        = [s for s in filtered_sorted if s.get("status") == "sl_hit"]
+    _dca_sl_sigs    = [s for s in filtered_sorted if s.get("status") == "dca_sl_hit"]
+    _queue_sigs     = [s for s in filtered_sorted if s.get("status") == "queue_limit"]
+    _closed_okx_sigs = [s for s in filtered_sorted if s.get("status") == "closed_okx"]
 
     # ── Table 1: Open Signals ───────────────────────────────────────────────────────
     _render_sig_table(_open_sigs,  "🔵 Open Signals",  "No open signals right now.",
@@ -6817,6 +6943,14 @@ def _signal_tables_fragment():
             st.success("✅ Queue Limit records cleared.")
             st.rerun()
 
+    # ── Table 6: Closed on OKX ─────────────────────────────────────────────────────
+    # Positions that OKX closed (manually or otherwise) but weren't caught by the
+    # candle-based TP/SL detector. Shown separately so they're easy to review.
+    if _closed_okx_sigs:
+        st.divider()
+        _render_sig_table(_closed_okx_sigs, "🟠 Closed on OKX",
+                          "No manually closed positions.", show_pnl=True)
+
 
 _signal_tables_fragment()
 
@@ -6826,11 +6960,12 @@ _signal_tables_fragment()
 _filtered_pg   = signals if st.session_state.get("sector_filter","All") == "All" else \
                  [s for s in signals if s.get("sector") == st.session_state.get("sector_filter","All")]
 _fsorted_pg    = sorted(_filtered_pg, key=lambda x: x.get("timestamp",""), reverse=True)
-_open_sigs     = [s for s in _fsorted_pg if s.get("status") == "open"]
-_tp_sigs       = [s for s in _fsorted_pg if s.get("status") == "tp_hit"]
-_sl_sigs       = [s for s in _fsorted_pg if s.get("status") == "sl_hit"]
-_dca_sl_sigs   = [s for s in _fsorted_pg if s.get("status") == "dca_sl_hit"]
-_queue_sigs    = [s for s in _fsorted_pg if s.get("status") == "queue_limit"]
+_open_sigs      = [s for s in _fsorted_pg if s.get("status") == "open"]
+_tp_sigs        = [s for s in _fsorted_pg if s.get("status") == "tp_hit"]
+_sl_sigs        = [s for s in _fsorted_pg if s.get("status") == "sl_hit"]
+_dca_sl_sigs    = [s for s in _fsorted_pg if s.get("status") == "dca_sl_hit"]
+_queue_sigs     = [s for s in _fsorted_pg if s.get("status") == "queue_limit"]
+_closed_okx_sigs = [s for s in _fsorted_pg if s.get("status") == "closed_okx"]
 
 # ─────────────────────────────────────────────────────────────────────────────
 # OKX Live Positions Panel
