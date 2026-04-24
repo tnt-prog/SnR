@@ -2056,6 +2056,8 @@ def process(sym, cfg: dict, super_counter: dict = None, super_lock=None):
                         "pdz_zone_1h":  pdz_zone_1h,
                         "ema_cross_12_15m": "—",
                         "ema_cross_21_15m": "—",
+                        "atr_15m": "—",
+                        "atr_ratio": "—",
                     },
                 }
             # else: super cap exhausted — demote and fall through to F3-F10
@@ -2118,24 +2120,28 @@ def process(sym, cfg: dict, super_counter: dict = None, super_lock=None):
             return None
 
         # ── F5b: ATR(14) 15m — TP reachability filter ───────────────────────
+        # ATR is ALWAYS computed and stored in criteria so that the Difficulty
+        # column in the Open Signals table works regardless of whether the
+        # filter toggle is on or off.
         # ratio = (TP distance %) / (ATR %)
         # Strict: ratio ≤ 1.5  → TP within 1.5× ATR (very reachable)
         # Normal: ratio ≤ 2.0  → TP within 2× ATR
         # Relaxed: ratio ≤ 3.0 → TP within 3× ATR
         atr_15m_val = None
         atr_ratio_val = None
-        if cfg.get("use_atr_filter", False):
-            _atr_series = calc_atr(m15, 14)
-            if _atr_series and entry > 0:
-                atr_15m_val   = _atr_series[-1]
-                _tp_dist_pct  = float(cfg.get("tp_pct", 1.5))  # TP% from config
-                _atr_pct      = (atr_15m_val / entry) * 100.0
-                atr_ratio_val = (_tp_dist_pct / _atr_pct) if _atr_pct > 0 else None
-                _atr_thresh   = {"Strict": 1.5, "Normal": 2.0, "Relaxed": 3.0}.get(
-                                    cfg.get("atr_mode", "Normal"), 2.0)
-                if atr_ratio_val is not None and atr_ratio_val > _atr_thresh:
-                    _record_elim("f5b_atr", "f5b_elim_syms", sym)
-                    return None
+        _atr_series = calc_atr(m15, 14)
+        if _atr_series and entry > 0:
+            atr_15m_val   = _atr_series[-1]
+            _tp_dist_pct  = float(cfg.get("tp_pct", 1.5))  # TP% from config
+            _atr_pct      = (atr_15m_val / entry) * 100.0
+            atr_ratio_val = (_tp_dist_pct / _atr_pct) if _atr_pct > 0 else None
+        # Only REJECT the coin when the filter is explicitly enabled
+        if cfg.get("use_atr_filter", False) and atr_ratio_val is not None:
+            _atr_thresh = {"Strict": 1.5, "Normal": 2.0, "Relaxed": 3.0}.get(
+                              cfg.get("atr_mode", "Normal"), 2.0)
+            if atr_ratio_val > _atr_thresh:
+                _record_elim("f5b_atr", "f5b_elim_syms", sym)
+                return None
 
         # ── F6: EMA (per-timeframe tracking) ────────────────────────────────
         ema_3m_val = ema_5m_val = ema_15m_val = None
@@ -3319,6 +3325,31 @@ def _update_one_signal(sig: dict) -> None:
                 else:
                     sig["price_alert"]     = False
                     sig["price_alert_pct"] = 0.0
+
+            # ── ATR backfill: populate atr_ratio for signals that predate ATR ──
+            # If this open signal was created before ATR computation was added,
+            # its criteria dict will have atr_ratio == "—" or missing entirely.
+            # We fetch 15m candles here (one extra call per affected signal,
+            # only done once — result is stored so subsequent cycles skip it).
+            _crit = sig.get("criteria", {})
+            _stored_ratio = _crit.get("atr_ratio", "—")
+            if _stored_ratio in (None, "—", ""):
+                try:
+                    _m15_back = get_klines(sig["symbol"], "15m", 50)
+                    _atr_back = calc_atr(_m15_back, 14)
+                    _entry_b  = float(sig.get("entry", 0) or 0)
+                    if _atr_back and _entry_b > 0:
+                        _atr_val_b  = _atr_back[-1]
+                        _atr_pct_b  = (_atr_val_b / _entry_b) * 100.0
+                        _tp_b       = float(sig.get("tp", 0) or 0)
+                        _tp_pct_b   = ((_tp_b - _entry_b) / _entry_b * 100.0) if _tp_b > 0 else None
+                        _ratio_b    = (_tp_pct_b / _atr_pct_b) if (_tp_pct_b and _atr_pct_b > 0) else None
+                        if _ratio_b is not None:
+                            _crit["atr_15m"]   = round(_atr_val_b, 8)
+                            _crit["atr_ratio"] = round(_ratio_b, 3)
+                            sig["criteria"]    = _crit
+                except Exception:
+                    pass   # best-effort — leave "—" if fetch fails
     except Exception as _upd_exc:
         # Previously swallowed silently — surfaced now so malformed signals
         # (bad timestamp, missing tp/sl, OKX fetch failure) become visible
@@ -5227,18 +5258,8 @@ if last_scan and last_scan != "never":
     except Exception: pass
 
 col_h1, col_h2, col_h3 = st.columns([3, 1, 1])
-col_h1.caption(f"Last scan: {last_scan}   |   Auto-refresh every 30 s   |   🕐 Dubai / GST (UTC+4)")
+col_h1.caption(f"Last scan: {last_scan}   |   🕐 Dubai / GST (UTC+4)")
 if col_h2.button("🔄 Refresh", key="manual_refresh"): st.rerun()
-
-# ── Auto-refresh every 30 seconds (JS injection — no extra package needed) ────
-# Injects a tiny script into a zero-height iframe; after 30 s it reloads the
-# parent Streamlit page so the UI always shows the latest scan results without
-# the user having to click the Refresh button.
-import streamlit.components.v1 as _stc
-_stc.html(
-    "<script>setTimeout(function(){window.parent.location.reload();},30000);</script>",
-    height=0,
-)
 
 # ── API connection status badge ───────────────────────────────────────────────
 _api_cs   = getattr(_b, "_bsc_api_conn_status",
@@ -7798,6 +7819,7 @@ def _build_diagnostics_text() -> str:
 
 # ── Download Diagnostics button ────────────────────────────────────────────────────────────
 try:
+    _diag_text = _build_diagnostics_text()
     _diag_text = _build_diagnostics_text()
     _diag_fname = "diagnostics_" + dubai_now().strftime("%Y%m%d_%H%M%S") + ".txt"
     st.download_button(
