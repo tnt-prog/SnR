@@ -1052,14 +1052,26 @@ def _get_ct_val(sym: str) -> float:
         f"— order refused to prevent wrong position sizing"
     )
 
-def _set_leverage_okx(sym: str, cfg: dict) -> None:
-    """Set leverage for a symbol before placing an order."""
+def _set_leverage_okx(sym: str, cfg: dict) -> dict:
+    """Set leverage for a symbol before placing an order.
+
+    Returns the raw OKX API response dict.
+    Raises RuntimeError if OKX rejects the leverage change so callers can
+    decide whether to abort the order or treat it as a warning.
+    """
     lev = str(min(int(cfg.get("trade_leverage", 10)), get_max_leverage(sym)))
-    _trade_post("/api/v5/account/set-leverage", {
+    resp = _trade_post("/api/v5/account/set-leverage", {
         "instId":  _to_okx(sym),
         "lever":   lev,
         "mgnMode": cfg.get("trade_margin_mode", "isolated"),
     }, cfg)
+    if resp.get("code") != "0":
+        okx_msg = resp.get("msg", "") or str(resp)
+        raise RuntimeError(
+            f"OKX rejected set-leverage {lev}x for {_to_okx(sym)}: {okx_msg} "
+            f"(code={resp.get('code','')})"
+        )
+    return resp
 
 _OKX_KNOWN_ERRORS = {
     "51010": (
@@ -1211,12 +1223,18 @@ def place_okx_order(sig: dict, cfg: dict) -> dict:
                           symbol=sym, endpoint="/api/v5/account/config")
         _base_info["is_hedge"] = is_hedge
 
-        # ── Step 1: Set leverage ──────────────────────────────────────────────
+        # ── Step 1: Set leverage — HARD FAIL if OKX rejects ─────────────────
+        # If OKX refuses to apply the requested leverage we must NOT place the
+        # order — otherwise it would open at whatever leverage OKX currently
+        # has set for this symbol (could be far lower than intended).
         try:
             _set_leverage_okx(sym, cfg)
         except Exception as lev_exc:
-            _append_error("trade", f"set-leverage warning: {lev_exc}",
+            _err = f"set-leverage failed — order aborted: {lev_exc}"
+            _append_error("trade", _err,
                           symbol=sym, endpoint="/api/v5/account/set-leverage")
+            return {"ordId": "", "algoId": "", "sz": 0,
+                    "status": "error", "error": _err, **_base_info}
 
         # ── Step 2: Place clean market buy ───────────────────────────────────
         order_body: dict = {
@@ -1394,11 +1412,15 @@ def place_okx_manual_order(sym: str, entry: float, tp: float, sl: float,
             is_hedge = (getattr(_b, "_bsc_api_conn_status", {})
                         .get("pos_mode", "net_mode") == "long_short_mode")
 
-        # Set leverage
+        # Set leverage — HARD FAIL if OKX rejects
         try:
             _set_leverage_okx(sym, cfg)
         except Exception as lev_exc:
-            _append_error("trade", f"set-leverage warning: {lev_exc}", symbol=sym)
+            _err = f"set-leverage failed — order aborted: {lev_exc}"
+            _append_error("trade", _err, symbol=sym,
+                          endpoint="/api/v5/account/set-leverage")
+            return {"ordId": "", "algoId": "", "sz": 0,
+                    "status": "error", "error": _err}
 
         # ── Build order body ──────────────────────────────────────────────────
         # LIMIT: embed TP/SL via attachAlgoOrds in the same request.
@@ -2699,11 +2721,12 @@ def place_okx_dca_order(sig: dict, cfg: dict, dca_usdt: float) -> dict:
         except Exception:
             pass
 
-        # Re-apply leverage (idempotent; OKX accepts)
+        # Re-apply leverage (idempotent; warning-only for DCA — position already
+        # exists at its original leverage so a rejection here is non-critical)
         try:
             _set_leverage_okx(sym, cfg)
         except Exception as lev_exc:
-            _append_error("trade", f"DCA set-leverage warning: {lev_exc}",
+            _append_error("trade", f"DCA set-leverage warning (non-critical): {lev_exc}",
                           symbol=sym, endpoint="/api/v5/account/set-leverage")
 
         order_body: dict = {
@@ -7961,6 +7984,47 @@ def _build_diagnostics_text() -> str:
     else:
         _push("  (none)")
 
+    _hdr("SIGNALS · CLOSED ON OKX (manual / undetected close)")
+    if _closed_okx_sigs:
+        for _s in _closed_okx_sigs:
+            _dump_signal(_s)
+    else:
+        _push("  (none)")
+
+    # ── Watchlist ──────────────────────────────────────────────────────────────────
+    _hdr("WATCHLIST")
+    try:
+        _wl = list(_snap_cfg.get("watchlist", []))
+        _push(f"  Total coins: {len(_wl)}")
+        for _wi, _wsym in enumerate(_wl, 1):
+            _push(f"  {_wi:>3}. {_wsym}")
+    except Exception as _wle:
+        _push(f"  <error reading watchlist: {_wle}>")
+
+    # ── API Error Log ──────────────────────────────────────────────────────────────
+    _hdr("API ERROR LOG (most recent 200 entries)")
+    try:
+        with _log_lock:
+            _err_snap = list((_b._bsc_log.get("errors") or []))
+        _err_snap_sorted = sorted(_err_snap, key=lambda e: e.get("ts", ""), reverse=True)
+        _err_limit = _err_snap_sorted[:200]
+        if _err_limit:
+            for _e in _err_limit:
+                _ets  = _fmt_ts(_e.get("ts", ""))
+                _etype = _e.get("type", "?")
+                _emsg  = _e.get("message", "") or _e.get("msg", "")
+                _esym  = _e.get("symbol", "")
+                _eep   = _e.get("endpoint", "")
+                _line  = f"  [{_ets}] [{_etype}]"
+                if _esym: _line += f" [{_esym}]"
+                if _eep:  _line += f" [{_eep}]"
+                _line += f"  {_emsg}"
+                _push(_line)
+        else:
+            _push("  (no errors logged)")
+    except Exception as _ele:
+        _push(f"  <error reading error log: {_ele}>")
+
     # ── Filter funnel (last scan) ──────────────────────────────────────────────────
     _hdr("FILTER FUNNEL (last scan)")
     try:
@@ -7983,4 +8047,13 @@ def _build_diagnostics_text() -> str:
 
     return "\n".join(_lines)
 
-st.text_area("📋 Debug Snapshot", _build_diagnostics_text(), height=400, key="debug_snap_area")
+_diag_text = _build_diagnostics_text()
+st.text_area("📋 Debug Snapshot", _diag_text, height=400, key="debug_snap_area")
+_diag_filename = f"diagnostics_{dubai_now().strftime('%Y%m%d_%H%M%S')}.txt"
+st.download_button(
+    label="⬇️ Download Diagnostics",
+    data=_diag_text.encode("utf-8"),
+    file_name=_diag_filename,
+    mime="text/plain",
+    use_container_width=False,
+)
