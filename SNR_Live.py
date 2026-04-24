@@ -110,41 +110,43 @@ DEFAULT_CONFIG: dict = {
     "use_rsi_1h":           True,   # F5 — 1h RSI
     "rsi_1h_min":           30,
     "rsi_1h_max":           95,
-    "loop_minutes":         5,
-    "cooldown_minutes":     5,
+    "loop_minutes":         4,
+    "cooldown_minutes":     2,
     "use_ema_3m":           False,
     "ema_period_3m":      12,
-    "use_ema_5m":         True,
+    "use_ema_5m":         False,
     "ema_period_5m":      12,
     "use_ema_15m":        True,
     "ema_period_15m":     12,
-    "use_macd_3m":        True,   # F7 — MACD dark-green (3m)
-    "use_macd_5m":        True,   # F7 — MACD dark-green (5m)
+    "use_macd_3m":        False,  # F7 — MACD dark-green (3m)
+    "use_macd_5m":        False,  # F7 — MACD dark-green (5m)
     "use_macd_15m":       True,   # F7 — MACD dark-green (15m)
-    "use_sar_3m":         True,   # F8 — Parabolic SAR (3m)
+    "use_sar_3m":         False,  # F8 — Parabolic SAR (3m)
     "use_sar_5m":         True,   # F8 — Parabolic SAR (5m)
     "use_sar_15m":        True,   # F8 — Parabolic SAR (15m)
     "use_vol_spike":      False,
     "vol_spike_mult":     2.0,
     "vol_spike_lookback": 20,
-    "use_pdz_5m":            True,   # F3 — PDZ (5m)
+    "use_pdz_5m":            False,  # F3 — PDZ (5m)
     "use_pdz_15m":           True,   # F2 — PDZ (15m)
+    "use_atr_filter":        False,  # F5b — ATR(14) 15m TP-reachability filter
+    "atr_mode":              "Normal",  # "Strict" (≤1.5×) | "Normal" (≤2.0×) | "Relaxed" (≤3.0×)
     "use_ema_cross_15m":     True,   # F10 — 15m EMA crossover (fast > slow)
     "ema_cross_fast_15m":    12,
     "ema_cross_slow_15m":    21,
     # ── Queue limit (max concurrent open trades) ──────────────────────────────
-    "max_open_trades":       15,     # Hard cap on concurrent open trades.
+    "max_open_trades":       7,      # Hard cap on concurrent open trades.
                                      # Lowering this does NOT close existing
                                      # trades — new signals during overflow are
                                      # logged as queue_limit until natural TP/SL
                                      # closures bring the count down.
     # ── Super Setup cap (max concurrent Super trades) ─────────────────────────
-    "max_super_trades":      5,      # Hard cap on concurrent open Super trades.
+    "max_super_trades":      2,      # Hard cap on concurrent open Super trades.
                                      # When cap is reached, Super-eligible coins
                                      # fall through to the normal F3–F10 pipeline
                                      # and open as regular trades if they pass.
     # ── SL cooldown (per-coin blackout after SL hit) ──────────────────────────
-    "sl_cooldown_hours":     24,     # Hours to skip a coin after an SL hit.
+    "sl_cooldown_hours":     4,      # Hours to skip a coin after an SL hit.
                                      # Applies UNIVERSALLY — even to Super Setups.
                                      # Separate from TP cooldown (cooldown_minutes).
     # ── Auto-trading (OKX Demo / Live) ────────────────────────────────────────
@@ -153,8 +155,8 @@ DEFAULT_CONFIG: dict = {
     "api_key":               "",
     "api_secret":            "",
     "api_passphrase":        "",
-    "trade_usdt_amount":     10.0,   # USDT collateral per trade (before leverage)
-    "trade_leverage":        10,     # leverage applied (capped by MAX_LEVERAGE)
+    "trade_usdt_amount":     5.0,    # USDT collateral per trade (before leverage)
+    "trade_leverage":        20,     # leverage applied (capped by MAX_LEVERAGE)
     "trade_margin_mode":     "isolated",  # "cross" or "isolated"
     # ── DCA (Dollar-Cost Averaging) ──────────────────────────────────────────
     # 0 = DCA OFF (legacy behavior — sidebar TP/SL apply normally).
@@ -167,7 +169,7 @@ DEFAULT_CONFIG: dict = {
     # earlier DCAs: blended_avg × (1 − sl_distance_pct). A breach routes
     # the trade into a dedicated DCA SL Hit table. When DCA > 0, the sidebar
     # SL % is ignored — only TP and this SL can close the trade.
-    "trade_max_dca":         1,
+    "trade_max_dca":         3,
     # ── DCA trigger drop percentages ──────────────────────────────────────────
     # Two separate configurables, shown in the sidebar based on selected
     # margin mode.
@@ -184,7 +186,7 @@ DEFAULT_CONFIG: dict = {
     #       default 7 → fires at −7% from avg, regardless of leverage.
     # Snapshotted onto the signal at entry time so sidebar tweaks don't
     # retroactively change already-open trades.
-    "dca_iso_distance_pct":  70.0,   # 10–95 (step 5), isolated
+    "dca_iso_distance_pct":  80.0,   # 10–95 (step 5), isolated
     "dca_cross_drop_pct":    7.0,    # 0.1–50, cross
     # ── Open-Trade Watcher loop (1-minute DCA/TP checker) ─────────────────────
     # When > 0 AND < loop_minutes: a dedicated background thread runs every
@@ -1624,6 +1626,29 @@ def _pround(x, sig=6):
     except Exception:
         return x
 
+def calc_atr(candles: list, period: int = 14) -> list:
+    """
+    Average True Range (ATR) using Wilder's smoothing.
+    Returns a list of ATR values (same length as candles minus the warm-up).
+    Each candle must have 'high', 'low', 'close' keys.
+    """
+    if len(candles) < period + 1:
+        return []
+    trs = []
+    for i in range(1, len(candles)):
+        h = candles[i]["high"]
+        l = candles[i]["low"]
+        pc = candles[i - 1]["close"]
+        trs.append(max(h - l, abs(h - pc), abs(l - pc)))
+    if len(trs) < period:
+        return []
+    # Seed with simple average of first `period` TRs
+    atr = [sum(trs[:period]) / period]
+    for tr in trs[period:]:
+        atr.append((atr[-1] * (period - 1) + tr) / period)
+    return atr
+
+
 def calc_rsi_series(closes, period=14):
     if len(closes) < period + 2: return []
     deltas = [closes[i]-closes[i-1] for i in range(1, len(closes))]
@@ -1732,7 +1757,7 @@ def calc_parabolic_sar(candles: list, af_start=0.02, af_step=0.02, af_max=0.20):
 # ─────────────────────────────────────────────────────────────────────────────
 # F12 — Premium / Discount / Equilibrium zone  (DZSAFM Pine Script logic)
 # ─────────────────────────────────────────────────────────────────────────────
-def calc_pdz_zone(candles: list, price: float) -> tuple:
+def calc_pdz_zone(candles: list, price: float, buffer_pct: float = 0.015) -> tuple:
     """
     Compute Smart Money Premium/Discount/Equilibrium zones from up to the last
     50 candles on a given timeframe (mirrors the DZSAFM TradingView indicator exactly).
@@ -1746,8 +1771,8 @@ def calc_pdz_zone(candles: list, price: float) -> tuple:
       • Discount zone                         → QUALIFIES  (greatest room to pump)
       • Equilibrium zone                      → REJECTED   (indecision, risky)
       • Premium zone                          → REJECTED   (no upward room)
-      • Band A (equil_top < price < prem_bot) → QUALIFIES if room ≥ 1.5 %
-      • Band B (disc_top  < price < equil_bot)→ QUALIFIES if room ≥ 1.5 %
+      • Band A (equil_top < price < prem_bot) → QUALIFIES if room ≥ buffer_pct (= tp_pct)
+      • Band B (disc_top  < price < equil_bot)→ QUALIFIES if room ≥ buffer_pct (= tp_pct)
 
     Returns (qualifies: bool, zone_label: str)
     """
@@ -1777,8 +1802,8 @@ def calc_pdz_zone(candles: list, price: float) -> tuple:
     equil_bottom   = 0.475 * H + 0.525 * L  # bottom edge of Equilibrium zone
     discount_top   = 0.05  * H + 0.95  * L  # top edge of Discount zone
 
-    band_a_ceil = premium_bottom * (1 - 0.015)   # 1.5% below Premium boundary
-    band_b_ceil = equil_bottom   * (1 - 0.015)   # 1.5% below Equilibrium boundary
+    band_a_ceil = premium_bottom * (1 - buffer_pct)   # buffer below Premium boundary
+    band_b_ceil = equil_bottom   * (1 - buffer_pct)   # buffer below Equilibrium boundary
 
     if price <= discount_top:
         # Fully inside Discount zone — best long setup
@@ -1818,7 +1843,10 @@ def _reset_filter_counts():
         "f3_pdz5m":         0,   # F3 — PDZ 5m
         "f4_rsi5m":         0,   # F4 — 5m RSI
         "f5_rsi1h":         0,   # F5 — 1h RSI
-        "f6_ema":           0,   # F6 — EMA
+        "f5b_atr":          0,   # F5b — ATR(14) 15m TP-reachability
+        "f6_ema_3m":        0,   # F6 — EMA 3m
+        "f6_ema_5m":        0,   # F6 — EMA 5m
+        "f6_ema_15m":       0,   # F6 — EMA 15m
         # F7 MACD — per timeframe
         "f7_macd_3m":       0,
         "f7_macd_5m":       0,
@@ -1843,7 +1871,10 @@ def _reset_filter_counts():
         "f3_elim_syms":           [],
         "f4_elim_syms":           [],
         "f5_elim_syms":           [],
-        "f6_elim_syms":           [],
+        "f5b_elim_syms":          [],
+        "f6_ema_3m_elim_syms":    [],
+        "f6_ema_5m_elim_syms":    [],
+        "f6_ema_15m_elim_syms":   [],
         "f7_macd_3m_elim_syms":   [],
         "f7_macd_5m_elim_syms":   [],
         "f7_macd_15m_elim_syms":  [],
@@ -1858,6 +1889,9 @@ def _reset_filter_counts():
         "super_cap_demoted_syms": [],
         "f_sl_cooldown_syms":     [],
         "blocked_by_sl_cooldown_syms": [],
+        # ── Flush/scan timing (used to keep funnel hidden until a full post-flush scan) ─
+        "flushed_at":        0.0,
+        "scan_completed_at": 0.0,
     }
     with _filter_lock:
         _filter_counts.clear()
@@ -1960,13 +1994,13 @@ def process(sym, cfg: dict, super_counter: dict = None, super_lock=None):
         pdz_zone_1h        = "—"
         is_super_eligible  = False
         if cfg.get("use_pdz_15m", True):
-            pdz_pass_15m, pdz_zone_15m = calc_pdz_zone(m15_quick, entry_q)
+            pdz_pass_15m, pdz_zone_15m = calc_pdz_zone(m15_quick, entry_q, float(cfg.get("tp_pct", 1.2)) / 100.0)
             if pdz_zone_15m == "Discount":
                 # 15m is Discount — now we need 1h also in Discount for Super
                 # (if 1h fetch failed, can't verify → treat as not-super, fall
                 # through to F3-F10 rather than blocking entry).
                 if m1h_quick:
-                    _, pdz_zone_1h = calc_pdz_zone(m1h_quick, entry_q)
+                    _, pdz_zone_1h = calc_pdz_zone(m1h_quick, entry_q, float(cfg.get("tp_pct", 1.2)) / 100.0)
                 if pdz_zone_1h == "Discount":
                     is_super_eligible = True      # ⭐ BOTH 15m and 1h Discount
                 # else: only 15m Discount (not 1h) → fall through to F3-F10
@@ -2022,6 +2056,8 @@ def process(sym, cfg: dict, super_counter: dict = None, super_lock=None):
                         "pdz_zone_1h":  pdz_zone_1h,
                         "ema_cross_12_15m": "—",
                         "ema_cross_21_15m": "—",
+                        "atr_15m": "—",
+                        "atr_ratio": "—",
                     },
                 }
             # else: super cap exhausted — demote and fall through to F3-F10
@@ -2030,7 +2066,7 @@ def process(sym, cfg: dict, super_counter: dict = None, super_lock=None):
         # ── F3: PDZ 5m ────────────────────────────────────────────────────────
         pdz_zone_5m = "—"
         if cfg.get("use_pdz_5m", True):
-            pdz_pass_5m, pdz_zone_5m = calc_pdz_zone(m5_quick, entry_q)
+            pdz_pass_5m, pdz_zone_5m = calc_pdz_zone(m5_quick, entry_q, float(cfg.get("tp_pct", 1.2)) / 100.0)
             if not pdz_pass_5m:
                 _record_elim("f3_pdz5m", "f3_elim_syms", sym)
                 return None
@@ -2083,24 +2119,48 @@ def process(sym, cfg: dict, super_counter: dict = None, super_lock=None):
             _record_elim("f5_rsi1h", "f5_elim_syms", sym)
             return None
 
-        # ── F6: EMA ───────────────────────────────────────────────────────────
+        # ── F5b: ATR(14) 15m — TP reachability filter ───────────────────────
+        # ATR is ALWAYS computed and stored in criteria so that the Difficulty
+        # column in the Open Signals table works regardless of whether the
+        # filter toggle is on or off.
+        # ratio = (TP distance %) / (ATR %)
+        # Strict: ratio ≤ 1.5  → TP within 1.5× ATR (very reachable)
+        # Normal: ratio ≤ 2.0  → TP within 2× ATR
+        # Relaxed: ratio ≤ 3.0 → TP within 3× ATR
+        atr_15m_val = None
+        atr_ratio_val = None
+        _atr_series = calc_atr(m15, 14)
+        if _atr_series and entry > 0:
+            atr_15m_val   = _atr_series[-1]
+            _tp_dist_pct  = float(cfg.get("tp_pct", 1.5))  # TP% from config
+            _atr_pct      = (atr_15m_val / entry) * 100.0
+            atr_ratio_val = (_tp_dist_pct / _atr_pct) if _atr_pct > 0 else None
+        # Only REJECT the coin when the filter is explicitly enabled
+        if cfg.get("use_atr_filter", False) and atr_ratio_val is not None:
+            _atr_thresh = {"Strict": 1.5, "Normal": 2.0, "Relaxed": 3.0}.get(
+                              cfg.get("atr_mode", "Normal"), 2.0)
+            if atr_ratio_val > _atr_thresh:
+                _record_elim("f5b_atr", "f5b_elim_syms", sym)
+                return None
+
+        # ── F6: EMA (per-timeframe tracking) ────────────────────────────────
         ema_3m_val = ema_5m_val = ema_15m_val = None
         if cfg.get("use_ema_3m"):
             ema = calc_ema(closes_3m, max(2, int(cfg.get("ema_period_3m", 12))))
             if not ema or entry < ema[-1]:
-                _record_elim("f6_ema", "f6_elim_syms", sym)
+                _record_elim("f6_ema_3m", "f6_ema_3m_elim_syms", sym)
                 return None
             ema_3m_val = _pround(ema[-1])
         if cfg.get("use_ema_5m"):
             ema = calc_ema(closes_5m, max(2, int(cfg.get("ema_period_5m", 12))))
             if not ema or entry < ema[-1]:
-                _record_elim("f6_ema", "f6_elim_syms", sym)
+                _record_elim("f6_ema_5m", "f6_ema_5m_elim_syms", sym)
                 return None
             ema_5m_val = _pround(ema[-1])
         if cfg.get("use_ema_15m"):
             ema = calc_ema(closes_15m, max(2, int(cfg.get("ema_period_15m", 12))))
             if not ema or entry < ema[-1]:
-                _record_elim("f6_ema", "f6_elim_syms", sym)
+                _record_elim("f6_ema_15m", "f6_ema_15m_elim_syms", sym)
                 return None
             ema_15m_val = _pround(ema[-1])
 
@@ -2224,6 +2284,8 @@ def process(sym, cfg: dict, super_counter: dict = None, super_lock=None):
             "pdz_zone_1h":  pdz_zone_1h  if cfg.get("use_pdz_15m", True) else "—",
             "ema_cross_12_15m": ema_cross_12_15m_val if cfg.get("use_ema_cross_15m", True) else "—",
             "ema_cross_21_15m": ema_cross_21_15m_val if cfg.get("use_ema_cross_15m", True) else "—",
+            "atr_15m":          round(atr_15m_val, 8)  if atr_15m_val   is not None else "—",
+            "atr_ratio":        round(atr_ratio_val, 3) if atr_ratio_val is not None else "—",
         }
 
         return {
@@ -2326,6 +2388,8 @@ def scan(cfg: dict, super_slots_remaining: int = None, skip_symbols: set = None)
             if r and r != "error":
                 results.append(r)
 
+    with _filter_lock:
+        _filter_counts["scan_completed_at"] = time.time()
     return sorted(results, key=lambda x: x["symbol"]), _filter_counts.get("errors", 0)
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2507,20 +2571,22 @@ def _dca_compute_trigger(sig: dict, cfg: dict = None) -> float:
     the signal at entry time so later sidebar changes don't retroactively
     alter already-open trades:
 
-      Isolated: `dca_iso_distance_pct` % = DISTANCE FROM LIQUIDATION toward
-                entry, measured as a fraction of the entry-to-liq range.
-                10 → fires very close to liquidation (aggressive).
-                95 → fires very close to entry (conservative).
+      Isolated: `dca_iso_distance_pct` % = HOW FAR PRICE MUST DROP from
+                avg_entry toward liquidation before next DCA fires, expressed
+                as a fraction of the full entry-to-liq range.
+                10 → fires very close to entry (conservative / early).
+                80 → fires 80% of the way toward liquidation (aggressive).
+                95 → fires almost at liquidation (very aggressive).
 
                 Formula:
-                  dca_drop % = (1 / leverage) × (1 − iso_dist / 100)
+                  dca_drop % = (1 / leverage) × (iso_dist / 100)
                   DCA price  = avg_entry × (1 − dca_drop %)
 
                 Example — entry $100 · 10× → liq ≈ $90:
-                  iso_dist=10  →  drop 9%    →  DCA at $91
+                  iso_dist=10  →  drop 1%    →  DCA at $99
                   iso_dist=50  →  drop 5%    →  DCA at $95
-                  iso_dist=70  →  drop 3%    →  DCA at $97
-                  iso_dist=95  →  drop 0.5%  →  DCA at $99.50
+                  iso_dist=80  →  drop 8%    →  DCA at $92
+                  iso_dist=95  →  drop 9.5%  →  DCA at $90.50
 
       Cross:    `dca_cross_drop_pct` % fixed drop below blended avg (default 7%).
                 Leverage-independent.
@@ -2541,10 +2607,10 @@ def _dca_compute_trigger(sig: dict, cfg: dict = None) -> float:
         iso_dist = float(sig.get("dca_iso_distance_pct",
                                  cfg.get("dca_iso_distance_pct", 70.0)) or 70.0)
         iso_dist = max(10.0, min(95.0, iso_dist))  # clamp to dropdown range
-        # New semantic: iso_dist = % DISTANCE ABOVE LIQUIDATION toward entry.
-        # drop_pct = (1/lev) × (1 − iso_dist/100)
-        # At 10×, iso_dist=70 → drop 3% → trigger at entry × 0.97.
-        dca_drop_pct = (1.0 / lev) * (1.0 - iso_dist / 100.0)
+        # iso_dist = % of the entry-to-liq range price must drop before next DCA fires.
+        # drop_pct = (1/lev) × (iso_dist/100)
+        # At 20×, iso_dist=80 → drop 4% → trigger at entry × 0.96.
+        dca_drop_pct = (1.0 / lev) * (iso_dist / 100.0)
     else:
         cross_drop = float(sig.get("dca_cross_drop_pct",
                                    cfg.get("dca_cross_drop_pct", 7.0)) or 7.0)
@@ -3259,6 +3325,31 @@ def _update_one_signal(sig: dict) -> None:
                 else:
                     sig["price_alert"]     = False
                     sig["price_alert_pct"] = 0.0
+
+            # ── ATR backfill: populate atr_ratio for signals that predate ATR ──
+            # If this open signal was created before ATR computation was added,
+            # its criteria dict will have atr_ratio == "—" or missing entirely.
+            # We fetch 15m candles here (one extra call per affected signal,
+            # only done once — result is stored so subsequent cycles skip it).
+            _crit = sig.get("criteria", {})
+            _stored_ratio = _crit.get("atr_ratio", "—")
+            if _stored_ratio in (None, "—", ""):
+                try:
+                    _m15_back = get_klines(sig["symbol"], "15m", 50)
+                    _atr_back = calc_atr(_m15_back, 14)
+                    _entry_b  = float(sig.get("entry", 0) or 0)
+                    if _atr_back and _entry_b > 0:
+                        _atr_val_b  = _atr_back[-1]
+                        _atr_pct_b  = (_atr_val_b / _entry_b) * 100.0
+                        _tp_b       = float(sig.get("tp", 0) or 0)
+                        _tp_pct_b   = ((_tp_b - _entry_b) / _entry_b * 100.0) if _tp_b > 0 else None
+                        _ratio_b    = (_tp_pct_b / _atr_pct_b) if (_tp_pct_b and _atr_pct_b > 0) else None
+                        if _ratio_b is not None:
+                            _crit["atr_15m"]   = round(_atr_val_b, 8)
+                            _crit["atr_ratio"] = round(_ratio_b, 3)
+                            sig["criteria"]    = _crit
+                except Exception:
+                    pass   # best-effort — leave "—" if fetch fails
     except Exception as _upd_exc:
         # Previously swallowed silently — surfaced now so malformed signals
         # (bad timestamp, missing tp/sl, OKX fetch failure) become visible
@@ -4561,6 +4652,37 @@ with st.sidebar:
                                      disabled=not new_use_rsi_1h)
     st.divider()
 
+    # ── F5b: ATR(14) 15m TP-Reachability Filter ────────────────────────────────
+    st.markdown("**📐 F5b — ATR Filter** (15m TP reachability)",
+                help=(
+                    "F5b — ATR(14) TP-Reachability Filter\n\n"
+                    "Rejects coins whose TP target is too far relative to the current "
+                    "Average True Range (ATR) on the 15m timeframe.\n\n"
+                    "Formula: ratio = TP% / ATR%\n\n"
+                    "  • Strict  (≤1.5×) — TP must be within 1.5× the ATR. "
+                    "Only coins where the market regularly moves at least TP/1.5 per candle pass.\n"
+                    "  • Normal  (≤2.0×) — TP within 2× ATR. Balanced setting.\n"
+                    "  • Relaxed (≤3.0×) — TP within 3× ATR. Accepts coins with lower volatility.\n\n"
+                    "A higher ratio means TP is harder to reach given current market movement. "
+                    "ATR is computed on 15m candles (already fetched) — no extra API call."
+                ))
+    new_use_atr_filter = st.checkbox(
+        "Enable F5b — ATR Filter",
+        value=bool(_snap_cfg.get("use_atr_filter", False)), key="cfg_use_atr_filter")
+    new_atr_mode = st.selectbox(
+        "ATR Mode",
+        options=["Strict", "Normal", "Relaxed"],
+        index=["Strict", "Normal", "Relaxed"].index(_snap_cfg.get("atr_mode", "Normal")),
+        key="cfg_atr_mode",
+        disabled=not new_use_atr_filter,
+        help="Strict=ratio≤1.5  ·  Normal=ratio≤2.0  ·  Relaxed=ratio≤3.0")
+    _atr_thresh_disp = {"Strict": "≤1.5×", "Normal": "≤2.0×", "Relaxed": "≤3.0×"}.get(new_atr_mode, "≤2.0×")
+    if new_use_atr_filter:
+        st.caption(f"✅ ATR filter ON — {new_atr_mode} mode: TP%/ATR% {_atr_thresh_disp}")
+    else:
+        st.caption("⚫ ATR filter disabled")
+    st.divider()
+
     # ── F6: EMA Selection ──────────────────────────────────────────────────────
     st.markdown("**📉 F6 — EMA Selection** (price must be above EMA)",
                 help=(
@@ -4893,6 +5015,8 @@ with st.sidebar:
         #     is reinitialised to zero-state, keeping the same object reference
         #     that the scanner thread uses — avoids the split-reference bug)
         _reset_filter_counts()
+        with _filter_lock:
+            _filter_counts["flushed_at"] = time.time()
         # 3 — API error log
         with getattr(_b, "_bsc_error_log_lock", threading.Lock()):
             if hasattr(_b, "_bsc_error_log"):
@@ -4939,6 +5063,8 @@ with st.sidebar:
             "use_pre_filter":      bool(new_use_pre_filter),
             "use_rsi_5m":          bool(new_use_rsi_5m),
             "use_rsi_1h":          bool(new_use_rsi_1h),
+            "use_atr_filter":      bool(new_use_atr_filter),
+            "atr_mode":            new_atr_mode,
             # filter parameters
             "rsi_5m_min": int(new_rsi5_min),
             "rsi_1h_min": int(new_rsi1h_min), "rsi_1h_max": int(new_rsi1h_max),
@@ -5132,7 +5258,7 @@ if last_scan and last_scan != "never":
     except Exception: pass
 
 col_h1, col_h2, col_h3 = st.columns([3, 1, 1])
-col_h1.caption(f"Last scan: {last_scan}   |   Auto-refresh every 30 s   |   🕐 Dubai / GST (UTC+4)")
+col_h1.caption(f"Last scan: {last_scan}   |   🕐 Dubai / GST (UTC+4)")
 if col_h2.button("🔄 Refresh", key="manual_refresh"): st.rerun()
 
 # ── API connection status badge ───────────────────────────────────────────────
@@ -5156,6 +5282,25 @@ else:
 if _trade_on and _api_stat == "ok":
     _tested_str = fmt_dubai(_api_cs.get("tested_at", "")) if _api_cs.get("tested_at") else "—"
     st.caption(f"🤖 Auto-Trading active · {_api_cs.get('message','')} · tested {_tested_str}")
+
+# ── Capital requirement summary ────────────────────────────────────────────────
+_cap_base      = float(_snap_cfg.get("trade_usdt_amount", 5.0))
+_cap_dca_max   = int(_snap_cfg.get("trade_max_dca", 3))
+_cap_pool      = int(_snap_cfg.get("max_open_trades", 7))
+_cap_per_trade = _cap_base * (2 ** _cap_dca_max)   # original + all DCA adds
+_cap_minimum   = _cap_per_trade * _cap_pool
+_cap_buffer    = _cap_minimum * 0.25
+_cap_total     = _cap_minimum + _cap_buffer
+st.markdown(
+    f"<p style='color:#4da6ff;font-weight:700;margin:2px 0;font-size:14px;'>"
+    f"💰 Minimum Required: <span style='font-size:15px'>${_cap_minimum:,.2f} USDT</span>"
+    f"&nbsp;&nbsp;|&nbsp;&nbsp;"
+    f"🛡️ Buffer (25%): <span style='font-size:15px'>${_cap_buffer:,.2f} USDT</span>"
+    f"&nbsp;&nbsp;|&nbsp;&nbsp;"
+    f"✅ Total Recommended: <span style='font-size:15px'>${_cap_total:,.2f} USDT</span>"
+    f"</p>",
+    unsafe_allow_html=True,
+)
 
 # ── Health metrics ─────────────────────────────────────────────────────────────
 open_count     = sum(1 for s in signals if s["status"]=="open")
@@ -5194,25 +5339,129 @@ m9.metric("⏳ Queued",     queue_count, help=f"Signals detected while the {_max
 if getattr(_b, "_bsc_last_error", ""):
     st.warning(f"⚠️ {_b._bsc_last_error}")
 
-# ── Active filter badges ───────────────────────────────────────────────────────
-badges = []
-if _snap_cfg.get("use_pdz_15m", True): badges.append(f"🎯 F2 — PDZ 15m")
-if _snap_cfg.get("use_pdz_5m",  True): badges.append(f"🎯 F3 — PDZ 5m")
-if _snap_cfg.get("use_rsi_5m",  True): badges.append(f"📈 F4 — 5m RSI ≥{_snap_cfg.get('rsi_5m_min',30)}")
-if _snap_cfg.get("use_rsi_1h",  True): badges.append(f"📈 F5 — 1h RSI {_snap_cfg.get('rsi_1h_min',30)}–{_snap_cfg.get('rsi_1h_max',95)}")
-if _snap_cfg.get("use_ema_3m"):    badges.append(f"📉 F6 — EMA{_snap_cfg.get('ema_period_3m',12)} 3m")
-if _snap_cfg.get("use_ema_5m"):    badges.append(f"📉 F6 — EMA{_snap_cfg.get('ema_period_5m',12)} 5m")
-if _snap_cfg.get("use_ema_15m"):   badges.append(f"📉 F6 — EMA{_snap_cfg.get('ema_period_15m',12)} 15m")
-_macd_tfs = [tf for tf, k in [("3m","use_macd_3m"),("5m","use_macd_5m"),("15m","use_macd_15m")] if _snap_cfg.get(k, True)]
-if _macd_tfs: badges.append(f"📊 F7 — MACD 🟢↑ {' · '.join(_macd_tfs)}")
-_sar_tfs  = [tf for tf, k in [("3m","use_sar_3m"), ("5m","use_sar_5m"), ("15m","use_sar_15m")] if _snap_cfg.get(k, True)]
-if _sar_tfs:  badges.append(f"🪂 F8 — SAR {' · '.join(_sar_tfs)}")
-if _snap_cfg.get("use_vol_spike"): badges.append(
-    f"📦 F9 — Vol ≥{_snap_cfg.get('vol_spike_mult',2.0)}× / {_snap_cfg.get('vol_spike_lookback',20)} 15m")
-if _snap_cfg.get("use_ema_cross_15m", True):
-    badges.append(f"📉 F10 — EMA{_snap_cfg.get('ema_cross_fast_15m',12)}>EMA{_snap_cfg.get('ema_cross_slow_15m',21)} 15m")
-st.markdown("**Active Filters:**")
-st.caption("  |  ".join(badges) if badges else "No advanced filters enabled")
+# ── Active config + filter panel ───────────────────────────────────────────────
+def _cfg_panel(cfg: dict) -> str:
+    """Render a full configuration + active-filter summary as HTML."""
+    _c = cfg  # shorthand
+
+    # ── helpers ────────────────────────────────────────────────────────────────
+    def _pill(text, active=True):
+        bg  = "#1f3d5c" if active else "#21262d"
+        col = "#79c0ff" if active else "#8b949e"
+        return (f"<span style='display:inline-block;font-size:11px;"
+                f"padding:2px 9px;border-radius:12px;margin:2px 3px 2px 0;"
+                f"background:{bg};color:{col};font-weight:500'>{text}</span>")
+
+    def _pill_off(text):
+        return _pill(text, active=False)
+
+    def _kv_cell(label, value, highlight=False):
+        vc = "#79c0ff" if highlight else "#e6edf3"
+        return (f"<td style='padding:6px 8px 6px 0;vertical-align:top;white-space:nowrap;'>"
+                f"<span style='font-size:11px;color:#8b949e'>{label}</span><br>"
+                f"<span style='font-size:13px;font-weight:500;color:{vc}'>{value}</span></td>")
+
+    def _section(title):
+        return (f"<tr><td colspan='20' style='padding:10px 0 4px 0;"
+                f"font-size:11px;font-weight:500;color:#8b949e;"
+                f"border-top:1px solid #30363d;letter-spacing:0.05em'>"
+                f"{title}</td></tr>")
+
+    # ── collect values ─────────────────────────────────────────────────────────
+    margin   = str(_c.get("trade_margin_mode", "isolated")).capitalize()
+    lev      = int(_c.get("trade_leverage", 10))
+    usdt     = float(_c.get("trade_usdt_amount", 5.0))
+    tp_pct   = float(_c.get("tp_pct", 1.2))
+    sl_pct   = float(_c.get("sl_pct", 3.0))
+    max_open = int(_c.get("max_open_trades", 15))
+    max_sup  = int(_c.get("max_super_trades", 1))
+    demo     = bool(_c.get("demo_mode", True))
+    loop_m   = int(_c.get("loop_minutes", 4))
+    cooldown = int(_c.get("cooldown_minutes", 2))
+    sl_cool  = float(_c.get("sl_cooldown_hours", 6))
+
+    dca_en   = bool(_c.get("dca_enabled", True))
+    dca_max  = int(_c.get("trade_max_dca", 4))
+    iso_dist = float(_c.get("dca_iso_distance_pct", 70.0))
+    cross_d  = float(_c.get("dca_cross_drop_pct", 7.0))
+    pdz_buf  = tp_pct   # buffer = tp_pct (Change #1)
+
+    # liq distance for isolated
+    liq_pct  = round(1.0 / lev * 100, 1)
+    dca_trig = round((1.0 / lev) * (iso_dist / 100.0) * 100, 2)
+
+    # ── filter badge lists ─────────────────────────────────────────────────────
+    filter_pills = []
+    def _fpill(text, on): filter_pills.append(_pill(text, on))
+    _fpill(f"F2 PDZ 15m",                       _c.get("use_pdz_15m", True))
+    _fpill(f"F3 PDZ 5m",                        _c.get("use_pdz_5m",  True))
+    _fpill(f"F4 RSI5m ≥{_c.get('rsi_5m_min',30)}",  _c.get("use_rsi_5m",  True))
+    _fpill(f"F5 RSI1h {_c.get('rsi_1h_min',30)}–{_c.get('rsi_1h_max',95)}", _c.get("use_rsi_1h", True))
+    _fpill(f"F5b ATR {_c.get('atr_mode','Normal')}", _c.get("use_atr_filter", False))
+    _fpill(f"F6 EMA{_c.get('ema_period_3m',12)} 3m",  _c.get("use_ema_3m"))
+    _fpill(f"F6 EMA{_c.get('ema_period_5m',12)} 5m",  _c.get("use_ema_5m"))
+    _fpill(f"F6 EMA{_c.get('ema_period_15m',12)} 15m", _c.get("use_ema_15m"))
+    _macd_on = [tf for tf, k in [("3m","use_macd_3m"),("5m","use_macd_5m"),("15m","use_macd_15m")] if _c.get(k, True)]
+    _fpill(f"F7 MACD {' · '.join(_macd_on) if _macd_on else 'off'}", bool(_macd_on))
+    _sar_on  = [tf for tf, k in [("3m","use_sar_3m"),("5m","use_sar_5m"),("15m","use_sar_15m")] if _c.get(k, True)]
+    _fpill(f"F8 SAR {' · '.join(_sar_on) if _sar_on else 'off'}", bool(_sar_on))
+    _fpill(f"F9 Vol ≥{_c.get('vol_spike_mult',2.0)}× / {_c.get('vol_spike_lookback',20)}",
+           _c.get("use_vol_spike"))
+    _fpill(f"F10 EMA{_c.get('ema_cross_fast_15m',12)}>EMA{_c.get('ema_cross_slow_15m',21)} 15m",
+           _c.get("use_ema_cross_15m", True))
+
+    # ── build HTML ─────────────────────────────────────────────────────────────
+    _mode_col = "#f85149" if demo else "#3fb950"
+    _mode_lbl = "DEMO" if demo else "LIVE"
+    _html = (
+        f"<div style='background:#161b22;border:1px solid #30363d;"
+        f"border-radius:8px;padding:14px 18px;margin-bottom:12px;'>"
+        f"<div style='display:flex;align-items:center;gap:10px;margin-bottom:10px;'>"
+        f"<span style='font-size:13px;font-weight:500;color:#e6edf3'>Scanner Config</span>"
+        f"<span style='font-size:11px;font-weight:500;padding:2px 8px;"
+        f"border-radius:10px;background:{_mode_col}22;color:{_mode_col}'>{_mode_lbl}</span>"
+        f"</div>"
+        f"<div style='overflow-x:auto;-webkit-overflow-scrolling:touch;'>"
+        f"<table style='border-collapse:collapse;min-width:100%'><tbody>"
+    )
+
+    # Row 1 — Trade setup
+    _html += _section("TRADE SETUP")
+    _html += "<tr>"
+    _html += _kv_cell("Margin",        margin)
+    _html += _kv_cell("Leverage",      f"{lev}×",        highlight=True)
+    _html += _kv_cell("Trade Size",    f"${usdt} USDT")
+    _html += _kv_cell("TP",            f"{tp_pct}%",     highlight=True)
+    _html += _kv_cell("SL (cross)",    f"{sl_pct}%")
+    _html += _kv_cell("Liq distance",  f"{liq_pct}%")
+    _html += _kv_cell("Max open",      str(max_open))
+    _html += _kv_cell("Max super",     str(max_sup))
+    _html += _kv_cell("Loop",          f"{loop_m} min")
+    _html += _kv_cell("Cooldown",      f"{cooldown} min")
+    _html += _kv_cell("SL cooldown",   f"{sl_cool}h")
+    _html += "</tr>"
+
+    # Row 2 — DCA setup
+    _html += _section("DCA SETUP")
+    _html += "<tr>"
+    _dca_col = "#3fb950" if dca_en else "#8b949e"
+    _html += _kv_cell("DCA enabled",   f"<span style='color:{_dca_col}'>"
+                                        f"{'YES' if dca_en else 'NO'}</span>")
+    _html += _kv_cell("Max DCAs",      str(dca_max),     highlight=True)
+    _html += _kv_cell("Trigger (iso)", f"{iso_dist}%",   highlight=True)
+    _html += _kv_cell("Trigger drop",  f"{dca_trig}% below avg entry")
+    _html += _kv_cell("Trigger (cross)", f"{cross_d}% drop")
+    _html += _kv_cell("PDZ buffer",    f"{pdz_buf}% (= TP%)")
+    _html += "</tr>"
+
+    # Row 3 — Active filters
+    _html += _section("ACTIVE FILTERS")
+    _html += f"<tr><td colspan='20' style='padding:4px 0 2px 0'>{''.join(filter_pills)}</td></tr>"
+
+    _html += "</tbody></table></div></div>"
+    return _html
+
+st.markdown(_cfg_panel(_snap_cfg), unsafe_allow_html=True)
 
 # ── Shared PnL helper ──────────────────────────────────────────────────────
 # Single source of truth for per-signal PnL ($). Used by:
@@ -5626,7 +5875,9 @@ def _build_signal_row(s: dict, is_open_table: bool = False,
         f"• PDZ 5m    : {pdz_5m_val}\n"
         f"• PDZ 15m   : {pdz_15m_val}\n"
         f"• EMA12 15m : {_cv(crit.get('ema_cross_12_15m'))}\n"
-        f"• EMA21 15m : {_cv(crit.get('ema_cross_21_15m'))}"
+        f"• EMA21 15m : {_cv(crit.get('ema_cross_21_15m'))}\n"
+        f"• ATR 15m   : {_cv(crit.get('atr_15m'))}\n"
+        f"• ATR ratio : {_cv(crit.get('atr_ratio'))}"
     ) if crit else "—"
 
     max_lev   = s.get("max_lev", get_max_leverage(s.get("symbol", "")))
@@ -5845,12 +6096,49 @@ def _build_signal_row(s: dict, is_open_table: bool = False,
     except Exception:
         trade_history_col = "—"
 
+    # ── Difficulty column (Open Signals only) ────────────────────────────────
+    # Ratio = (remaining TP distance %) / (ATR% at entry time)
+    # Uses atr_ratio stored in criteria at signal open. Difficulty reflects
+    # how far price still needs to travel vs. typical 15m market movement:
+    #   🟢 Easy   — ratio ≤ 1.5  (TP within 1.5× ATR — market moves this far routinely)
+    #   🟡 Medium — ratio ≤ 2.5  (moderate stretch — achievable but needs a push)
+    #   🔴 Hard   — ratio >  2.5 (TP far beyond typical volatility)
+    diff_col = "—"
+    if status == "open":
+        _atr_ratio_s = crit.get("atr_ratio")
+        _entry_d = float(s.get("entry", 0) or 0)
+        _tp_d    = float(s.get("tp",    0) or 0)
+        _latest  = s.get("latest_price")
+        try:
+            # Try to use live ratio (remaining TP% vs stored ATR%)
+            # Fall back to the stored atr_ratio if live price unavailable
+            if _atr_ratio_s not in (None, "—") and _latest is not None and _entry_d > 0:
+                _latest_f  = float(_latest)
+                _rem_tp_pct = ((_tp_d - _latest_f) / _latest_f * 100.0) if _latest_f > 0 else None
+                # Reconstruct ATR% from stored ratio and TP% at entry
+                _tp_pct_orig = ((_tp_d - _entry_d) / _entry_d * 100.0) if _entry_d > 0 else None
+                _ratio_orig  = float(_atr_ratio_s)
+                _atr_pct_orig = (_tp_pct_orig / _ratio_orig) if (_tp_pct_orig and _ratio_orig > 0) else None
+                if _rem_tp_pct is not None and _atr_pct_orig and _atr_pct_orig > 0:
+                    _live_ratio = _rem_tp_pct / _atr_pct_orig
+                    if _live_ratio <= 1.5:   diff_col = "🟢 Easy"
+                    elif _live_ratio <= 2.5: diff_col = "🟡 Medium"
+                    else:                    diff_col = "🔴 Hard"
+            elif _atr_ratio_s not in (None, "—"):
+                _r = float(_atr_ratio_s)
+                if _r <= 1.5:   diff_col = "🟢 Easy"
+                elif _r <= 2.5: diff_col = "🟡 Medium"
+                else:           diff_col = "🔴 Hard"
+        except (TypeError, ValueError):
+            diff_col = "—"
+
     if is_open_table:
-        # Open-Signals-specific column order (27 columns — adds Original Entry
-        # after Signal Entry for DCA trade visibility).
+        # Open-Signals-specific column order — adds Difficulty as first column
+        # and Original Entry after Signal Entry for DCA trade visibility.
         # TP Hit / SL Hit / DCA SL Hit / Queue Limit tables use the non-Open
         # branch below.
         row: dict = {
+            "Difficulty":      diff_col,
             "Time (GST)":      ts_str,
             "Symbol":          s.get("symbol", ""),
             "Alert":           alert_col,
@@ -5931,6 +6219,16 @@ def _build_signal_row(s: dict, is_open_table: bool = False,
 
 # Shared column_config used by all four tables
 _SIG_COL_CFG = {
+    "Difficulty":     st.column_config.TextColumn(
+                          "🎯 Difficulty", width="small",
+                          help="TP reachability relative to ATR(14) on 15m at entry time.\n\n"
+                               "🟢 Easy   — TP within 1.5× ATR (market moves this far routinely)\n"
+                               "🟡 Medium — TP within 2.5× ATR (achievable with a good push)\n"
+                               "🔴 Hard   — TP beyond 2.5× ATR (needs unusually strong move)\n\n"
+                               "Updates live: ratio is recomputed from remaining TP distance "
+                               "vs. the ATR% measured at entry, so it gets easier as price "
+                               "moves toward TP. Shows '—' when ATR was not computed (ATR "
+                               "filter disabled at entry time)."),
     "Alert":          st.column_config.TextColumn(
                           "🚨 Alert", width="small",
                           help="🔴 DL = price ≥3% below entry  |  🔴 TL = open ≥2 hours"),
@@ -6097,7 +6395,7 @@ def _style_alert_cell(val) -> str:
 
 def _render_sig_table(sig_list: list, header: str, empty_msg: str,
                       auto_height: bool = False, is_open_table: bool = False,
-                      show_pnl: bool = False):
+                      show_pnl: bool = False, scroll_height: int = None):
     rows = [_build_signal_row(s, is_open_table=is_open_table, show_pnl=show_pnl)
             for s in sig_list]
     st.markdown(f"### {header} ({len(rows)})")
@@ -6119,7 +6417,14 @@ def _render_sig_table(sig_list: list, header: str, empty_msg: str,
         except Exception:
             _render_obj = rows
 
-        if auto_height:
+        if scroll_height is not None:
+            # Fixed-height scrollable table — internal vertical scroll bar,
+            # the rest of the page stays still.
+            st.dataframe(_render_obj, use_container_width=True,
+                         hide_index=True,
+                         height=scroll_height,
+                         column_config=_SIG_COL_CFG)
+        elif auto_height:
             # Expand so ALL rows are visible without internal scrolling.
             # Each row ≈ 35 px, header ≈ 38 px, +10 px buffer. Streamlit's
             # dataframe auto-expands individual cells that contain newlines
@@ -6137,365 +6442,395 @@ def _render_sig_table(sig_list: list, header: str, empty_msg: str,
     else:
         st.info(empty_msg)
 
-# ── Filter by sector then split into four status buckets ───────────────────────
-filtered = signals if selected_sector == "All" else \
-           [s for s in signals if s.get("sector") == selected_sector]
-filtered_sorted = sorted(filtered, key=lambda x: x.get("timestamp", ""), reverse=True)
+# ── Signal tables — auto-refresh fragment ──────────────────────────────────────
+# Wrapped in @st.fragment(run_every=30) so Streamlit re-renders ONLY this
+# section every 30 seconds without touching the sidebar or any other widget.
+# Requires Streamlit ≥ 1.37. Falls back gracefully on older versions.
+@st.fragment(run_every=30)
+def _signal_tables_fragment():
+    # Re-read fresh data on every fragment run (every 30 s)
+    with _log_lock:
+        _frag_log = json.loads(json.dumps(_b._bsc_log))
+    with _config_lock:
+        _frag_cfg = dict(_b._bsc_cfg)
 
-_open_sigs    = [s for s in filtered_sorted if s.get("status") == "open"]
-_tp_sigs      = [s for s in filtered_sorted if s.get("status") == "tp_hit"]
-_sl_sigs      = [s for s in filtered_sorted if s.get("status") == "sl_hit"]
-_dca_sl_sigs  = [s for s in filtered_sorted if s.get("status") == "dca_sl_hit"]
-_queue_sigs   = [s for s in filtered_sorted if s.get("status") == "queue_limit"]
+    _frag_signals       = _frag_log.get("signals", [])
+    _frag_sector        = st.session_state.get("sector_filter", "All")
 
-# ── Table 1: Open Signals ───────────────────────────────────────────────────────
-_render_sig_table(_open_sigs,  "🔵 Open Signals",  "No open signals right now.",
-                  auto_height=True, is_open_table=True, show_pnl=True)
+    # ── Filter by sector then split into four status buckets ─────────────────
+    filtered = _frag_signals if _frag_sector == "All" else \
+               [s for s in _frag_signals if s.get("sector") == _frag_sector]
+    filtered_sorted = sorted(filtered, key=lambda x: x.get("timestamp", ""), reverse=True)
 
-# ── OKX Live Positions (inline, auto-fetch) ────────────────────────────────────
-# Shown only when auto-trading is ON. Fetches on every render using a dedicated
-# session key so it always reflects the current OKX state independently of the
-# manual-refresh expander panel below.
-_inline_trade_on = _snap_cfg.get("trade_enabled", False)
-_inline_has_creds = bool(
-    _snap_cfg.get("api_key") and _snap_cfg.get("api_secret")
-    and _snap_cfg.get("api_passphrase")
-)
-if _inline_trade_on and _inline_has_creds:
-    # Auto-fetch on every render into a dedicated key.
-    try:
-        _inline_pos_resp = _trade_get(
-            "/api/v5/account/positions", {"instType": "SWAP"}, _snap_cfg
-        )
-        st.session_state["okx_inline_pos_data"] = _inline_pos_resp
-        st.session_state["okx_inline_pos_ts"] = dubai_now().strftime(
-            "%d %b %Y  %H:%M:%S GST"
-        )
-    except Exception as _inline_exc:
-        st.session_state["okx_inline_pos_data"] = None
-        _append_error("trade", f"Inline positions fetch failed: {_inline_exc}",
-                      endpoint="/api/v5/account/positions")
+    _open_sigs    = [s for s in filtered_sorted if s.get("status") == "open"]
+    _tp_sigs      = [s for s in filtered_sorted if s.get("status") == "tp_hit"]
+    _sl_sigs      = [s for s in filtered_sorted if s.get("status") == "sl_hit"]
+    _dca_sl_sigs  = [s for s in filtered_sorted if s.get("status") == "dca_sl_hit"]
+    _queue_sigs   = [s for s in filtered_sorted if s.get("status") == "queue_limit"]
 
-    _inline_pos_data = st.session_state.get("okx_inline_pos_data")
-    _inline_pos_ts   = st.session_state.get("okx_inline_pos_ts", "")
-    _env_inline      = "🟡 Demo" if _snap_cfg.get("demo_mode", True) else "🔴 Live"
+    # ── Table 1: Open Signals ───────────────────────────────────────────────────────
+    _render_sig_table(_open_sigs,  "🔵 Open Signals",  "No open signals right now.",
+                      scroll_height=450, is_open_table=True, show_pnl=True)
 
-    st.markdown(
-        f"**📡 OKX Positions (Live)**"
-        f"<span style='font-size:0.8em; color:gray; margin-left:12px;'>"
-        f"auto-fetched · {_inline_pos_ts} · {_env_inline}</span>",
-        unsafe_allow_html=True,
+    # ── OKX Live Positions (inline, auto-fetch) ────────────────────────────────────
+    # Shown only when auto-trading is ON. Fetches on every render using a dedicated
+    # session key so it always reflects the current OKX state independently of the
+    # manual-refresh expander panel below.
+    _inline_trade_on = _snap_cfg.get("trade_enabled", False)
+    _inline_has_creds = bool(
+        _snap_cfg.get("api_key") and _snap_cfg.get("api_secret")
+        and _snap_cfg.get("api_passphrase")
     )
+    if _inline_trade_on and _inline_has_creds:
+        # Auto-fetch on every render into a dedicated key.
+        try:
+            _inline_pos_resp = _trade_get(
+                "/api/v5/account/positions", {"instType": "SWAP"}, _snap_cfg
+            )
+            st.session_state["okx_inline_pos_data"] = _inline_pos_resp
+            st.session_state["okx_inline_pos_ts"] = dubai_now().strftime(
+                "%d %b %Y  %H:%M:%S GST"
+            )
+        except Exception as _inline_exc:
+            st.session_state["okx_inline_pos_data"] = None
+            _append_error("trade", f"Inline positions fetch failed: {_inline_exc}",
+                          endpoint="/api/v5/account/positions")
 
-    if _inline_pos_data is None:
-        st.warning("⚠️ Could not fetch OKX positions — check Error Log.")
-    elif _inline_pos_data.get("code") != "0":
-        st.error(f"OKX error: {_inline_pos_data.get('msg', 'Unknown error')}")
-    else:
-        _inline_positions = [
-            p for p in _inline_pos_data.get("data", [])
-            if float(p.get("pos", 0) or 0) != 0
-        ]
+        _inline_pos_data = st.session_state.get("okx_inline_pos_data")
+        _inline_pos_ts   = st.session_state.get("okx_inline_pos_ts", "")
+        _env_inline      = "🟡 Demo" if _snap_cfg.get("demo_mode", True) else "🔴 Live"
 
-        # Build set of open signal symbols for the Match column.
-        _open_sig_syms = {s.get("symbol", "") for s in _open_sigs}
+        st.markdown(
+            f"**📡 OKX Positions (Live)**"
+            f"<span style='font-size:0.8em; color:gray; margin-left:12px;'>"
+            f"auto-fetched · {_inline_pos_ts} · {_env_inline}</span>",
+            unsafe_allow_html=True,
+        )
 
-        if _inline_positions:
-            _inline_rows = []
-            _ghost_syms  = []   # on OKX but no matching open signal
-            for _p in _inline_positions:
-                _inst   = _p.get("instId", "")
-                # Normalise OKX instId (BTC-USDT-SWAP) → signal symbol (BTCUSDT)
-                _sym_norm = _inst.replace("-USDT-SWAP", "USDT").replace("-", "")
-                _upnl     = float(_p.get("upl",      0) or 0)
-                _upnl_pct = float(_p.get("uplRatio", 0) or 0) * 100
-                _liq_px   = float(_p.get("liqPx",    0) or 0)
-                _mgn_mode = _p.get("mgnMode", "cross")
-                _margin   = float(_p.get("margin", 0) or 0) or float(_p.get("imr", 0) or 0)
-                _matched  = _sym_norm in _open_sig_syms or _inst in _open_sig_syms
-                if not _matched:
-                    _ghost_syms.append(_inst)
-                _inline_rows.append({
-                    "Symbol":     _inst,
-                    "Contracts":  int(_p.get("pos", 0) or 0),
-                    "Avg Entry":  float(_p.get("avgPx",       0) or 0),
-                    "Mark Price": float(_p.get("markPx",      0) or 0),
-                    "Unreal PnL": round(_upnl, 4),
-                    "PnL %":      f"{_upnl_pct:+.2f}%",
-                    "Leverage":   f"{_p.get('lever', '')}×",
-                    "Liq Price":  _liq_px if _liq_px > 0 else "—",
-                    "Mode":       _mgn_mode.capitalize(),
-                    "Match":      "✅" if _matched else "⚠️ no signal",
+        if _inline_pos_data is None:
+            st.warning("⚠️ Could not fetch OKX positions — check Error Log.")
+        elif _inline_pos_data.get("code") != "0":
+            st.error(f"OKX error: {_inline_pos_data.get('msg', 'Unknown error')}")
+        else:
+            _inline_positions = [
+                p for p in _inline_pos_data.get("data", [])
+                if float(p.get("pos", 0) or 0) != 0
+            ]
+
+            # Build set of open signal symbols for the Match column.
+            _open_sig_syms = {s.get("symbol", "") for s in _open_sigs}
+
+            if _inline_positions:
+                _inline_rows = []
+                _ghost_syms  = []   # on OKX but no matching open signal
+                for _p in _inline_positions:
+                    _inst   = _p.get("instId", "")
+                    # Normalise OKX instId (BTC-USDT-SWAP) → signal symbol (BTCUSDT)
+                    _sym_norm = _inst.replace("-USDT-SWAP", "USDT").replace("-", "")
+                    _upnl     = float(_p.get("upl",      0) or 0)
+                    _upnl_pct = float(_p.get("uplRatio", 0) or 0) * 100
+                    _liq_px   = float(_p.get("liqPx",    0) or 0)
+                    _mgn_mode = _p.get("mgnMode", "cross")
+                    _margin   = float(_p.get("margin", 0) or 0) or float(_p.get("imr", 0) or 0)
+                    _matched  = _sym_norm in _open_sig_syms or _inst in _open_sig_syms
+                    if not _matched:
+                        _ghost_syms.append(_inst)
+                    _inline_rows.append({
+                        "Symbol":     _inst,
+                        "Contracts":  int(_p.get("pos", 0) or 0),
+                        "Avg Entry":  float(_p.get("avgPx",       0) or 0),
+                        "Mark Price": float(_p.get("markPx",      0) or 0),
+                        "Unreal PnL": round(_upnl, 4),
+                        "PnL %":      f"{_upnl_pct:+.2f}%",
+                        "Leverage":   f"{_p.get('lever', '')}×",
+                        "Liq Price":  _liq_px if _liq_px > 0 else "—",
+                        "Mode":       _mgn_mode.capitalize(),
+                        "Match":      "✅" if _matched else "⚠️ no signal",
+                    })
+
+                st.dataframe(
+                    _inline_rows,
+                    use_container_width=True,
+                    hide_index=True,
+                    height=len(_inline_rows) * 35 + 48,
+                    column_config={
+                        "Avg Entry":  st.column_config.NumberColumn(format="%.6f"),
+                        "Mark Price": st.column_config.NumberColumn(format="%.6f"),
+                        "Liq Price":  st.column_config.NumberColumn(format="%.6f"),
+                        "Unreal PnL": st.column_config.NumberColumn(
+                                          "Unreal PnL $", format="%.4f"),
+                    },
+                )
+
+                # Warn for signals that have no OKX position.
+                _sig_no_pos = [
+                    s.get("symbol", "") for s in _open_sigs
+                    if s.get("symbol", "") not in _open_sig_syms - {
+                        _p2.replace("-USDT-SWAP", "USDT").replace("-", "")
+                        for _p2 in [_r["Symbol"] for _r in _inline_rows]
+                    }
+                ]
+                # Simpler: find open signals whose symbol has no OKX position row.
+                _okx_norm_syms = {
+                    r["Symbol"].replace("-USDT-SWAP", "USDT").replace("-", "")
+                    for r in _inline_rows
+                }
+                _unmatched_sigs = [
+                    s.get("symbol", "") for s in _open_sigs
+                    if s.get("symbol", "") not in _okx_norm_syms
+                ]
+                if _ghost_syms:
+                    st.caption(
+                        f"⚠️ {len(_ghost_syms)} OKX position(s) have no matching open signal: "
+                        + ", ".join(_ghost_syms)
+                    )
+                if _unmatched_sigs:
+                    st.caption(
+                        f"⚠️ {len(_unmatched_sigs)} open signal(s) have no matching OKX position: "
+                        + ", ".join(_unmatched_sigs)
+                    )
+            else:
+                st.info("No open SWAP positions on OKX right now.")
+
+    st.divider()
+
+    # ── OKX Closed Positions history (single fetch, shared by TP + SL tables) ──────
+    # Fetched once per render when auto-trading is ON; stored in two session-state
+    # keys (_okx_tp_hist / _okx_sl_hist) split by close reason so each table can
+    # render independently without a second API call.
+    #   type "2" / "4"       → TP / partial-TP  → fulfilled orders table
+    #   type "1" / "5" / "3" → SL / liquidated / manual → SL closed table
+    _hist_trade_on   = _snap_cfg.get("trade_enabled", False)
+    _hist_has_creds  = bool(
+        _snap_cfg.get("api_key") and _snap_cfg.get("api_secret")
+        and _snap_cfg.get("api_passphrase")
+    )
+    if _hist_trade_on and _hist_has_creds:
+        try:
+            _ph_resp = _trade_get(
+                "/api/v5/account/positions-history",
+                {"instType": "SWAP", "limit": "100"},
+                _snap_cfg,
+            )
+            _ph_ts = dubai_now().strftime("%d %b %Y  %H:%M:%S GST")
+            if _ph_resp.get("code") == "0":
+                _ph_all = _ph_resp.get("data", [])
+                st.session_state["okx_tp_hist"]   = [
+                    p for p in _ph_all if p.get("type") in ("2", "4")
+                ]
+                st.session_state["okx_sl_hist"]   = [
+                    p for p in _ph_all if p.get("type") in ("1", "3", "5")
+                ]
+                st.session_state["okx_hist_ts"]   = _ph_ts
+            else:
+                st.session_state["okx_tp_hist"]  = None
+                st.session_state["okx_sl_hist"]  = None
+                st.session_state["okx_hist_ts"]  = _ph_ts
+        except Exception as _ph_exc:
+            st.session_state["okx_tp_hist"]  = None
+            st.session_state["okx_sl_hist"]  = None
+            _append_error("trade", f"Positions-history fetch failed: {_ph_exc}",
+                          endpoint="/api/v5/account/positions-history")
+
+    # ── Table 2: TP Hit ─────────────────────────────────────────────────────────────
+    # show_pnl=True → realized gain column, using close_price (= TP level).
+    # For DCA trades, the row naturally picks up DCA-N in Alert, blended avg in
+    # Signal Entry, original entry in Original Entry, and cumulative Order Size.
+    _render_sig_table(_tp_sigs,    "✅ TP Hit",         "No TP hits yet.",
+                      show_pnl=True)
+
+    # ── OKX Fulfilled Orders (auto-trading only) ────────────────────────────────────
+    if _hist_trade_on and _hist_has_creds:
+        _tp_hist      = st.session_state.get("okx_tp_hist")
+        _hist_ts_tp   = st.session_state.get("okx_hist_ts", "")
+        _env_hist     = "🟡 Demo" if _snap_cfg.get("demo_mode", True) else "🔴 Live"
+
+        st.markdown(
+            f"**📋 OKX Fulfilled Orders**"
+            f"<span style='font-size:0.8em; color:gray; margin-left:12px;'>"
+            f"auto-fetched · {_hist_ts_tp} · {_env_hist}</span>",
+            unsafe_allow_html=True,
+        )
+
+        if _tp_hist is None:
+            st.warning("⚠️ Could not fetch OKX position history — check Error Log.")
+        elif not _tp_hist:
+            st.info("No fulfilled (TP-closed) positions found in the last 100 records.")
+        else:
+            # Build set of TP signal symbols for the Match column.
+            _tp_sig_syms = {s.get("symbol", "") for s in _tp_sigs}
+            _tp_close_map = {
+                "2": "Take Profit",
+                "4": "Partial TP",
+            }
+            _tp_rows = []
+            _tp_ghost_syms = []
+            for _ph in _tp_hist:
+                _inst_tp   = _ph.get("instId", "")
+                _sym_tp    = _inst_tp.replace("-USDT-SWAP", "USDT").replace("-", "")
+                _rpnl_tp   = float(_ph.get("realizedPnl", 0) or 0)
+                _close_ts_tp = ""
+                try:
+                    _close_ts_tp = datetime.fromtimestamp(
+                        int(_ph.get("uTime", 0)) / 1000,
+                        tz=dubai_now().tzinfo
+                    ).strftime("%d %b %Y  %H:%M GST")
+                except Exception:
+                    pass
+                _matched_tp = _sym_tp in _tp_sig_syms or _inst_tp in _tp_sig_syms
+                if not _matched_tp:
+                    _tp_ghost_syms.append(_inst_tp)
+                _tp_rows.append({
+                    "Symbol":       _inst_tp,
+                    "Direction":    _ph.get("direction", "").capitalize(),
+                    "Close Reason": _tp_close_map.get(_ph.get("type", ""), "TP"),
+                    "Contracts":    int(float(_ph.get("closeTotalPos", 0) or 0)),
+                    "Avg Entry":    float(_ph.get("openAvgPx",  0) or 0),
+                    "Close Price":  float(_ph.get("closeAvgPx", 0) or 0),
+                    "Realized PnL": round(_rpnl_tp, 4),
+                    "Close Time":   _close_ts_tp,
+                    "Match":        "✅" if _matched_tp else "⚠️ no signal",
                 })
 
             st.dataframe(
-                _inline_rows,
+                _tp_rows,
                 use_container_width=True,
                 hide_index=True,
-                height=len(_inline_rows) * 35 + 48,
+                height=len(_tp_rows) * 35 + 48,
                 column_config={
-                    "Avg Entry":  st.column_config.NumberColumn(format="%.6f"),
-                    "Mark Price": st.column_config.NumberColumn(format="%.6f"),
-                    "Liq Price":  st.column_config.NumberColumn(format="%.6f"),
-                    "Unreal PnL": st.column_config.NumberColumn(
-                                      "Unreal PnL $", format="%.4f"),
+                    "Avg Entry":    st.column_config.NumberColumn(format="%.6f"),
+                    "Close Price":  st.column_config.NumberColumn(format="%.6f"),
+                    "Realized PnL": st.column_config.NumberColumn(
+                                        "Realized PnL $", format="%.4f"),
                 },
             )
+            if _tp_ghost_syms:
+                st.caption(
+                    f"⚠️ {len(_tp_ghost_syms)} OKX fulfilled position(s) have no matching TP signal: "
+                    + ", ".join(_tp_ghost_syms)
+                )
 
-            # Warn for signals that have no OKX position.
-            _sig_no_pos = [
-                s.get("symbol", "") for s in _open_sigs
-                if s.get("symbol", "") not in _open_sig_syms - {
-                    _p2.replace("-USDT-SWAP", "USDT").replace("-", "")
-                    for _p2 in [_r["Symbol"] for _r in _inline_rows]
-                }
-            ]
-            # Simpler: find open signals whose symbol has no OKX position row.
-            _okx_norm_syms = {
-                r["Symbol"].replace("-USDT-SWAP", "USDT").replace("-", "")
-                for r in _inline_rows
+    st.divider()
+
+    # ── Table 3: SL Hit (non-DCA trades only) ──────────────────────────────────────
+    # Trades that exhausted a DCA ladder and hit the −3% final SL are routed to
+    # the dedicated "DCA SL Hit" table below, not this one.
+    _render_sig_table(_sl_sigs,    "❌ SL Hit",         "No SL hits yet.",
+                      show_pnl=True)
+
+    # ── OKX Liquidated / SL Closed Orders (auto-trading only) ───────────────────────
+    if _hist_trade_on and _hist_has_creds:
+        _sl_hist      = st.session_state.get("okx_sl_hist")
+        _hist_ts_sl   = st.session_state.get("okx_hist_ts", "")
+        _env_hist_sl  = "🟡 Demo" if _snap_cfg.get("demo_mode", True) else "🔴 Live"
+
+        st.markdown(
+            f"**📋 OKX Liquidated / SL Closed Orders**"
+            f"<span style='font-size:0.8em; color:gray; margin-left:12px;'>"
+            f"auto-fetched · {_hist_ts_sl} · {_env_hist_sl}</span>",
+            unsafe_allow_html=True,
+        )
+
+        if _sl_hist is None:
+            st.warning("⚠️ Could not fetch OKX position history — check Error Log.")
+        elif not _sl_hist:
+            st.info("No SL-closed or liquidated positions found in the last 100 records.")
+        else:
+            # Build combined set of SL signal symbols for the Match column.
+            _sl_sig_syms = {s.get("symbol", "") for s in _sl_sigs + _dca_sl_sigs}
+            _sl_close_map = {
+                "1": "Stop-Loss",
+                "3": "Manual Close",
+                "5": "Liquidated",
             }
-            _unmatched_sigs = [
-                s.get("symbol", "") for s in _open_sigs
-                if s.get("symbol", "") not in _okx_norm_syms
-            ]
-            if _ghost_syms:
-                st.caption(
-                    f"⚠️ {len(_ghost_syms)} OKX position(s) have no matching open signal: "
-                    + ", ".join(_ghost_syms)
-                )
-            if _unmatched_sigs:
-                st.caption(
-                    f"⚠️ {len(_unmatched_sigs)} open signal(s) have no matching OKX position: "
-                    + ", ".join(_unmatched_sigs)
-                )
-        else:
-            st.info("No open SWAP positions on OKX right now.")
+            _sl_rows = []
+            _sl_ghost_syms = []
+            for _ph in _sl_hist:
+                _inst_sl   = _ph.get("instId", "")
+                _sym_sl    = _inst_sl.replace("-USDT-SWAP", "USDT").replace("-", "")
+                _rpnl_sl   = float(_ph.get("realizedPnl", 0) or 0)
+                _close_ts_sl = ""
+                try:
+                    _close_ts_sl = datetime.fromtimestamp(
+                        int(_ph.get("uTime", 0)) / 1000,
+                        tz=dubai_now().tzinfo
+                    ).strftime("%d %b %Y  %H:%M GST")
+                except Exception:
+                    pass
+                _reason_sl  = _sl_close_map.get(_ph.get("type", ""), "SL")
+                _matched_sl = _sym_sl in _sl_sig_syms or _inst_sl in _sl_sig_syms
+                if not _matched_sl:
+                    _sl_ghost_syms.append(_inst_sl)
+                _sl_rows.append({
+                    "Symbol":       _inst_sl,
+                    "Direction":    _ph.get("direction", "").capitalize(),
+                    "Close Reason": _reason_sl,
+                    "Contracts":    int(float(_ph.get("closeTotalPos", 0) or 0)),
+                    "Avg Entry":    float(_ph.get("openAvgPx",  0) or 0),
+                    "Close Price":  float(_ph.get("closeAvgPx", 0) or 0),
+                    "Realized PnL": round(_rpnl_sl, 4),
+                    "Close Time":   _close_ts_sl,
+                    "Match":        "✅" if _matched_sl else "⚠️ no signal",
+                })
 
-st.divider()
-
-# ── OKX Closed Positions history (single fetch, shared by TP + SL tables) ──────
-# Fetched once per render when auto-trading is ON; stored in two session-state
-# keys (_okx_tp_hist / _okx_sl_hist) split by close reason so each table can
-# render independently without a second API call.
-#   type "2" / "4"       → TP / partial-TP  → fulfilled orders table
-#   type "1" / "5" / "3" → SL / liquidated / manual → SL closed table
-_hist_trade_on   = _snap_cfg.get("trade_enabled", False)
-_hist_has_creds  = bool(
-    _snap_cfg.get("api_key") and _snap_cfg.get("api_secret")
-    and _snap_cfg.get("api_passphrase")
-)
-if _hist_trade_on and _hist_has_creds:
-    try:
-        _ph_resp = _trade_get(
-            "/api/v5/account/positions-history",
-            {"instType": "SWAP", "limit": "100"},
-            _snap_cfg,
-        )
-        _ph_ts = dubai_now().strftime("%d %b %Y  %H:%M:%S GST")
-        if _ph_resp.get("code") == "0":
-            _ph_all = _ph_resp.get("data", [])
-            st.session_state["okx_tp_hist"]   = [
-                p for p in _ph_all if p.get("type") in ("2", "4")
-            ]
-            st.session_state["okx_sl_hist"]   = [
-                p for p in _ph_all if p.get("type") in ("1", "3", "5")
-            ]
-            st.session_state["okx_hist_ts"]   = _ph_ts
-        else:
-            st.session_state["okx_tp_hist"]  = None
-            st.session_state["okx_sl_hist"]  = None
-            st.session_state["okx_hist_ts"]  = _ph_ts
-    except Exception as _ph_exc:
-        st.session_state["okx_tp_hist"]  = None
-        st.session_state["okx_sl_hist"]  = None
-        _append_error("trade", f"Positions-history fetch failed: {_ph_exc}",
-                      endpoint="/api/v5/account/positions-history")
-
-# ── Table 2: TP Hit ─────────────────────────────────────────────────────────────
-# show_pnl=True → realized gain column, using close_price (= TP level).
-# For DCA trades, the row naturally picks up DCA-N in Alert, blended avg in
-# Signal Entry, original entry in Original Entry, and cumulative Order Size.
-_render_sig_table(_tp_sigs,    "✅ TP Hit",         "No TP hits yet.",
-                  show_pnl=True)
-
-# ── OKX Fulfilled Orders (auto-trading only) ────────────────────────────────────
-if _hist_trade_on and _hist_has_creds:
-    _tp_hist      = st.session_state.get("okx_tp_hist")
-    _hist_ts_tp   = st.session_state.get("okx_hist_ts", "")
-    _env_hist     = "🟡 Demo" if _snap_cfg.get("demo_mode", True) else "🔴 Live"
-
-    st.markdown(
-        f"**📋 OKX Fulfilled Orders**"
-        f"<span style='font-size:0.8em; color:gray; margin-left:12px;'>"
-        f"auto-fetched · {_hist_ts_tp} · {_env_hist}</span>",
-        unsafe_allow_html=True,
-    )
-
-    if _tp_hist is None:
-        st.warning("⚠️ Could not fetch OKX position history — check Error Log.")
-    elif not _tp_hist:
-        st.info("No fulfilled (TP-closed) positions found in the last 100 records.")
-    else:
-        # Build set of TP signal symbols for the Match column.
-        _tp_sig_syms = {s.get("symbol", "") for s in _tp_sigs}
-        _tp_close_map = {
-            "2": "Take Profit",
-            "4": "Partial TP",
-        }
-        _tp_rows = []
-        _tp_ghost_syms = []
-        for _ph in _tp_hist:
-            _inst_tp   = _ph.get("instId", "")
-            _sym_tp    = _inst_tp.replace("-USDT-SWAP", "USDT").replace("-", "")
-            _rpnl_tp   = float(_ph.get("realizedPnl", 0) or 0)
-            _close_ts_tp = ""
-            try:
-                _close_ts_tp = datetime.fromtimestamp(
-                    int(_ph.get("uTime", 0)) / 1000,
-                    tz=dubai_now().tzinfo
-                ).strftime("%d %b %Y  %H:%M GST")
-            except Exception:
-                pass
-            _matched_tp = _sym_tp in _tp_sig_syms or _inst_tp in _tp_sig_syms
-            if not _matched_tp:
-                _tp_ghost_syms.append(_inst_tp)
-            _tp_rows.append({
-                "Symbol":       _inst_tp,
-                "Direction":    _ph.get("direction", "").capitalize(),
-                "Close Reason": _tp_close_map.get(_ph.get("type", ""), "TP"),
-                "Contracts":    int(float(_ph.get("closeTotalPos", 0) or 0)),
-                "Avg Entry":    float(_ph.get("openAvgPx",  0) or 0),
-                "Close Price":  float(_ph.get("closeAvgPx", 0) or 0),
-                "Realized PnL": round(_rpnl_tp, 4),
-                "Close Time":   _close_ts_tp,
-                "Match":        "✅" if _matched_tp else "⚠️ no signal",
-            })
-
-        st.dataframe(
-            _tp_rows,
-            use_container_width=True,
-            hide_index=True,
-            height=len(_tp_rows) * 35 + 48,
-            column_config={
-                "Avg Entry":    st.column_config.NumberColumn(format="%.6f"),
-                "Close Price":  st.column_config.NumberColumn(format="%.6f"),
-                "Realized PnL": st.column_config.NumberColumn(
-                                    "Realized PnL $", format="%.4f"),
-            },
-        )
-        if _tp_ghost_syms:
-            st.caption(
-                f"⚠️ {len(_tp_ghost_syms)} OKX fulfilled position(s) have no matching TP signal: "
-                + ", ".join(_tp_ghost_syms)
+            st.dataframe(
+                _sl_rows,
+                use_container_width=True,
+                hide_index=True,
+                height=len(_sl_rows) * 35 + 48,
+                column_config={
+                    "Avg Entry":    st.column_config.NumberColumn(format="%.6f"),
+                    "Close Price":  st.column_config.NumberColumn(format="%.6f"),
+                    "Realized PnL": st.column_config.NumberColumn(
+                                        "Realized PnL $", format="%.4f"),
+                },
             )
+            if _sl_ghost_syms:
+                st.caption(
+                    f"⚠️ {len(_sl_ghost_syms)} OKX SL/liquidated position(s) have no matching signal: "
+                    + ", ".join(_sl_ghost_syms)
+                )
 
-st.divider()
+    st.divider()
 
-# ── Table 3: SL Hit (non-DCA trades only) ──────────────────────────────────────
-# Trades that exhausted a DCA ladder and hit the −3% final SL are routed to
-# the dedicated "DCA SL Hit" table below, not this one.
-_render_sig_table(_sl_sigs,    "❌ SL Hit",         "No SL hits yet.",
-                  show_pnl=True)
+    # ── Table 4: DCA SL Hit (ladder-exhausted closures) ────────────────────────────
+    # Dedicated table for trades that consumed every allowed DCA add and then hit
+    # the final −3%-below-blended-average SL. Keeping these separate from regular
+    # SL hits makes it easy to audit DCA-strategy performance in isolation.
+    _render_sig_table(_dca_sl_sigs, "❌ DCA SL Hit (ladder exhausted)",
+                      "No DCA ladder-exhausted SL hits yet.",
+                      show_pnl=True)
+    st.divider()
 
-# ── OKX Liquidated / SL Closed Orders (auto-trading only) ───────────────────────
-if _hist_trade_on and _hist_has_creds:
-    _sl_hist      = st.session_state.get("okx_sl_hist")
-    _hist_ts_sl   = st.session_state.get("okx_hist_ts", "")
-    _env_hist_sl  = "🟡 Demo" if _snap_cfg.get("demo_mode", True) else "🔴 Live"
+    # ── Table 5: Queue Limit ────────────────────────────────────────────────────────
+    # No PnL shown — queue_limit signals never opened a real trade.
+    _render_sig_table(_queue_sigs, "⏳ Queue Limit",    "No queued signals.")
 
-    st.markdown(
-        f"**📋 OKX Liquidated / SL Closed Orders**"
-        f"<span style='font-size:0.8em; color:gray; margin-left:12px;'>"
-        f"auto-fetched · {_hist_ts_sl} · {_env_hist_sl}</span>",
-        unsafe_allow_html=True,
-    )
+    if _queue_sigs:
+        if st.button("🗑️ Clear Queue Limit Records", key="clear_queue_limit"):
+            with _log_lock:
+                _b._bsc_log["signals"] = [
+                    s for s in _b._bsc_log["signals"]
+                    if s.get("status") != "queue_limit"
+                ]
+                save_log(_b._bsc_log)
+            st.success("✅ Queue Limit records cleared.")
+            st.rerun()
 
-    if _sl_hist is None:
-        st.warning("⚠️ Could not fetch OKX position history — check Error Log.")
-    elif not _sl_hist:
-        st.info("No SL-closed or liquidated positions found in the last 100 records.")
-    else:
-        # Build combined set of SL signal symbols for the Match column.
-        _sl_sig_syms = {s.get("symbol", "") for s in _sl_sigs + _dca_sl_sigs}
-        _sl_close_map = {
-            "1": "Stop-Loss",
-            "3": "Manual Close",
-            "5": "Liquidated",
-        }
-        _sl_rows = []
-        _sl_ghost_syms = []
-        for _ph in _sl_hist:
-            _inst_sl   = _ph.get("instId", "")
-            _sym_sl    = _inst_sl.replace("-USDT-SWAP", "USDT").replace("-", "")
-            _rpnl_sl   = float(_ph.get("realizedPnl", 0) or 0)
-            _close_ts_sl = ""
-            try:
-                _close_ts_sl = datetime.fromtimestamp(
-                    int(_ph.get("uTime", 0)) / 1000,
-                    tz=dubai_now().tzinfo
-                ).strftime("%d %b %Y  %H:%M GST")
-            except Exception:
-                pass
-            _reason_sl  = _sl_close_map.get(_ph.get("type", ""), "SL")
-            _matched_sl = _sym_sl in _sl_sig_syms or _inst_sl in _sl_sig_syms
-            if not _matched_sl:
-                _sl_ghost_syms.append(_inst_sl)
-            _sl_rows.append({
-                "Symbol":       _inst_sl,
-                "Direction":    _ph.get("direction", "").capitalize(),
-                "Close Reason": _reason_sl,
-                "Contracts":    int(float(_ph.get("closeTotalPos", 0) or 0)),
-                "Avg Entry":    float(_ph.get("openAvgPx",  0) or 0),
-                "Close Price":  float(_ph.get("closeAvgPx", 0) or 0),
-                "Realized PnL": round(_rpnl_sl, 4),
-                "Close Time":   _close_ts_sl,
-                "Match":        "✅" if _matched_sl else "⚠️ no signal",
-            })
 
-        st.dataframe(
-            _sl_rows,
-            use_container_width=True,
-            hide_index=True,
-            height=len(_sl_rows) * 35 + 48,
-            column_config={
-                "Avg Entry":    st.column_config.NumberColumn(format="%.6f"),
-                "Close Price":  st.column_config.NumberColumn(format="%.6f"),
-                "Realized PnL": st.column_config.NumberColumn(
-                                    "Realized PnL $", format="%.4f"),
-            },
-        )
-        if _sl_ghost_syms:
-            st.caption(
-                f"⚠️ {len(_sl_ghost_syms)} OKX SL/liquidated position(s) have no matching signal: "
-                + ", ".join(_sl_ghost_syms)
-            )
+_signal_tables_fragment()
 
-st.divider()
-
-# ── Table 4: DCA SL Hit (ladder-exhausted closures) ────────────────────────────
-# Dedicated table for trades that consumed every allowed DCA add and then hit
-# the final −3%-below-blended-average SL. Keeping these separate from regular
-# SL hits makes it easy to audit DCA-strategy performance in isolation.
-_render_sig_table(_dca_sl_sigs, "❌ DCA SL Hit (ladder exhausted)",
-                  "No DCA ladder-exhausted SL hits yet.",
-                  show_pnl=True)
-st.divider()
-
-# ── Table 5: Queue Limit ────────────────────────────────────────────────────────
-# No PnL shown — queue_limit signals never opened a real trade.
-_render_sig_table(_queue_sigs, "⏳ Queue Limit",    "No queued signals.")
-
-if _queue_sigs:
-    if st.button("🗑️ Clear Queue Limit Records", key="clear_queue_limit"):
-        with _log_lock:
-            _b._bsc_log["signals"] = [
-                s for s in _b._bsc_log["signals"]
-                if s.get("status") != "queue_limit"
-            ]
-            save_log(_b._bsc_log)
-        st.success("✅ Queue Limit records cleared.")
-        st.rerun()
+# ── Page-load signal buckets (used by debug panel below) ───────────────────────
+# The fragment above has its own live copies; these are page-load snapshots used
+# only by the static debug/snapshot panel further down the page.
+_filtered_pg   = signals if st.session_state.get("sector_filter","All") == "All" else \
+                 [s for s in signals if s.get("sector") == st.session_state.get("sector_filter","All")]
+_fsorted_pg    = sorted(_filtered_pg, key=lambda x: x.get("timestamp",""), reverse=True)
+_open_sigs     = [s for s in _fsorted_pg if s.get("status") == "open"]
+_tp_sigs       = [s for s in _fsorted_pg if s.get("status") == "tp_hit"]
+_sl_sigs       = [s for s in _fsorted_pg if s.get("status") == "sl_hit"]
+_dca_sl_sigs   = [s for s in _fsorted_pg if s.get("status") == "dca_sl_hit"]
+_queue_sigs    = [s for s in _fsorted_pg if s.get("status") == "queue_limit"]
 
 # ─────────────────────────────────────────────────────────────────────────────
 # OKX Live Positions Panel
@@ -6811,7 +7146,10 @@ if signals:
 # Deep-copy under lock so background thread can't mutate lists mid-render
 with _filter_lock:
     fc = {k: (list(v) if isinstance(v, list) else v) for k, v in _filter_counts.items()}
-if fc.get("total_watchlist", 0) > 0:
+if (
+    fc.get("total_watchlist", 0) > 0
+    and fc.get("scan_completed_at", 0.0) >= fc.get("flushed_at", 0.0)
+):
     with st.expander("🔬 Last scan filter funnel"):
         total     = fc.get("total_watchlist", 0)
         pre_out_n = fc.get("pre_filtered_out", 0)
@@ -6821,7 +7159,11 @@ if fc.get("total_watchlist", 0) > 0:
         after_f3  = after_f2  - fc.get("f3_pdz5m",  0)
         after_f4  = after_f3  - fc.get("f4_rsi5m",  0)
         after_f5  = after_f4  - fc.get("f5_rsi1h",  0)
-        after_f6  = after_f5  - fc.get("f6_ema",    0)
+        after_f5b = after_f5  - fc.get("f5b_atr",   0)
+        after_f6_ema_3m  = after_f5b        - fc.get("f6_ema_3m",  0)
+        after_f6_ema_5m  = after_f6_ema_3m  - fc.get("f6_ema_5m",  0)
+        after_f6_ema_15m = after_f6_ema_5m  - fc.get("f6_ema_15m", 0)
+        after_f6         = after_f6_ema_15m  # final EMA stage output
         # F7 MACD — per timeframe running totals
         after_f7_macd_3m  = after_f6  - fc.get("f7_macd_3m",  0)
         after_f7_macd_5m  = after_f7_macd_3m  - fc.get("f7_macd_5m",  0)
@@ -6847,6 +7189,10 @@ if fc.get("total_watchlist", 0) > 0:
         f4_lbl     = f"F4 — 5m RSI \u2265{sc.get('rsi_5m_min',30)}" if sc.get("use_rsi_5m", True) else "F4 — 5m RSI (off)"
         f5_lbl     = (f"F5 — 1h RSI {sc.get('rsi_1h_min',30)}\u2013{sc.get('rsi_1h_max',95)}"
                       if sc.get("use_rsi_1h", True) else "F5 — 1h RSI (off)")
+        _atr_mode_lbl = sc.get("atr_mode", "Normal")
+        _atr_thresh_lbl = {"Strict": "≤1.5×", "Normal": "≤2.0×", "Relaxed": "≤3.0×"}.get(_atr_mode_lbl, "≤2.0×")
+        f5b_lbl    = (f"F5b — ATR(14) 15m {_atr_mode_lbl} {_atr_thresh_lbl}"
+                      if sc.get("use_atr_filter", False) else "F5b — ATR (off)")
         ema_parts = []
         if sc.get("use_ema_3m"):  ema_parts.append(f"3m EMA{sc.get('ema_period_3m',12)}")
         if sc.get("use_ema_5m"):  ema_parts.append(f"5m EMA{sc.get('ema_period_5m',12)}")
@@ -6857,59 +7203,158 @@ if fc.get("total_watchlist", 0) > 0:
         ema_cross_lbl = (f"F10 — EMA{sc.get('ema_cross_fast_15m',12)}>EMA{sc.get('ema_cross_slow_15m',21)} 15m"
                           if sc.get("use_ema_cross_15m", True) else "F10 — EMA Cross (off)")
 
-        # Build funnel rows — only include MACD/SAR timeframes that are enabled
-        funnel_data = [
-            (f"Watchlist ({total})",       total),
-            (pre_lbl,                      after_pre),
-            ("Entered Deep Scan",          checked),
-            (f"After {pdz15m_lbl}",        after_f2),
-            (f"After {pdz5m_lbl}",         after_f3),
-            (f"After {f4_lbl}",            after_f4),
-            (f"After {f5_lbl}",            after_f5),
-            (f"After {ema_lbl}",           after_f6),
-        ]
-        # F7 MACD — add a row per enabled timeframe
-        _prev_macd = after_f6
-        for _tf, _key, _after in [
-            ("3m",  "use_macd_3m",  after_f7_macd_3m),
-            ("5m",  "use_macd_5m",  after_f7_macd_5m),
-            ("15m", "use_macd_15m", after_f7_macd_15m),
+        # ── Table-style funnel (replaces Plotly chart) ─────────────────────
+        def _funnel_table_html(rows, total_n):
+            """Render the filter funnel as a readable HTML table."""
+            _css = (
+                "<style>"
+                ".ftbl{width:100%;border-collapse:collapse;font-size:13px;margin-bottom:1rem;}"
+                ".ftbl th{font-size:11px;font-weight:500;padding:6px 10px;"
+                "border-bottom:1px solid #30363d;color:#8b949e;text-align:left;}"
+                ".ftbl td{padding:7px 10px;border-bottom:1px solid #21262d;"
+                "color:#e6edf3;vertical-align:middle;}"
+                ".ftbl tr:last-child td{border-bottom:none;}"
+                ".ftbl tr.total-row td{background:#161b22;font-weight:500;}"
+                ".ftbl tr.signal-row td{background:#0d1117;font-weight:500;}"
+                ".ft-stage{font-size:12px;color:#8b949e;margin-top:2px;}"
+                ".ft-on{display:inline-block;font-size:10px;padding:1px 7px;"
+                "border-radius:4px;background:#1f3d5c;color:#79c0ff;font-weight:500;}"
+                ".ft-off{display:inline-block;font-size:10px;padding:1px 7px;"
+                "border-radius:4px;background:#21262d;color:#8b949e;font-weight:500;}"
+                ".ft-in{color:#8b949e;}"
+                ".ft-rem{color:#3fb950;font-weight:500;}"
+                ".ft-drop0{color:#8b949e;}"
+                ".ft-drop1{color:#d29922;font-weight:500;}"
+                ".ft-drop2{color:#f85149;font-weight:500;}"
+                ".ft-bar-wrap{display:inline-block;width:90px;height:7px;"
+                "background:#21262d;border-radius:4px;vertical-align:middle;margin-right:6px;}"
+                ".ft-bar{height:7px;border-radius:4px;background:#388bfd;}"
+                "</style>"
+            )
+            _hdr = (
+                "<table class='ftbl'>"
+                "<thead><tr>"
+                "<th style='width:32%'>Stage</th>"
+                "<th style='width:9%'>Status</th>"
+                "<th style='width:35%'>In → Dropped → Remaining</th>"
+                "<th style='width:24%'>Survival</th>"
+                "</tr></thead><tbody>"
+            )
+            _body = ""
+            for _stage, _status, _in, _dropped, _rem, _pct, _desc, _row_cls in rows:
+                _badge = f"<span class='ft-on'>ON</span>" if _status == "on" else (
+                         f"<span class='ft-off'>OFF</span>" if _status == "off" else "")
+                _drop_cls = "ft-drop0" if _dropped == 0 else (
+                            "ft-drop2" if _dropped > 20 else "ft-drop1")
+                _drop_str = (f"<span class='{_drop_cls}'>{_dropped} dropped</span>"
+                             if _dropped > 0 else "<span class='ft-drop0'>—</span>")
+                _flow = (f"<span class='ft-in'>{_in}</span>"
+                         f" <span style='color:#8b949e'>→</span> "
+                         f"{_drop_str}"
+                         f" <span style='color:#8b949e'>→</span> "
+                         f"<span class='ft-rem'>{_rem}</span>")
+                _bar_w = max(1, _pct)
+                _bar = (f"<div class='ft-bar-wrap'>"
+                        f"<div class='ft-bar' style='width:{_bar_w}%'></div></div>"
+                        f"<span style='font-size:12px;color:#8b949e'>{_pct}%</span>")
+                _stage_cell = (_stage if not _desc else
+                               f"{_stage}<div class='ft-stage'>{_desc}</div>")
+                _row_style = f" class='{_row_cls}'" if _row_cls else ""
+                _body += (f"<tr{_row_style}>"
+                          f"<td>{_stage_cell}</td>"
+                          f"<td>{_badge}</td>"
+                          f"<td>{_flow}</td>"
+                          f"<td>{_bar}</td>"
+                          f"</tr>")
+            return _css + _hdr + _body + "</tbody></table>"
+
+        # Build rows: (stage, status, in_n, dropped, remaining, pct, desc, row_css_class)
+        def _pct(n): return round(n / total * 100) if total > 0 else 0
+        _ft_rows = []
+        _ft_rows.append(("Watchlist", "", total, 0, total, 100, "Starting pool", "total-row"))
+        _ft_rows.append(("\u26a1 Bulk pre-filter",
+                         "on" if sc.get("use_pre_filter", True) else "off",
+                         total, pre_out_n, after_pre, _pct(after_pre),
+                         "Volume \xb7 price vs 24h low", ""))
+        _blacklisted = after_pre - checked
+        _ft_rows.append(("Cooldown / blacklist", "on",
+                         after_pre, _blacklisted, checked, _pct(checked),
+                         "SL cooldown \xb7 open trades", ""))
+        _ft_rows.append((pdz15m_lbl,
+                         "on" if sc.get("use_pdz_15m", True) else "off",
+                         checked, fc.get("f2_pdz15m", 0), after_f2, _pct(after_f2),
+                         "Premium \xb7 Equil \xb7 BandA \xb7 BandB", ""))
+        _ft_rows.append((pdz5m_lbl,
+                         "on" if sc.get("use_pdz_5m", True) else "off",
+                         after_f2, fc.get("f3_pdz5m", 0), after_f3, _pct(after_f3),
+                         "Same logic on 5m candles", ""))
+        _ft_rows.append((f4_lbl,
+                         "on" if sc.get("use_rsi_5m", True) else "off",
+                         after_f3, fc.get("f4_rsi5m", 0), after_f4, _pct(after_f4),
+                         "5m RSI floor", ""))
+        _ft_rows.append((f5_lbl,
+                         "on" if sc.get("use_rsi_1h", True) else "off",
+                         after_f4, fc.get("f5_rsi1h", 0), after_f5, _pct(after_f5),
+                         "1h RSI range", ""))
+        _ft_rows.append((f5b_lbl,
+                         "on" if sc.get("use_atr_filter", False) else "off",
+                         after_f5, fc.get("f5b_atr", 0), after_f5b, _pct(after_f5b),
+                         f"TP%/ATR% ratio {_atr_thresh_lbl}", ""))
+        # F6 EMA — per enabled timeframe
+        _ft_prev_ema = after_f5b
+        for _ema_tf, _ema_key, _ema_pkey, _ema_dkey, _ema_aftn in [
+            ("3m",  "use_ema_3m",  "ema_period_3m",  "f6_ema_3m",  after_f6_ema_3m),
+            ("5m",  "use_ema_5m",  "ema_period_5m",  "f6_ema_5m",  after_f6_ema_5m),
+            ("15m", "use_ema_15m", "ema_period_15m", "f6_ema_15m", after_f6_ema_15m),
+        ]:
+            if sc.get(_ema_key):
+                _ema_lbl = f"F6 \u2014 EMA{sc.get(_ema_pkey, 12)} {_ema_tf}"
+                _ft_rows.append((_ema_lbl, "on",
+                                 _ft_prev_ema, fc.get(_ema_dkey, 0), _ema_aftn, _pct(_ema_aftn),
+                                 f"Price above EMA{sc.get(_ema_pkey, 12)} on {_ema_tf}", ""))
+                _ft_prev_ema = _ema_aftn
+        if not ema_parts:
+            _ft_rows.append(("F6 \u2014 EMA (off)", "off",
+                             after_f5b, 0, after_f5b, _pct(after_f5b),
+                             "All EMA timeframes disabled", ""))
+        # F7 MACD — per enabled timeframe
+        _ft_prev = after_f6
+        for _tf, _key, _dkey, _aftn in [
+            ("3m",  "use_macd_3m",  "f7_macd_3m",  after_f7_macd_3m),
+            ("5m",  "use_macd_5m",  "f7_macd_5m",  after_f7_macd_5m),
+            ("15m", "use_macd_15m", "f7_macd_15m", after_f7_macd_15m),
         ]:
             if sc.get(_key, True):
-                funnel_data.append((f"F7 — MACD \U0001f7e2\u2191 {_tf}", _after))
-                _prev_macd = _after
-            # If disabled keep running value the same (no row added, count unchanged)
-        # F8 SAR — add a row per enabled timeframe
-        _prev_sar = _prev_macd
-        for _tf, _key, _after in [
-            ("3m",  "use_sar_3m",  after_f8_sar_3m),
-            ("5m",  "use_sar_5m",  after_f8_sar_5m),
-            ("15m", "use_sar_15m", after_f8_sar_15m),
+                _ft_rows.append((f"F7 \u2014 MACD {_tf}", "on",
+                                 _ft_prev, fc.get(_dkey, 0), _aftn, _pct(_aftn),
+                                 "MACD histogram bullish crossover", ""))
+                _ft_prev = _aftn
+        # F8 SAR — per enabled timeframe
+        for _tf, _key, _dkey, _aftn in [
+            ("3m",  "use_sar_3m",  "f8_sar_3m",  after_f8_sar_3m),
+            ("5m",  "use_sar_5m",  "f8_sar_5m",  after_f8_sar_5m),
+            ("15m", "use_sar_15m", "f8_sar_15m", after_f8_sar_15m),
         ]:
             if sc.get(_key, True):
-                funnel_data.append((f"F8 — SAR {_tf}", _after))
-                _prev_sar = _after
+                _ft_rows.append((f"F8 \u2014 SAR {_tf}", "on",
+                                 _ft_prev, fc.get(_dkey, 0), _aftn, _pct(_aftn),
+                                 "Price above Parabolic SAR", ""))
+                _ft_prev = _aftn
+        _ft_rows.append((vol_lbl,
+                         "on" if sc.get("use_vol_spike") else "off",
+                         after_f8_sar_15m, fc.get("f9_vol", 0), after_f9, _pct(after_f9),
+                         "Volume spike check", ""))
+        _ft_rows.append((ema_cross_lbl,
+                         "on" if sc.get("use_ema_cross_15m", True) else "off",
+                         after_f9, fc.get("f10_ema_cross", 0), after_f10, _pct(after_f10),
+                         "Fast EMA above slow EMA 15m", ""))
+        _ft_rows.append(("\u26a0\ufe0f Empty candle drop", "on",
+                         after_f10, fc.get("f_empty_data", 0), after_empty, _pct(after_empty),
+                         "Missing timeframe data", ""))
+        _ft_rows.append(("\u2705 Signals generated", "", after_empty, 0, after_empty,
+                         _pct(after_empty), "Passed all active filters", "signal-row"))
 
-        funnel_data.append((f"After {vol_lbl}",           after_f9))
-        funnel_data.append((f"After {ema_cross_lbl}",     after_f10))
-        funnel_data.append(("After \u26a0\ufe0f Empty Candle Drop", after_empty))
-
-        # Colour palette — generate enough colours for variable row count
-        _palette = ["#1f6feb","#388bfd","#58a6ff","#79c0ff","#a5d6ff",
-                    "#3fb950","#56d364","#7ee787","#40c8b8","#26a69a",
-                    "#d29922","#e3b341","#f0a500","#f85149","#ff6b6b"]
-        _colours = (_palette * ((len(funnel_data) // len(_palette)) + 1))[:len(funnel_data)]
-
-        fig_funnel = go.Figure(go.Funnel(
-            y=[d[0] for d in funnel_data],
-            x=[d[1] for d in funnel_data],
-            marker=dict(color=_colours),
-            textinfo="value+percent initial",
-        ))
-        fig_funnel.update_layout(
-            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-            font=dict(color="#e6edf3"), margin=dict(t=10,b=10,l=10,r=10), height=500)
-        st.plotly_chart(fig_funnel, use_container_width=True)
+        st.markdown(_funnel_table_html(_ft_rows, total), unsafe_allow_html=True)
         col_a, col_b, col_c = st.columns(3)
         col_a.metric("Pre-filtered out ⚡", pre_out_n, help="Removed cheaply — no candle API calls used")
         col_b.metric("Deep scanned 🔬",     checked,   help="Received full multi-timeframe candle analysis")
@@ -6932,7 +7377,10 @@ if fc.get("total_watchlist", 0) > 0:
         _f3e  = set(fc.get("f3_elim_syms",  []))
         _f4e  = set(fc.get("f4_elim_syms",  []))
         _f5e  = set(fc.get("f5_elim_syms",  []))
-        _f6e  = set(fc.get("f6_elim_syms",  []))
+        _f5be = set(fc.get("f5b_elim_syms", []))
+        _f6e_3m  = set(fc.get("f6_ema_3m_elim_syms",  []))
+        _f6e_5m  = set(fc.get("f6_ema_5m_elim_syms",  []))
+        _f6e_15m = set(fc.get("f6_ema_15m_elim_syms", []))
         # F7 MACD — per timeframe elimination sets
         _f7e_3m  = set(fc.get("f7_macd_3m_elim_syms",  []))
         _f7e_5m  = set(fc.get("f7_macd_5m_elim_syms",  []))
@@ -6949,7 +7397,11 @@ if fc.get("total_watchlist", 0) > 0:
         _after_f3        = _after_f2     - _f3e
         _after_f4        = _after_f3     - _f4e
         _after_f5        = _after_f4     - _f5e
-        _after_f6        = _after_f5     - _f6e
+        _after_f5b       = _after_f5    - (_f5be if sc.get("use_atr_filter", False) else set())
+        _after_f6_ema_3m  = _after_f5b       - (_f6e_3m  if sc.get("use_ema_3m")  else set())
+        _after_f6_ema_5m  = _after_f6_ema_3m - (_f6e_5m  if sc.get("use_ema_5m")  else set())
+        _after_f6_ema_15m = _after_f6_ema_5m - (_f6e_15m if sc.get("use_ema_15m") else set())
+        _after_f6         = _after_f6_ema_15m
         # MACD per timeframe — only subtract if that timeframe is enabled
         _after_f7_macd_3m  = _after_f6          - (_f7e_3m  if sc.get("use_macd_3m",  True) else set())
         _after_f7_macd_5m  = _after_f7_macd_3m  - (_f7e_5m  if sc.get("use_macd_5m",  True) else set())
@@ -6971,17 +7423,37 @@ if fc.get("total_watchlist", 0) > 0:
         _super_demoted_s = set(fc.get("super_cap_demoted_syms", []))
         _returned_syms = _new_sig_s | _blk_active_s | _blk_cool_s | _blk_sl_cool_s
 
-        # Fixed opening rows
+        # stage_rows: (stage_name, in_count, remaining_count, coin_str)
+        # dropped = in_count - remaining_count (computed at render time)
         stage_rows = [
-            ("⚡ After Bulk Pre-filter",  len(_pre),      _coin_str(_pre)),
-            ("🔬 Entered Deep Scan",      len(_chk),      _coin_str(_chk)),
-            (f"After {pdz15m_lbl}",       len(_after_f2), _coin_str(_after_f2)),
-            (f"After {pdz5m_lbl}",        len(_after_f3), _coin_str(_after_f3)),
-            (f"After {f4_lbl}",           len(_after_f4), _coin_str(_after_f4)),
-            (f"After {f5_lbl}",           len(_after_f5), _coin_str(_after_f5)),
-            (f"After {ema_lbl}",          len(_after_f6), _coin_str(_after_f6)),
+            ("⚡ After Bulk Pre-filter",  total,       len(_pre),      _coin_str(_pre)),
+            ("🔬 Entered Deep Scan",      len(_pre),   len(_chk),      _coin_str(_chk)),
+            (f"After {pdz15m_lbl}",       len(_chk),   len(_after_f2), _coin_str(_after_f2)),
+            (f"After {pdz5m_lbl}",        len(_after_f2), len(_after_f3), _coin_str(_after_f3)),
+            (f"After {f4_lbl}",           len(_after_f3), len(_after_f4), _coin_str(_after_f4)),
+            (f"After {f5_lbl}",           len(_after_f4), len(_after_f5), _coin_str(_after_f5)),
+            (f"After {f5b_lbl}",          len(_after_f5), len(_after_f5b), _coin_str(_after_f5b)),
+        ]
+        # F6 EMA — one row per enabled timeframe
+        _sr_ema_prev = _after_f5b
+        for _ema_tf, _ema_key, _ema_pkey, _ema_after_set in [
+            ("3m",  "use_ema_3m",  "ema_period_3m",  _after_f6_ema_3m),
+            ("5m",  "use_ema_5m",  "ema_period_5m",  _after_f6_ema_5m),
+            ("15m", "use_ema_15m", "ema_period_15m", _after_f6_ema_15m),
+        ]:
+            if sc.get(_ema_key):
+                stage_rows.append((
+                    f"F6 — EMA{sc.get(_ema_pkey, 12)} {_ema_tf}",
+                    len(_sr_ema_prev), len(_ema_after_set),
+                    _coin_str(_ema_after_set),
+                ))
+                _sr_ema_prev = _ema_after_set
+        if not ema_parts:
+            stage_rows.append(("F6 — EMA (off)", len(_after_f5b), len(_after_f5b), _coin_str(_after_f5b)))
+        stage_rows += [
         ]
         # F7 MACD — one row per enabled timeframe
+        _sr_prev = _after_f6
         for _tf, _key, _after_set in [
             ("3m",  "use_macd_3m",  _after_f7_macd_3m),
             ("5m",  "use_macd_5m",  _after_f7_macd_5m),
@@ -6990,9 +7462,10 @@ if fc.get("total_watchlist", 0) > 0:
             if sc.get(_key, True):
                 stage_rows.append((
                     f"F7 — MACD \U0001f7e2\u2191 {_tf}",
-                    len(_after_set),
+                    len(_sr_prev), len(_after_set),
                     _coin_str(_after_set),
                 ))
+                _sr_prev = _after_set
         # F8 SAR — one row per enabled timeframe
         for _tf, _key, _after_set in [
             ("3m",  "use_sar_3m",  _after_f8_sar_3m),
@@ -7002,30 +7475,37 @@ if fc.get("total_watchlist", 0) > 0:
             if sc.get(_key, True):
                 stage_rows.append((
                     f"F8 — SAR {_tf}",
-                    len(_after_set),
+                    len(_sr_prev), len(_after_set),
                     _coin_str(_after_set),
                 ))
+                _sr_prev = _after_set
         # Fixed closing rows
         stage_rows += [
-            (f"After {vol_lbl}",               len(_after_f9),        _coin_str(_after_f9)),
-            (f"After {ema_cross_lbl}",         len(_after_f10),       _coin_str(_after_f10)),
-            ("⚠️ Dropped — Empty Candle Data", len(_fempty),          ", ".join(sorted(_fempty)) if _fempty else "—"),
-            ("💥 Dropped — Process Error",     _process_err_count,    "See API Error Log below ↓"),
-            ("✅ Returned Signal",             len(_returned_syms),   _coin_str(_returned_syms)),
-            ("⭐ Super cap demoted → F3-F10",  len(_super_demoted_s), _coin_str(_super_demoted_s)),
-            ("🔵 Blocked — Open trade exists", len(_blk_active_s),    _coin_str(_blk_active_s)),
-            ("🟡 Blocked — TP Cooldown",       len(_blk_cool_s),      _coin_str(_blk_cool_s)),
-            ("🔴 Blocked — SL Cooldown (24h)", len(_blk_sl_cool_s),   _coin_str(_blk_sl_cool_s)),
-            ("🟢 New Signals Fired",           len(_new_sig_s),       _coin_str(_new_sig_s)),
+            (f"After {vol_lbl}",               len(_sr_prev),         len(_after_f9),   _coin_str(_after_f9)),
+            (f"After {ema_cross_lbl}",         len(_after_f9),        len(_after_f10),  _coin_str(_after_f10)),
+            ("⚠️ Dropped — Empty Candle Data", len(_after_f10),       len(_fempty),     ", ".join(sorted(_fempty)) if _fempty else "—"),
+            ("💥 Dropped — Process Error",     "—", _process_err_count, "See API Error Log below ↓"),
+            ("✅ Returned Signal",             "—", len(_returned_syms),   _coin_str(_returned_syms)),
+            ("⭐ Super cap demoted → F3-F10",  "—", len(_super_demoted_s), _coin_str(_super_demoted_s)),
+            ("🔵 Blocked — Open trade exists", "—", len(_blk_active_s),    _coin_str(_blk_active_s)),
+            ("🟡 Blocked — TP Cooldown",       "—", len(_blk_cool_s),      _coin_str(_blk_cool_s)),
+            ("🔴 Blocked — SL Cooldown (24h)", "—", len(_blk_sl_cool_s),   _coin_str(_blk_sl_cool_s)),
+            ("🟢 New Signals Fired",           "—", len(_new_sig_s),       _coin_str(_new_sig_s)),
         ]
 
         st.dataframe(
-            [{"Filter Stage": r[0], "Count": r[1], "Qualified Coins": r[2]} for r in stage_rows],
+            [{"Filter Stage":    r[0],
+              "In":              r[1],
+              "Dropped":         (r[1] - r[2]) if isinstance(r[1], int) and isinstance(r[2], int) else "—",
+              "Remaining":       r[2],
+              "Qualified Coins": r[3]} for r in stage_rows],
             use_container_width=True,
             hide_index=True,
             column_config={
                 "Filter Stage":    st.column_config.TextColumn(width="medium"),
-                "Count":           st.column_config.NumberColumn(width="small"),
+                "In":              st.column_config.NumberColumn(width="small"),
+                "Dropped":         st.column_config.NumberColumn(width="small"),
+                "Remaining":       st.column_config.NumberColumn(width="small"),
                 "Qualified Coins": st.column_config.TextColumn(width="large"),
             }
         )
@@ -7202,7 +7682,7 @@ def _build_diagnostics_text() -> str:
     _kv("legacy_migration_last_count", getattr(_b, "_bsc_legacy_migration_last_count", "n/a"))
     _kv("legacy_migration_last_ts",    _fmt_ts(getattr(_b, "_bsc_legacy_migration_last_ts", "")))
 
-    # ── Configuration (redacted) ─────────────────────────────────────────────
+    # ── Configuration (redacted) ──────────────────────────────────────────────
     _hdr("CONFIGURATION (API credentials redacted)")
     try:
         _cfg_snap_local = _redact(dict(_snap_cfg))
@@ -7213,10 +7693,10 @@ def _build_diagnostics_text() -> str:
         if isinstance(_v, list):
             _v = f"[{len(_v)} items] " + ", ".join(str(x) for x in _v[:20])
             if len(_cfg_snap_local[_k]) > 20:
-                _v += f" … (+{len(_cfg_snap_local[_k]) - 20} more)"
+                _v += " … (+" + str(len(_cfg_snap_local[_k]) - 20) + " more)"
         _kv(_k, _v)
 
-    # ── Signal bucket counts ────────────────────────────────────────────────
+    # ── Signal bucket counts ────────────────────────────────────────────────────────
     _hdr("SIGNAL COUNTS")
     _kv("open",        len(_open_sigs))
     _kv("tp_hit",      len(_tp_sigs))
@@ -7225,9 +7705,9 @@ def _build_diagnostics_text() -> str:
     _kv("queue_limit", len(_queue_sigs))
     _kv("total",       len(signals))
 
-    # ── Per-signal detail (all buckets) ─────────────────────────────────────
+    # ── Per-signal detail (all buckets) ───────────────────────────────────────────
     def _dump_signal(s: dict):
-        _sub(f"{s.get('symbol','?')}  ·  {_fmt_ts(s.get('timestamp',''))}")
+        _sub(s.get("symbol","?") + "  ·  " + _fmt_ts(s.get("timestamp","")))
         _kv("status",              s.get("status", ""))
         _kv("sector",              s.get("sector", ""))
         _kv("setup",               "Super" if s.get("is_super_setup") else "Normal")
@@ -7261,19 +7741,55 @@ def _build_diagnostics_text() -> str:
         if _fills:
             _push("  dca_fills:")
             for _f in _fills:
+                _idx = _f.get("dca_idx", "?")
+                _px  = str(_f.get("price",    "—"))
+                _us  = str(_f.get("usdt",     "—"))
+                _lv  = str(_f.get("leverage", "—"))
+                _nt  = str(_f.get("notional", "—"))
+                _tp2 = str(_f.get("tp",       "—"))
+                _sl2 = str(_f.get("sl",       "—"))
+                _oi  = str(_f.get("order_id", "") or "—")
+                _ts2 = _fmt_ts(_f.get("ts", ""))
                 _push(
-                    f"    - idx={_f.get('dca_idx', '?')}  "
-                    f"px={_f.get('price', '—')}  "
-                    f"usdt={_f.get('usdt', '—')}  "
-                    f"lev={_f.get('leverage', '—')}  "
-                    f"notional={_f.get('notional', '—')}  "
-                    f"tp={_f.get('tp', '—')}  "
-                    f"sl={_f.get('sl', '—')}  "
-                    f"ts={_fmt_ts(_f.get('ts', ''))}  "
-                    f"order_id={_f.get('order_id', '') or '—'}"
+                    "    - idx=" + str(_idx) + "  px=" + _px + "  usdt=" + _us + "  "
+                    "lev=" + _lv + "  notional=" + _nt + "  "
+                    "tp=" + _tp2 + "  sl=" + _sl2 + "  ts=" + _ts2 + "  order_id=" + _oi
                 )
         else:
             _kv("dca_fills", "(none)")
+        # ── Entry criteria ──────────────────────────────────────────────────────────────────
+        _crit = s.get("criteria") or {}
+        if _crit:
+            _push("  criteria:")
+            _crit_keys = [
+                ("pdz_zone_15m",    "pdz_zone_15m"),
+                ("pdz_zone_1h",     "pdz_zone_1h"),
+                ("pdz_zone_5m",     "pdz_zone_5m"),
+                ("rsi_5m",          "rsi_5m"),
+                ("rsi_1h",          "rsi_1h"),
+                ("ema_3m",          "ema_3m"),
+                ("ema_5m",          "ema_5m"),
+                ("ema_15m",         "ema_15m"),
+                ("macd_3m",         "macd_3m"),
+                ("macd_5m",         "macd_5m"),
+                ("macd_15m",        "macd_15m"),
+                ("sar_3m",          "sar_3m"),
+                ("sar_5m",          "sar_5m"),
+                ("sar_15m",         "sar_15m"),
+                ("vol_ratio",       "vol_ratio"),
+                ("ema_cross_12_15m","ema_cross_12_15m"),
+                ("ema_cross_21_15m","ema_cross_21_15m"),
+                ("atr_15m",         "atr_15m"),
+                ("atr_ratio",       "atr_ratio"),
+            ]
+            for _ck, _ck_key in _crit_keys:
+                if _ck_key in _crit:
+                    _cv = _crit[_ck_key]
+                    if isinstance(_cv, float):
+                        _cv = f"{_cv:.4f}"
+                    _push("    " + f"{_ck:<24}" + " : " + str(_cv))
+        else:
+            _push("  criteria                         : (none stored)")
 
     _hdr("SIGNALS · OPEN")
     if _open_sigs:
@@ -7310,7 +7826,7 @@ def _build_diagnostics_text() -> str:
     else:
         _push("  (none)")
 
-    # ── Filter funnel (last scan) ───────────────────────
+    # ── Filter funnel (last scan) ──────────────────────────────────────────────────
     _hdr("FILTER FUNNEL (last scan)")
     try:
         with _filter_lock:
@@ -7319,49 +7835,17 @@ def _build_diagnostics_text() -> str:
         if _fc_snap.get("total_watchlist", 0) > 0:
             for _k in sorted(_fc_snap.keys()):
                 _v = _fc_snap[_k]
-                if _k == "scan_cfg":
+                if _k in ("scan_cfg", "flushed_at", "scan_completed_at"):
                     continue
                 if isinstance(_v, list):
-                    _v = f"[{len(_v)} items] " + ", ".join(str(x) for x in _v[:30])
-                _kv(_k, _v)
-        else:
-            _push("  (no scan has completed yet)")
-    except Exception as _fex:
-        _push(f"  <error reading filter counts: {_fex}>")
-
-    # ── API errors (recent) ─────────────────────────────────
-    _hdr("API ERRORS (recent)")
-    try:
-        _err_log = list(_b._bsc_log.get("api_errors", []) or []) if hasattr(_b, "_bsc_log") else []
-        if _err_log:
-            for _e in _err_log[-50:]:
-                if isinstance(_e, dict):
-                    _push(
-                        f"  {_fmt_ts(_e.get('ts',''))}  "
-                        f"{_e.get('type','?')}  "
-                        f"{str(_e.get('msg',''))[:200]}"
-                    )
+                    _push(f"  {_k:<32} : [{len(_v)} items]")
                 else:
-                    _push(f"  {str(_e)[:240]}")
+                    _push(f"  {_k:<32} : {_v}")
         else:
-            _push("  (none)")
-    except Exception as _err_ex:
-        _push(f"  <error reading api_errors: {_err_ex}>")
+            _push("  (no scan data yet)")
+    except Exception as _fe:
+        _push(f"  <error reading filter counts: {_fe}>")
 
     return "\n".join(_lines)
 
-
-# ── Download Diagnostics button ────────────────────────────────────────────────
-try:
-    _diag_text = _build_diagnostics_text()
-    _diag_fname = "diagnostics_" + dubai_now().strftime("%Y%m%d_%H%M%S") + ".txt"
-    st.download_button(
-        label="⬇️ Download Diagnostics",
-        data=_diag_text,
-        file_name=_diag_fname,
-        mime="text/plain",
-        key="btn_download_diagnostics",
-        help="Full plain-text snapshot of app state: config, signals, DCA fills, filter funnel, API errors.",
-    )
-except Exception as _dex:
-    st.warning(f"Diagnostics unavailable: {_dex}")
+st.text_area("📋 Debug Snapshot", _build_diagnostics_text(), height=400, key="debug_snap_area")
