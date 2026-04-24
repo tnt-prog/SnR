@@ -5338,7 +5338,7 @@ def _cfg_panel(cfg: dict) -> str:
 
     def _kv_cell(label, value, highlight=False):
         vc = "#79c0ff" if highlight else "#e6edf3"
-        return (f"<td style='padding:6px 14px 6px 0;vertical-align:top;white-space:nowrap;'>"
+        return (f"<td style='padding:6px 8px 6px 0;vertical-align:top;white-space:nowrap;'>"
                 f"<span style='font-size:11px;color:#8b949e'>{label}</span><br>"
                 f"<span style='font-size:13px;font-weight:500;color:{vc}'>{value}</span></td>")
 
@@ -5402,7 +5402,8 @@ def _cfg_panel(cfg: dict) -> str:
         f"<span style='font-size:11px;font-weight:500;padding:2px 8px;"
         f"border-radius:10px;background:{_mode_col}22;color:{_mode_col}'>{_mode_lbl}</span>"
         f"</div>"
-        f"<table style='border-collapse:collapse;width:100%'><tbody>"
+        f"<div style='overflow-x:auto;-webkit-overflow-scrolling:touch;'>"
+        f"<table style='border-collapse:collapse;min-width:100%'><tbody>"
     )
 
     # Row 1 — Trade setup
@@ -5438,7 +5439,7 @@ def _cfg_panel(cfg: dict) -> str:
     _html += _section("ACTIVE FILTERS")
     _html += f"<tr><td colspan='20' style='padding:4px 0 2px 0'>{''.join(filter_pills)}</td></tr>"
 
-    _html += "</tbody></table></div>"
+    _html += "</tbody></table></div></div>"
     return _html
 
 st.markdown(_cfg_panel(_snap_cfg), unsafe_allow_html=True)
