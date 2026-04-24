@@ -8277,4 +8277,197 @@ def _build_diagnostics_text() -> str:
     _kv("queue_limit", len(_queue_sigs))
     _kv("total",       len(signals))
 
-    # ── Per-signal detail (all buckets) ─────
+
+    # ── Capital Requirement Summary ──────────────────────────────────────────
+    _hdr("CAPITAL REQUIREMENT SUMMARY")
+    try:
+        _dc_base    = float(_snap_cfg.get("trade_usdt_amount", 5.0))
+        _dc_dca_max = int(_snap_cfg.get("trade_max_dca", 3))
+        _dc_pool    = int(_snap_cfg.get("max_open_trades", 7))
+        _dc_per     = _dc_base * (2 ** _dc_dca_max)
+        _dc_min     = _dc_per * _dc_pool
+        _dc_buf     = _dc_min * 0.25
+        _dc_tot     = _dc_min + _dc_buf
+        _kv("base_margin_per_trade",    f"${_dc_base:.2f}")
+        _kv("max_dca_levels",           _dc_dca_max)
+        _kv("max_open_trades",          _dc_pool)
+        _kv("worst_case_per_trade",     f"${_dc_per:.2f}  (base × 2^dca_max)")
+        _kv("minimum_required",         f"${_dc_min:,.2f}  (per_trade × max_trades)")
+        _kv("buffer_25pct",             f"${_dc_buf:,.2f}")
+        _kv("total_recommended",        f"${_dc_tot:,.2f}")
+        _kv("margin_mode",              _snap_cfg.get("trade_margin_mode", "isolated"))
+    except Exception as _ce:
+        _push(f"  <error: {_ce}>")
+
+    # ── Filter Funnel (last scan) ─────────────────────────────────────────────
+    _hdr("FILTER FUNNEL — LAST SCAN")
+    try:
+        _fc = getattr(_b, "_bsc_filter_counts", {}) or {}
+        _fmap = [
+            ("pre_filtered_out",  "Pre-filter eliminated"),
+            ("checked",           "Deep-scanned"),
+            ("f_empty_data",      "F0  — Empty/bad data"),
+            ("f1_resistance",     "F1  — Resistance"),
+            ("f2_super_setup",    "F2  — Super setup passed"),
+            ("super_cap_demoted", "F2  — Super cap demoted"),
+            ("f3_pdz5m",          "F3  — PDZ 5m"),
+            ("f4_rsi5m",          "F4  — RSI 5m"),
+            ("f5_rsi1h",          "F5  — RSI 1h"),
+            ("f6_ema",            "F6  — EMA"),
+            ("f7_macd",           "F7  — MACD"),
+            ("f7b_macd5m",        "F7b — MACD 5m"),
+            ("f7c_macd15m",       "F7c — MACD 15m"),
+            ("f8_sar",            "F8  — SAR"),
+            ("f9_vol",            "F9  — Volume"),
+            ("f10_ema_cross",     "F10 — EMA Cross 15m"),
+            ("passed",            "✅ Passed all filters"),
+            ("super_setup",       "⭐ Super setup"),
+        ]
+        for _fk, _fl in _fmap:
+            _fv = _fc.get(_fk, 0)
+            if _fv:
+                _kv(_fl, _fv)
+        _kv("watchlist_size",   _fc.get("watchlist_size", "—"))
+    except Exception as _fe:
+        _push(f"  <error: {_fe}>")
+
+    # ── Per-signal detail (all buckets) ──────────────────────────────────────
+    def _sig_lines(sig: dict, idx: int):
+        _push(f"  [{idx}] {sig.get('symbol','?')} | status={sig.get('status','?')} "
+              f"| entry={sig.get('entry','—')} | tp={sig.get('tp','—')} "
+              f"| sl={sig.get('sl','—')} | avg_entry={sig.get('avg_entry','—')} "
+              f"| original_entry={sig.get('original_entry','—')} "
+              f"| next_dca_px={sig.get('next_dca_px','—')} "
+              f"| final_sl_price={sig.get('final_sl_price','—')} "
+              f"| sl_distance_pct={sig.get('sl_distance_pct','—')} "
+              f"| dca_count={sig.get('dca_count',0)}/{sig.get('dca_max',0)} "
+              f"| mode={sig.get('order_margin_mode','—')} "
+              f"| lev={sig.get('trade_lev','—')}x "
+              f"| usdt=${sig.get('trade_usdt','—')} "
+              f"| dca_cross_drop={sig.get('dca_cross_drop_pct','—')}% "
+              f"| dca_iso_dist={sig.get('dca_iso_distance_pct','—')}% "
+              f"| ts={_fmt_ts(sig.get('timestamp',''))} "
+              f"| close_ts={_fmt_ts(sig.get('close_time',''))} "
+              f"| close_px={sig.get('close_price','—')} "
+              f"| order_id={sig.get('order_id','—')} "
+              f"| algo_id={sig.get('algo_id','—')} "
+              f"| tp_algo_id={sig.get('tp_algo_id','—')} "
+              f"| demo={sig.get('demo_mode','—')} "
+              f"| is_super={sig.get('is_super_setup',False)}")
+
+    for _bucket_name, _bucket in [
+        ("OPEN SIGNALS",    _open_sigs),
+        ("TP HIT",          _tp_sigs),
+        ("SL HIT",          _sl_sigs),
+        ("DCA SL HIT",      _dca_sl_sigs),
+        ("QUEUE LIMIT",     _queue_sigs),
+        ("CLOSED ON OKX",   _closed_okx_sigs),
+    ]:
+        _hdr(_bucket_name + f"  ({len(_bucket)} signals)")
+        if not _bucket:
+            _push("  (none)")
+        else:
+            for _i, _s in enumerate(_bucket, 1):
+                _sig_lines(_s, _i)
+                # Full entry criteria
+                _crit = _s.get("criteria") or {}
+                if _crit:
+                    _push(f"    criteria  : rsi_5m={_crit.get('rsi_5m','—')} "
+                          f"rsi_1h={_crit.get('rsi_1h','—')} "
+                          f"ema_3m={_crit.get('ema_3m','—')} "
+                          f"ema_5m={_crit.get('ema_5m','—')} "
+                          f"ema_15m={_crit.get('ema_15m','—')} "
+                          f"macd_3m={_crit.get('macd_3m','—')} "
+                          f"macd_5m={_crit.get('macd_5m','—')} "
+                          f"macd_15m={_crit.get('macd_15m','—')} "
+                          f"sar_3m={_crit.get('sar_3m','—')} "
+                          f"sar_5m={_crit.get('sar_5m','—')} "
+                          f"sar_15m={_crit.get('sar_15m','—')} "
+                          f"vol_ratio={_crit.get('vol_ratio','—')} "
+                          f"pdz_5m={_crit.get('pdz_zone_5m','—')} "
+                          f"pdz_15m={_crit.get('pdz_zone_15m','—')} "
+                          f"pdz_1h={_crit.get('pdz_zone_1h','—')} "
+                          f"ema_cross_12={_crit.get('ema_cross_12_15m','—')} "
+                          f"ema_cross_21={_crit.get('ema_cross_21_15m','—')} "
+                          f"atr_15m={_crit.get('atr_15m','—')} "
+                          f"atr_ratio={_crit.get('atr_ratio','—')}")
+                # DCA ladder
+                _ladder = _s.get("dca_ladder") or []
+                if _ladder:
+                    _lvls = [f"DCA-{item['level']}@{item['trigger_px']} "
+                             f"(blend={item.get('blended_avg','?')} tp={item.get('tp_px','?')})"
+                             for item in _ladder]
+                    _push(f"    dca_ladder: {' | '.join(_lvls)}")
+                # DCA fills
+                _fills = _s.get("dca_fills") or []
+                if len(_fills) > 1:
+                    _push(f"    dca_fills : {len(_fills)-1} DCA(s) fired — "
+                          + " | ".join(f"DCA-{f.get('dca_idx',i)}@{f.get('price','?')} "
+                                       f"usdt=${f.get('usdt','?')} "
+                                       f"{'[paper]' if f.get('paper') else '[live]'}"
+                                       for i, f in enumerate(_fills[1:], 1)))
+                # DCA pre-orders (cross mode)
+                _preorders = _s.get("dca_preorders") or []
+                if _preorders:
+                    _push(f"    dca_preorders ({len(_preorders)}):")
+                    for _po in _preorders:
+                        _push(f"      DCA-{_po.get('level','?')} "
+                              f"order_id={_po.get('order_id','—')} "
+                              f"trigger_px={_po.get('trigger_px','—')} "
+                              f"contracts={_po.get('contracts','—')} "
+                              f"status={_po.get('status','—')}"
+                              + (f" actual_px={_po.get('actual_px','—')}"
+                                 if _po.get('actual_px') else ""))
+
+    # ── Active Watchlist ──────────────────────────────────────────────────────
+    _hdr("WATCHLIST")
+    try:
+        _wl = list(_snap_cfg.get("watchlist") or [])
+        _push(f"  Total: {len(_wl)} symbols")
+        for _wi, _wsym in enumerate(_wl, 1):
+            _push(f"  {_wi:>3}. {_wsym}")
+    except Exception as _we:
+        _push(f"  <error reading watchlist: {_we}>")
+
+    # ── API Error Log ─────────────────────────────────────────────────────────
+    _hdr("API ERROR LOG (last 200 entries, newest first)")
+    try:
+        with getattr(_b, "_bsc_error_log_lock", threading.Lock()):
+            _err_entries = list(reversed(getattr(_b, "_bsc_error_log", [])))[:200]
+        if not _err_entries:
+            _push("  (no errors)")
+        else:
+            for _ei, _err in enumerate(_err_entries, 1):
+                _push(f"  [{_ei:>3}] {_fmt_ts(_err.get('ts',''))} "
+                      f"| {_err.get('type','?'):8} "
+                      f"| {_err.get('symbol',''):15} "
+                      f"| {_err.get('endpoint',''):40} "
+                      f"| {str(_err.get('msg',''))[:120]}")
+    except Exception as _ele:
+        _push(f"  <error reading error log: {_ele}>")
+
+    _push("")
+    _push("=" * 78)
+    _push("END OF DIAGNOSTICS")
+    _push("=" * 78)
+    return "\n".join(_lines)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Download button — calls the builder and streams the result
+# ─────────────────────────────────────────────────────────────────────────────
+try:
+    _diag_text = _build_diagnostics_text()
+except Exception as _diag_exc:
+    _diag_text = f"Error building diagnostics: {_diag_exc}"
+
+st.text_area("📋 Diagnostics Preview", _diag_text, height=300, key="debug_snap_area")
+
+_diag_filename = f"diagnostics_{dubai_now().strftime('%Y%m%d_%H%M%S')}.txt"
+st.download_button(
+    label="⬇️ Download Diagnostics",
+    data=_diag_text.encode("utf-8"),
+    file_name=_diag_filename,
+    mime="text/plain",
+    key="diag_download_btn",
+)
