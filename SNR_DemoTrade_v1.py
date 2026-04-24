@@ -2637,6 +2637,8 @@ def _migrate_legacy_signals(log: dict, cfg: dict) -> int:
             "dca_enabled" not in _sig
             or not _sig.get("dca_fills")
             or "original_entry" not in _sig
+            or ((_sig.get("order_margin_mode") or "isolated").strip().lower() == "cross"
+                and not _sig.get("dca_ladder"))
         )
         if not _missing_dca:
             continue
@@ -8391,8 +8393,23 @@ def _build_diagnostics_text() -> str:
                           f"ema_cross_21={_crit.get('ema_cross_21_15m','—')} "
                           f"atr_15m={_crit.get('atr_15m','—')} "
                           f"atr_ratio={_crit.get('atr_ratio','—')}")
-                # DCA ladder
+                # DCA ladder — use stored ladder or compute on-the-fly if missing
                 _ladder = _s.get("dca_ladder") or []
+                if not _ladder:
+                    _diag_mode  = (_s.get("order_margin_mode") or "isolated").strip().lower()
+                    _diag_entry = float(_s.get("original_entry", _s.get("entry", 0)) or 0)
+                    _diag_max   = int(_s.get("dca_max", 0) or 0)
+                    if _diag_mode == "cross" and _diag_entry > 0 and _diag_max > 0:
+                        try:
+                            _diag_usdt  = float(_s.get("trade_usdt", 5) or 5)
+                            _diag_lev   = int(_s.get("trade_lev", 20) or 20)
+                            _diag_cdrop = float(_s.get("dca_cross_drop_pct", 7.0) or 7.0)
+                            _diag_tp    = float(_snap_cfg.get("tp_pct", 1.0) or 1.0)
+                            _ladder = _calc_cross_dca_ladder(
+                                _diag_entry, _diag_usdt, _diag_lev,
+                                _diag_max, _diag_cdrop, _diag_tp)
+                        except Exception:
+                            _ladder = []
                 if _ladder:
                     _lvls = [f"DCA-{item['level']}@{item['trigger_px']} "
                              f"(blend={item.get('blended_avg','?')} tp={item.get('tp_px','?')})"
