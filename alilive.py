@@ -7984,6 +7984,47 @@ def _build_diagnostics_text() -> str:
     else:
         _push("  (none)")
 
+    _hdr("SIGNALS · CLOSED ON OKX (manual / undetected close)")
+    if _closed_okx_sigs:
+        for _s in _closed_okx_sigs:
+            _dump_signal(_s)
+    else:
+        _push("  (none)")
+
+    # ── Watchlist ──────────────────────────────────────────────────────────────────
+    _hdr("WATCHLIST")
+    try:
+        _wl = list(_snap_cfg.get("watchlist", []))
+        _push(f"  Total coins: {len(_wl)}")
+        for _wi, _wsym in enumerate(_wl, 1):
+            _push(f"  {_wi:>3}. {_wsym}")
+    except Exception as _wle:
+        _push(f"  <error reading watchlist: {_wle}>")
+
+    # ── API Error Log ──────────────────────────────────────────────────────────────
+    _hdr("API ERROR LOG (most recent 200 entries)")
+    try:
+        with _log_lock:
+            _err_snap = list((_b._bsc_log.get("errors") or []))
+        _err_snap_sorted = sorted(_err_snap, key=lambda e: e.get("ts", ""), reverse=True)
+        _err_limit = _err_snap_sorted[:200]
+        if _err_limit:
+            for _e in _err_limit:
+                _ets  = _fmt_ts(_e.get("ts", ""))
+                _etype = _e.get("type", "?")
+                _emsg  = _e.get("message", "") or _e.get("msg", "")
+                _esym  = _e.get("symbol", "")
+                _eep   = _e.get("endpoint", "")
+                _line  = f"  [{_ets}] [{_etype}]"
+                if _esym: _line += f" [{_esym}]"
+                if _eep:  _line += f" [{_eep}]"
+                _line += f"  {_emsg}"
+                _push(_line)
+        else:
+            _push("  (no errors logged)")
+    except Exception as _ele:
+        _push(f"  <error reading error log: {_ele}>")
+
     # ── Filter funnel (last scan) ──────────────────────────────────────────────────
     _hdr("FILTER FUNNEL (last scan)")
     try:
@@ -8006,4 +8047,13 @@ def _build_diagnostics_text() -> str:
 
     return "\n".join(_lines)
 
-st.text_area("📋 Debug Snapshot", _build_diagnostics_text(), height=400, key="debug_snap_area")
+_diag_text = _build_diagnostics_text()
+st.text_area("📋 Debug Snapshot", _diag_text, height=400, key="debug_snap_area")
+_diag_filename = f"diagnostics_{dubai_now().strftime('%Y%m%d_%H%M%S')}.txt"
+st.download_button(
+    label="⬇️ Download Diagnostics",
+    data=_diag_text.encode("utf-8"),
+    file_name=_diag_filename,
+    mime="text/plain",
+    use_container_width=False,
+)
