@@ -110,24 +110,24 @@ DEFAULT_CONFIG: dict = {
     "use_rsi_1h":           True,   # F5 — 1h RSI
     "rsi_1h_min":           30,
     "rsi_1h_max":           95,
-    "loop_minutes":         5,
-    "cooldown_minutes":     5,
+    "loop_minutes":         4,
+    "cooldown_minutes":     2,
     "use_ema_3m":           False,
     "ema_period_3m":      12,
-    "use_ema_5m":         True,
+    "use_ema_5m":         False,
     "ema_period_5m":      12,
     "use_ema_15m":        True,
     "ema_period_15m":     12,
-    "use_macd_3m":        True,   # F7 — MACD dark-green (3m)
-    "use_macd_5m":        True,   # F7 — MACD dark-green (5m)
+    "use_macd_3m":        False,  # F7 — MACD dark-green (3m)
+    "use_macd_5m":        False,  # F7 — MACD dark-green (5m)
     "use_macd_15m":       True,   # F7 — MACD dark-green (15m)
-    "use_sar_3m":         True,   # F8 — Parabolic SAR (3m)
+    "use_sar_3m":         False,  # F8 — Parabolic SAR (3m)
     "use_sar_5m":         True,   # F8 — Parabolic SAR (5m)
     "use_sar_15m":        True,   # F8 — Parabolic SAR (15m)
     "use_vol_spike":      False,
     "vol_spike_mult":     2.0,
     "vol_spike_lookback": 20,
-    "use_pdz_5m":            True,   # F3 — PDZ (5m)
+    "use_pdz_5m":            False,  # F3 — PDZ (5m)
     "use_pdz_15m":           True,   # F2 — PDZ (15m)
     "use_atr_filter":        False,  # F5b — ATR(14) 15m TP-reachability filter
     "atr_mode":              "Normal",  # "Strict" (≤1.5×) | "Normal" (≤2.0×) | "Relaxed" (≤3.0×)
@@ -135,18 +135,18 @@ DEFAULT_CONFIG: dict = {
     "ema_cross_fast_15m":    12,
     "ema_cross_slow_15m":    21,
     # ── Queue limit (max concurrent open trades) ──────────────────────────────
-    "max_open_trades":       15,     # Hard cap on concurrent open trades.
+    "max_open_trades":       7,      # Hard cap on concurrent open trades.
                                      # Lowering this does NOT close existing
                                      # trades — new signals during overflow are
                                      # logged as queue_limit until natural TP/SL
                                      # closures bring the count down.
     # ── Super Setup cap (max concurrent Super trades) ─────────────────────────
-    "max_super_trades":      5,      # Hard cap on concurrent open Super trades.
+    "max_super_trades":      2,      # Hard cap on concurrent open Super trades.
                                      # When cap is reached, Super-eligible coins
                                      # fall through to the normal F3–F10 pipeline
                                      # and open as regular trades if they pass.
     # ── SL cooldown (per-coin blackout after SL hit) ──────────────────────────
-    "sl_cooldown_hours":     24,     # Hours to skip a coin after an SL hit.
+    "sl_cooldown_hours":     4,      # Hours to skip a coin after an SL hit.
                                      # Applies UNIVERSALLY — even to Super Setups.
                                      # Separate from TP cooldown (cooldown_minutes).
     # ── Auto-trading (OKX Demo / Live) ────────────────────────────────────────
@@ -155,8 +155,8 @@ DEFAULT_CONFIG: dict = {
     "api_key":               "",
     "api_secret":            "",
     "api_passphrase":        "",
-    "trade_usdt_amount":     10.0,   # USDT collateral per trade (before leverage)
-    "trade_leverage":        10,     # leverage applied (capped by MAX_LEVERAGE)
+    "trade_usdt_amount":     5.0,    # USDT collateral per trade (before leverage)
+    "trade_leverage":        20,     # leverage applied (capped by MAX_LEVERAGE)
     "trade_margin_mode":     "isolated",  # "cross" or "isolated"
     # ── DCA (Dollar-Cost Averaging) ──────────────────────────────────────────
     # 0 = DCA OFF (legacy behavior — sidebar TP/SL apply normally).
@@ -169,7 +169,7 @@ DEFAULT_CONFIG: dict = {
     # earlier DCAs: blended_avg × (1 − sl_distance_pct). A breach routes
     # the trade into a dedicated DCA SL Hit table. When DCA > 0, the sidebar
     # SL % is ignored — only TP and this SL can close the trade.
-    "trade_max_dca":         1,
+    "trade_max_dca":         3,
     # ── DCA trigger drop percentages ──────────────────────────────────────────
     # Two separate configurables, shown in the sidebar based on selected
     # margin mode.
@@ -186,7 +186,7 @@ DEFAULT_CONFIG: dict = {
     #       default 7 → fires at −7% from avg, regardless of leverage.
     # Snapshotted onto the signal at entry time so sidebar tweaks don't
     # retroactively change already-open trades.
-    "dca_iso_distance_pct":  70.0,   # 10–95 (step 5), isolated
+    "dca_iso_distance_pct":  80.0,   # 10–95 (step 5), isolated
     "dca_cross_drop_pct":    7.0,    # 0.1–50, cross
     # ── Open-Trade Watcher loop (1-minute DCA/TP checker) ─────────────────────
     # When > 0 AND < loop_minutes: a dedicated background thread runs every
