@@ -7829,4 +7829,4 @@ def _build_diagnostics_text() -> str:
 
     return "\n".join(_lines)
 
-st.text_area("📋 Debug Snapshot", _debug_snapshot(), height=400, key="debug_snap_area")
+st.text_area("📋 Debug Snapshot", _build_diagnostics_text(), height=400, key="debug_snap_area")
