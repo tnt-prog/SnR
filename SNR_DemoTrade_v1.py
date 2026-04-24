@@ -6423,365 +6423,395 @@ def _render_sig_table(sig_list: list, header: str, empty_msg: str,
     else:
         st.info(empty_msg)
 
-# ── Filter by sector then split into four status buckets ───────────────────────
-filtered = signals if selected_sector == "All" else \
-           [s for s in signals if s.get("sector") == selected_sector]
-filtered_sorted = sorted(filtered, key=lambda x: x.get("timestamp", ""), reverse=True)
+# ── Signal tables — auto-refresh fragment ──────────────────────────────────────
+# Wrapped in @st.fragment(run_every=30) so Streamlit re-renders ONLY this
+# section every 30 seconds without touching the sidebar or any other widget.
+# Requires Streamlit ≥ 1.37. Falls back gracefully on older versions.
+@st.fragment(run_every=30)
+def _signal_tables_fragment():
+    # Re-read fresh data on every fragment run (every 30 s)
+    with _log_lock:
+        _frag_log = json.loads(json.dumps(_b._bsc_log))
+    with _config_lock:
+        _frag_cfg = dict(_b._bsc_cfg)
 
-_open_sigs    = [s for s in filtered_sorted if s.get("status") == "open"]
-_tp_sigs      = [s for s in filtered_sorted if s.get("status") == "tp_hit"]
-_sl_sigs      = [s for s in filtered_sorted if s.get("status") == "sl_hit"]
-_dca_sl_sigs  = [s for s in filtered_sorted if s.get("status") == "dca_sl_hit"]
-_queue_sigs   = [s for s in filtered_sorted if s.get("status") == "queue_limit"]
+    _frag_signals       = _frag_log.get("signals", [])
+    _frag_sector        = st.session_state.get("sector_filter", "All")
 
-# ── Table 1: Open Signals ───────────────────────────────────────────────────────
-_render_sig_table(_open_sigs,  "🔵 Open Signals",  "No open signals right now.",
-                  scroll_height=450, is_open_table=True, show_pnl=True)
+    # ── Filter by sector then split into four status buckets ─────────────────
+    filtered = _frag_signals if _frag_sector == "All" else \
+               [s for s in _frag_signals if s.get("sector") == _frag_sector]
+    filtered_sorted = sorted(filtered, key=lambda x: x.get("timestamp", ""), reverse=True)
 
-# ── OKX Live Positions (inline, auto-fetch) ────────────────────────────────────
-# Shown only when auto-trading is ON. Fetches on every render using a dedicated
-# session key so it always reflects the current OKX state independently of the
-# manual-refresh expander panel below.
-_inline_trade_on = _snap_cfg.get("trade_enabled", False)
-_inline_has_creds = bool(
-    _snap_cfg.get("api_key") and _snap_cfg.get("api_secret")
-    and _snap_cfg.get("api_passphrase")
-)
-if _inline_trade_on and _inline_has_creds:
-    # Auto-fetch on every render into a dedicated key.
-    try:
-        _inline_pos_resp = _trade_get(
-            "/api/v5/account/positions", {"instType": "SWAP"}, _snap_cfg
-        )
-        st.session_state["okx_inline_pos_data"] = _inline_pos_resp
-        st.session_state["okx_inline_pos_ts"] = dubai_now().strftime(
-            "%d %b %Y  %H:%M:%S GST"
-        )
-    except Exception as _inline_exc:
-        st.session_state["okx_inline_pos_data"] = None
-        _append_error("trade", f"Inline positions fetch failed: {_inline_exc}",
-                      endpoint="/api/v5/account/positions")
+    _open_sigs    = [s for s in filtered_sorted if s.get("status") == "open"]
+    _tp_sigs      = [s for s in filtered_sorted if s.get("status") == "tp_hit"]
+    _sl_sigs      = [s for s in filtered_sorted if s.get("status") == "sl_hit"]
+    _dca_sl_sigs  = [s for s in filtered_sorted if s.get("status") == "dca_sl_hit"]
+    _queue_sigs   = [s for s in filtered_sorted if s.get("status") == "queue_limit"]
 
-    _inline_pos_data = st.session_state.get("okx_inline_pos_data")
-    _inline_pos_ts   = st.session_state.get("okx_inline_pos_ts", "")
-    _env_inline      = "🟡 Demo" if _snap_cfg.get("demo_mode", True) else "🔴 Live"
+    # ── Table 1: Open Signals ───────────────────────────────────────────────────────
+    _render_sig_table(_open_sigs,  "🔵 Open Signals",  "No open signals right now.",
+                      scroll_height=450, is_open_table=True, show_pnl=True)
 
-    st.markdown(
-        f"**📡 OKX Positions (Live)**"
-        f"<span style='font-size:0.8em; color:gray; margin-left:12px;'>"
-        f"auto-fetched · {_inline_pos_ts} · {_env_inline}</span>",
-        unsafe_allow_html=True,
+    # ── OKX Live Positions (inline, auto-fetch) ────────────────────────────────────
+    # Shown only when auto-trading is ON. Fetches on every render using a dedicated
+    # session key so it always reflects the current OKX state independently of the
+    # manual-refresh expander panel below.
+    _inline_trade_on = _snap_cfg.get("trade_enabled", False)
+    _inline_has_creds = bool(
+        _snap_cfg.get("api_key") and _snap_cfg.get("api_secret")
+        and _snap_cfg.get("api_passphrase")
     )
+    if _inline_trade_on and _inline_has_creds:
+        # Auto-fetch on every render into a dedicated key.
+        try:
+            _inline_pos_resp = _trade_get(
+                "/api/v5/account/positions", {"instType": "SWAP"}, _snap_cfg
+            )
+            st.session_state["okx_inline_pos_data"] = _inline_pos_resp
+            st.session_state["okx_inline_pos_ts"] = dubai_now().strftime(
+                "%d %b %Y  %H:%M:%S GST"
+            )
+        except Exception as _inline_exc:
+            st.session_state["okx_inline_pos_data"] = None
+            _append_error("trade", f"Inline positions fetch failed: {_inline_exc}",
+                          endpoint="/api/v5/account/positions")
 
-    if _inline_pos_data is None:
-        st.warning("⚠️ Could not fetch OKX positions — check Error Log.")
-    elif _inline_pos_data.get("code") != "0":
-        st.error(f"OKX error: {_inline_pos_data.get('msg', 'Unknown error')}")
-    else:
-        _inline_positions = [
-            p for p in _inline_pos_data.get("data", [])
-            if float(p.get("pos", 0) or 0) != 0
-        ]
+        _inline_pos_data = st.session_state.get("okx_inline_pos_data")
+        _inline_pos_ts   = st.session_state.get("okx_inline_pos_ts", "")
+        _env_inline      = "🟡 Demo" if _snap_cfg.get("demo_mode", True) else "🔴 Live"
 
-        # Build set of open signal symbols for the Match column.
-        _open_sig_syms = {s.get("symbol", "") for s in _open_sigs}
+        st.markdown(
+            f"**📡 OKX Positions (Live)**"
+            f"<span style='font-size:0.8em; color:gray; margin-left:12px;'>"
+            f"auto-fetched · {_inline_pos_ts} · {_env_inline}</span>",
+            unsafe_allow_html=True,
+        )
 
-        if _inline_positions:
-            _inline_rows = []
-            _ghost_syms  = []   # on OKX but no matching open signal
-            for _p in _inline_positions:
-                _inst   = _p.get("instId", "")
-                # Normalise OKX instId (BTC-USDT-SWAP) → signal symbol (BTCUSDT)
-                _sym_norm = _inst.replace("-USDT-SWAP", "USDT").replace("-", "")
-                _upnl     = float(_p.get("upl",      0) or 0)
-                _upnl_pct = float(_p.get("uplRatio", 0) or 0) * 100
-                _liq_px   = float(_p.get("liqPx",    0) or 0)
-                _mgn_mode = _p.get("mgnMode", "cross")
-                _margin   = float(_p.get("margin", 0) or 0) or float(_p.get("imr", 0) or 0)
-                _matched  = _sym_norm in _open_sig_syms or _inst in _open_sig_syms
-                if not _matched:
-                    _ghost_syms.append(_inst)
-                _inline_rows.append({
-                    "Symbol":     _inst,
-                    "Contracts":  int(_p.get("pos", 0) or 0),
-                    "Avg Entry":  float(_p.get("avgPx",       0) or 0),
-                    "Mark Price": float(_p.get("markPx",      0) or 0),
-                    "Unreal PnL": round(_upnl, 4),
-                    "PnL %":      f"{_upnl_pct:+.2f}%",
-                    "Leverage":   f"{_p.get('lever', '')}×",
-                    "Liq Price":  _liq_px if _liq_px > 0 else "—",
-                    "Mode":       _mgn_mode.capitalize(),
-                    "Match":      "✅" if _matched else "⚠️ no signal",
+        if _inline_pos_data is None:
+            st.warning("⚠️ Could not fetch OKX positions — check Error Log.")
+        elif _inline_pos_data.get("code") != "0":
+            st.error(f"OKX error: {_inline_pos_data.get('msg', 'Unknown error')}")
+        else:
+            _inline_positions = [
+                p for p in _inline_pos_data.get("data", [])
+                if float(p.get("pos", 0) or 0) != 0
+            ]
+
+            # Build set of open signal symbols for the Match column.
+            _open_sig_syms = {s.get("symbol", "") for s in _open_sigs}
+
+            if _inline_positions:
+                _inline_rows = []
+                _ghost_syms  = []   # on OKX but no matching open signal
+                for _p in _inline_positions:
+                    _inst   = _p.get("instId", "")
+                    # Normalise OKX instId (BTC-USDT-SWAP) → signal symbol (BTCUSDT)
+                    _sym_norm = _inst.replace("-USDT-SWAP", "USDT").replace("-", "")
+                    _upnl     = float(_p.get("upl",      0) or 0)
+                    _upnl_pct = float(_p.get("uplRatio", 0) or 0) * 100
+                    _liq_px   = float(_p.get("liqPx",    0) or 0)
+                    _mgn_mode = _p.get("mgnMode", "cross")
+                    _margin   = float(_p.get("margin", 0) or 0) or float(_p.get("imr", 0) or 0)
+                    _matched  = _sym_norm in _open_sig_syms or _inst in _open_sig_syms
+                    if not _matched:
+                        _ghost_syms.append(_inst)
+                    _inline_rows.append({
+                        "Symbol":     _inst,
+                        "Contracts":  int(_p.get("pos", 0) or 0),
+                        "Avg Entry":  float(_p.get("avgPx",       0) or 0),
+                        "Mark Price": float(_p.get("markPx",      0) or 0),
+                        "Unreal PnL": round(_upnl, 4),
+                        "PnL %":      f"{_upnl_pct:+.2f}%",
+                        "Leverage":   f"{_p.get('lever', '')}×",
+                        "Liq Price":  _liq_px if _liq_px > 0 else "—",
+                        "Mode":       _mgn_mode.capitalize(),
+                        "Match":      "✅" if _matched else "⚠️ no signal",
+                    })
+
+                st.dataframe(
+                    _inline_rows,
+                    use_container_width=True,
+                    hide_index=True,
+                    height=len(_inline_rows) * 35 + 48,
+                    column_config={
+                        "Avg Entry":  st.column_config.NumberColumn(format="%.6f"),
+                        "Mark Price": st.column_config.NumberColumn(format="%.6f"),
+                        "Liq Price":  st.column_config.NumberColumn(format="%.6f"),
+                        "Unreal PnL": st.column_config.NumberColumn(
+                                          "Unreal PnL $", format="%.4f"),
+                    },
+                )
+
+                # Warn for signals that have no OKX position.
+                _sig_no_pos = [
+                    s.get("symbol", "") for s in _open_sigs
+                    if s.get("symbol", "") not in _open_sig_syms - {
+                        _p2.replace("-USDT-SWAP", "USDT").replace("-", "")
+                        for _p2 in [_r["Symbol"] for _r in _inline_rows]
+                    }
+                ]
+                # Simpler: find open signals whose symbol has no OKX position row.
+                _okx_norm_syms = {
+                    r["Symbol"].replace("-USDT-SWAP", "USDT").replace("-", "")
+                    for r in _inline_rows
+                }
+                _unmatched_sigs = [
+                    s.get("symbol", "") for s in _open_sigs
+                    if s.get("symbol", "") not in _okx_norm_syms
+                ]
+                if _ghost_syms:
+                    st.caption(
+                        f"⚠️ {len(_ghost_syms)} OKX position(s) have no matching open signal: "
+                        + ", ".join(_ghost_syms)
+                    )
+                if _unmatched_sigs:
+                    st.caption(
+                        f"⚠️ {len(_unmatched_sigs)} open signal(s) have no matching OKX position: "
+                        + ", ".join(_unmatched_sigs)
+                    )
+            else:
+                st.info("No open SWAP positions on OKX right now.")
+
+    st.divider()
+
+    # ── OKX Closed Positions history (single fetch, shared by TP + SL tables) ──────
+    # Fetched once per render when auto-trading is ON; stored in two session-state
+    # keys (_okx_tp_hist / _okx_sl_hist) split by close reason so each table can
+    # render independently without a second API call.
+    #   type "2" / "4"       → TP / partial-TP  → fulfilled orders table
+    #   type "1" / "5" / "3" → SL / liquidated / manual → SL closed table
+    _hist_trade_on   = _snap_cfg.get("trade_enabled", False)
+    _hist_has_creds  = bool(
+        _snap_cfg.get("api_key") and _snap_cfg.get("api_secret")
+        and _snap_cfg.get("api_passphrase")
+    )
+    if _hist_trade_on and _hist_has_creds:
+        try:
+            _ph_resp = _trade_get(
+                "/api/v5/account/positions-history",
+                {"instType": "SWAP", "limit": "100"},
+                _snap_cfg,
+            )
+            _ph_ts = dubai_now().strftime("%d %b %Y  %H:%M:%S GST")
+            if _ph_resp.get("code") == "0":
+                _ph_all = _ph_resp.get("data", [])
+                st.session_state["okx_tp_hist"]   = [
+                    p for p in _ph_all if p.get("type") in ("2", "4")
+                ]
+                st.session_state["okx_sl_hist"]   = [
+                    p for p in _ph_all if p.get("type") in ("1", "3", "5")
+                ]
+                st.session_state["okx_hist_ts"]   = _ph_ts
+            else:
+                st.session_state["okx_tp_hist"]  = None
+                st.session_state["okx_sl_hist"]  = None
+                st.session_state["okx_hist_ts"]  = _ph_ts
+        except Exception as _ph_exc:
+            st.session_state["okx_tp_hist"]  = None
+            st.session_state["okx_sl_hist"]  = None
+            _append_error("trade", f"Positions-history fetch failed: {_ph_exc}",
+                          endpoint="/api/v5/account/positions-history")
+
+    # ── Table 2: TP Hit ─────────────────────────────────────────────────────────────
+    # show_pnl=True → realized gain column, using close_price (= TP level).
+    # For DCA trades, the row naturally picks up DCA-N in Alert, blended avg in
+    # Signal Entry, original entry in Original Entry, and cumulative Order Size.
+    _render_sig_table(_tp_sigs,    "✅ TP Hit",         "No TP hits yet.",
+                      show_pnl=True)
+
+    # ── OKX Fulfilled Orders (auto-trading only) ────────────────────────────────────
+    if _hist_trade_on and _hist_has_creds:
+        _tp_hist      = st.session_state.get("okx_tp_hist")
+        _hist_ts_tp   = st.session_state.get("okx_hist_ts", "")
+        _env_hist     = "🟡 Demo" if _snap_cfg.get("demo_mode", True) else "🔴 Live"
+
+        st.markdown(
+            f"**📋 OKX Fulfilled Orders**"
+            f"<span style='font-size:0.8em; color:gray; margin-left:12px;'>"
+            f"auto-fetched · {_hist_ts_tp} · {_env_hist}</span>",
+            unsafe_allow_html=True,
+        )
+
+        if _tp_hist is None:
+            st.warning("⚠️ Could not fetch OKX position history — check Error Log.")
+        elif not _tp_hist:
+            st.info("No fulfilled (TP-closed) positions found in the last 100 records.")
+        else:
+            # Build set of TP signal symbols for the Match column.
+            _tp_sig_syms = {s.get("symbol", "") for s in _tp_sigs}
+            _tp_close_map = {
+                "2": "Take Profit",
+                "4": "Partial TP",
+            }
+            _tp_rows = []
+            _tp_ghost_syms = []
+            for _ph in _tp_hist:
+                _inst_tp   = _ph.get("instId", "")
+                _sym_tp    = _inst_tp.replace("-USDT-SWAP", "USDT").replace("-", "")
+                _rpnl_tp   = float(_ph.get("realizedPnl", 0) or 0)
+                _close_ts_tp = ""
+                try:
+                    _close_ts_tp = datetime.fromtimestamp(
+                        int(_ph.get("uTime", 0)) / 1000,
+                        tz=dubai_now().tzinfo
+                    ).strftime("%d %b %Y  %H:%M GST")
+                except Exception:
+                    pass
+                _matched_tp = _sym_tp in _tp_sig_syms or _inst_tp in _tp_sig_syms
+                if not _matched_tp:
+                    _tp_ghost_syms.append(_inst_tp)
+                _tp_rows.append({
+                    "Symbol":       _inst_tp,
+                    "Direction":    _ph.get("direction", "").capitalize(),
+                    "Close Reason": _tp_close_map.get(_ph.get("type", ""), "TP"),
+                    "Contracts":    int(float(_ph.get("closeTotalPos", 0) or 0)),
+                    "Avg Entry":    float(_ph.get("openAvgPx",  0) or 0),
+                    "Close Price":  float(_ph.get("closeAvgPx", 0) or 0),
+                    "Realized PnL": round(_rpnl_tp, 4),
+                    "Close Time":   _close_ts_tp,
+                    "Match":        "✅" if _matched_tp else "⚠️ no signal",
                 })
 
             st.dataframe(
-                _inline_rows,
+                _tp_rows,
                 use_container_width=True,
                 hide_index=True,
-                height=len(_inline_rows) * 35 + 48,
+                height=len(_tp_rows) * 35 + 48,
                 column_config={
-                    "Avg Entry":  st.column_config.NumberColumn(format="%.6f"),
-                    "Mark Price": st.column_config.NumberColumn(format="%.6f"),
-                    "Liq Price":  st.column_config.NumberColumn(format="%.6f"),
-                    "Unreal PnL": st.column_config.NumberColumn(
-                                      "Unreal PnL $", format="%.4f"),
+                    "Avg Entry":    st.column_config.NumberColumn(format="%.6f"),
+                    "Close Price":  st.column_config.NumberColumn(format="%.6f"),
+                    "Realized PnL": st.column_config.NumberColumn(
+                                        "Realized PnL $", format="%.4f"),
                 },
             )
+            if _tp_ghost_syms:
+                st.caption(
+                    f"⚠️ {len(_tp_ghost_syms)} OKX fulfilled position(s) have no matching TP signal: "
+                    + ", ".join(_tp_ghost_syms)
+                )
 
-            # Warn for signals that have no OKX position.
-            _sig_no_pos = [
-                s.get("symbol", "") for s in _open_sigs
-                if s.get("symbol", "") not in _open_sig_syms - {
-                    _p2.replace("-USDT-SWAP", "USDT").replace("-", "")
-                    for _p2 in [_r["Symbol"] for _r in _inline_rows]
-                }
-            ]
-            # Simpler: find open signals whose symbol has no OKX position row.
-            _okx_norm_syms = {
-                r["Symbol"].replace("-USDT-SWAP", "USDT").replace("-", "")
-                for r in _inline_rows
+    st.divider()
+
+    # ── Table 3: SL Hit (non-DCA trades only) ──────────────────────────────────────
+    # Trades that exhausted a DCA ladder and hit the −3% final SL are routed to
+    # the dedicated "DCA SL Hit" table below, not this one.
+    _render_sig_table(_sl_sigs,    "❌ SL Hit",         "No SL hits yet.",
+                      show_pnl=True)
+
+    # ── OKX Liquidated / SL Closed Orders (auto-trading only) ───────────────────────
+    if _hist_trade_on and _hist_has_creds:
+        _sl_hist      = st.session_state.get("okx_sl_hist")
+        _hist_ts_sl   = st.session_state.get("okx_hist_ts", "")
+        _env_hist_sl  = "🟡 Demo" if _snap_cfg.get("demo_mode", True) else "🔴 Live"
+
+        st.markdown(
+            f"**📋 OKX Liquidated / SL Closed Orders**"
+            f"<span style='font-size:0.8em; color:gray; margin-left:12px;'>"
+            f"auto-fetched · {_hist_ts_sl} · {_env_hist_sl}</span>",
+            unsafe_allow_html=True,
+        )
+
+        if _sl_hist is None:
+            st.warning("⚠️ Could not fetch OKX position history — check Error Log.")
+        elif not _sl_hist:
+            st.info("No SL-closed or liquidated positions found in the last 100 records.")
+        else:
+            # Build combined set of SL signal symbols for the Match column.
+            _sl_sig_syms = {s.get("symbol", "") for s in _sl_sigs + _dca_sl_sigs}
+            _sl_close_map = {
+                "1": "Stop-Loss",
+                "3": "Manual Close",
+                "5": "Liquidated",
             }
-            _unmatched_sigs = [
-                s.get("symbol", "") for s in _open_sigs
-                if s.get("symbol", "") not in _okx_norm_syms
-            ]
-            if _ghost_syms:
-                st.caption(
-                    f"⚠️ {len(_ghost_syms)} OKX position(s) have no matching open signal: "
-                    + ", ".join(_ghost_syms)
-                )
-            if _unmatched_sigs:
-                st.caption(
-                    f"⚠️ {len(_unmatched_sigs)} open signal(s) have no matching OKX position: "
-                    + ", ".join(_unmatched_sigs)
-                )
-        else:
-            st.info("No open SWAP positions on OKX right now.")
+            _sl_rows = []
+            _sl_ghost_syms = []
+            for _ph in _sl_hist:
+                _inst_sl   = _ph.get("instId", "")
+                _sym_sl    = _inst_sl.replace("-USDT-SWAP", "USDT").replace("-", "")
+                _rpnl_sl   = float(_ph.get("realizedPnl", 0) or 0)
+                _close_ts_sl = ""
+                try:
+                    _close_ts_sl = datetime.fromtimestamp(
+                        int(_ph.get("uTime", 0)) / 1000,
+                        tz=dubai_now().tzinfo
+                    ).strftime("%d %b %Y  %H:%M GST")
+                except Exception:
+                    pass
+                _reason_sl  = _sl_close_map.get(_ph.get("type", ""), "SL")
+                _matched_sl = _sym_sl in _sl_sig_syms or _inst_sl in _sl_sig_syms
+                if not _matched_sl:
+                    _sl_ghost_syms.append(_inst_sl)
+                _sl_rows.append({
+                    "Symbol":       _inst_sl,
+                    "Direction":    _ph.get("direction", "").capitalize(),
+                    "Close Reason": _reason_sl,
+                    "Contracts":    int(float(_ph.get("closeTotalPos", 0) or 0)),
+                    "Avg Entry":    float(_ph.get("openAvgPx",  0) or 0),
+                    "Close Price":  float(_ph.get("closeAvgPx", 0) or 0),
+                    "Realized PnL": round(_rpnl_sl, 4),
+                    "Close Time":   _close_ts_sl,
+                    "Match":        "✅" if _matched_sl else "⚠️ no signal",
+                })
 
-st.divider()
-
-# ── OKX Closed Positions history (single fetch, shared by TP + SL tables) ──────
-# Fetched once per render when auto-trading is ON; stored in two session-state
-# keys (_okx_tp_hist / _okx_sl_hist) split by close reason so each table can
-# render independently without a second API call.
-#   type "2" / "4"       → TP / partial-TP  → fulfilled orders table
-#   type "1" / "5" / "3" → SL / liquidated / manual → SL closed table
-_hist_trade_on   = _snap_cfg.get("trade_enabled", False)
-_hist_has_creds  = bool(
-    _snap_cfg.get("api_key") and _snap_cfg.get("api_secret")
-    and _snap_cfg.get("api_passphrase")
-)
-if _hist_trade_on and _hist_has_creds:
-    try:
-        _ph_resp = _trade_get(
-            "/api/v5/account/positions-history",
-            {"instType": "SWAP", "limit": "100"},
-            _snap_cfg,
-        )
-        _ph_ts = dubai_now().strftime("%d %b %Y  %H:%M:%S GST")
-        if _ph_resp.get("code") == "0":
-            _ph_all = _ph_resp.get("data", [])
-            st.session_state["okx_tp_hist"]   = [
-                p for p in _ph_all if p.get("type") in ("2", "4")
-            ]
-            st.session_state["okx_sl_hist"]   = [
-                p for p in _ph_all if p.get("type") in ("1", "3", "5")
-            ]
-            st.session_state["okx_hist_ts"]   = _ph_ts
-        else:
-            st.session_state["okx_tp_hist"]  = None
-            st.session_state["okx_sl_hist"]  = None
-            st.session_state["okx_hist_ts"]  = _ph_ts
-    except Exception as _ph_exc:
-        st.session_state["okx_tp_hist"]  = None
-        st.session_state["okx_sl_hist"]  = None
-        _append_error("trade", f"Positions-history fetch failed: {_ph_exc}",
-                      endpoint="/api/v5/account/positions-history")
-
-# ── Table 2: TP Hit ─────────────────────────────────────────────────────────────
-# show_pnl=True → realized gain column, using close_price (= TP level).
-# For DCA trades, the row naturally picks up DCA-N in Alert, blended avg in
-# Signal Entry, original entry in Original Entry, and cumulative Order Size.
-_render_sig_table(_tp_sigs,    "✅ TP Hit",         "No TP hits yet.",
-                  show_pnl=True)
-
-# ── OKX Fulfilled Orders (auto-trading only) ────────────────────────────────────
-if _hist_trade_on and _hist_has_creds:
-    _tp_hist      = st.session_state.get("okx_tp_hist")
-    _hist_ts_tp   = st.session_state.get("okx_hist_ts", "")
-    _env_hist     = "🟡 Demo" if _snap_cfg.get("demo_mode", True) else "🔴 Live"
-
-    st.markdown(
-        f"**📋 OKX Fulfilled Orders**"
-        f"<span style='font-size:0.8em; color:gray; margin-left:12px;'>"
-        f"auto-fetched · {_hist_ts_tp} · {_env_hist}</span>",
-        unsafe_allow_html=True,
-    )
-
-    if _tp_hist is None:
-        st.warning("⚠️ Could not fetch OKX position history — check Error Log.")
-    elif not _tp_hist:
-        st.info("No fulfilled (TP-closed) positions found in the last 100 records.")
-    else:
-        # Build set of TP signal symbols for the Match column.
-        _tp_sig_syms = {s.get("symbol", "") for s in _tp_sigs}
-        _tp_close_map = {
-            "2": "Take Profit",
-            "4": "Partial TP",
-        }
-        _tp_rows = []
-        _tp_ghost_syms = []
-        for _ph in _tp_hist:
-            _inst_tp   = _ph.get("instId", "")
-            _sym_tp    = _inst_tp.replace("-USDT-SWAP", "USDT").replace("-", "")
-            _rpnl_tp   = float(_ph.get("realizedPnl", 0) or 0)
-            _close_ts_tp = ""
-            try:
-                _close_ts_tp = datetime.fromtimestamp(
-                    int(_ph.get("uTime", 0)) / 1000,
-                    tz=dubai_now().tzinfo
-                ).strftime("%d %b %Y  %H:%M GST")
-            except Exception:
-                pass
-            _matched_tp = _sym_tp in _tp_sig_syms or _inst_tp in _tp_sig_syms
-            if not _matched_tp:
-                _tp_ghost_syms.append(_inst_tp)
-            _tp_rows.append({
-                "Symbol":       _inst_tp,
-                "Direction":    _ph.get("direction", "").capitalize(),
-                "Close Reason": _tp_close_map.get(_ph.get("type", ""), "TP"),
-                "Contracts":    int(float(_ph.get("closeTotalPos", 0) or 0)),
-                "Avg Entry":    float(_ph.get("openAvgPx",  0) or 0),
-                "Close Price":  float(_ph.get("closeAvgPx", 0) or 0),
-                "Realized PnL": round(_rpnl_tp, 4),
-                "Close Time":   _close_ts_tp,
-                "Match":        "✅" if _matched_tp else "⚠️ no signal",
-            })
-
-        st.dataframe(
-            _tp_rows,
-            use_container_width=True,
-            hide_index=True,
-            height=len(_tp_rows) * 35 + 48,
-            column_config={
-                "Avg Entry":    st.column_config.NumberColumn(format="%.6f"),
-                "Close Price":  st.column_config.NumberColumn(format="%.6f"),
-                "Realized PnL": st.column_config.NumberColumn(
-                                    "Realized PnL $", format="%.4f"),
-            },
-        )
-        if _tp_ghost_syms:
-            st.caption(
-                f"⚠️ {len(_tp_ghost_syms)} OKX fulfilled position(s) have no matching TP signal: "
-                + ", ".join(_tp_ghost_syms)
+            st.dataframe(
+                _sl_rows,
+                use_container_width=True,
+                hide_index=True,
+                height=len(_sl_rows) * 35 + 48,
+                column_config={
+                    "Avg Entry":    st.column_config.NumberColumn(format="%.6f"),
+                    "Close Price":  st.column_config.NumberColumn(format="%.6f"),
+                    "Realized PnL": st.column_config.NumberColumn(
+                                        "Realized PnL $", format="%.4f"),
+                },
             )
+            if _sl_ghost_syms:
+                st.caption(
+                    f"⚠️ {len(_sl_ghost_syms)} OKX SL/liquidated position(s) have no matching signal: "
+                    + ", ".join(_sl_ghost_syms)
+                )
 
-st.divider()
+    st.divider()
 
-# ── Table 3: SL Hit (non-DCA trades only) ──────────────────────────────────────
-# Trades that exhausted a DCA ladder and hit the −3% final SL are routed to
-# the dedicated "DCA SL Hit" table below, not this one.
-_render_sig_table(_sl_sigs,    "❌ SL Hit",         "No SL hits yet.",
-                  show_pnl=True)
+    # ── Table 4: DCA SL Hit (ladder-exhausted closures) ────────────────────────────
+    # Dedicated table for trades that consumed every allowed DCA add and then hit
+    # the final −3%-below-blended-average SL. Keeping these separate from regular
+    # SL hits makes it easy to audit DCA-strategy performance in isolation.
+    _render_sig_table(_dca_sl_sigs, "❌ DCA SL Hit (ladder exhausted)",
+                      "No DCA ladder-exhausted SL hits yet.",
+                      show_pnl=True)
+    st.divider()
 
-# ── OKX Liquidated / SL Closed Orders (auto-trading only) ───────────────────────
-if _hist_trade_on and _hist_has_creds:
-    _sl_hist      = st.session_state.get("okx_sl_hist")
-    _hist_ts_sl   = st.session_state.get("okx_hist_ts", "")
-    _env_hist_sl  = "🟡 Demo" if _snap_cfg.get("demo_mode", True) else "🔴 Live"
+    # ── Table 5: Queue Limit ────────────────────────────────────────────────────────
+    # No PnL shown — queue_limit signals never opened a real trade.
+    _render_sig_table(_queue_sigs, "⏳ Queue Limit",    "No queued signals.")
 
-    st.markdown(
-        f"**📋 OKX Liquidated / SL Closed Orders**"
-        f"<span style='font-size:0.8em; color:gray; margin-left:12px;'>"
-        f"auto-fetched · {_hist_ts_sl} · {_env_hist_sl}</span>",
-        unsafe_allow_html=True,
-    )
+    if _queue_sigs:
+        if st.button("🗑️ Clear Queue Limit Records", key="clear_queue_limit"):
+            with _log_lock:
+                _b._bsc_log["signals"] = [
+                    s for s in _b._bsc_log["signals"]
+                    if s.get("status") != "queue_limit"
+                ]
+                save_log(_b._bsc_log)
+            st.success("✅ Queue Limit records cleared.")
+            st.rerun()
 
-    if _sl_hist is None:
-        st.warning("⚠️ Could not fetch OKX position history — check Error Log.")
-    elif not _sl_hist:
-        st.info("No SL-closed or liquidated positions found in the last 100 records.")
-    else:
-        # Build combined set of SL signal symbols for the Match column.
-        _sl_sig_syms = {s.get("symbol", "") for s in _sl_sigs + _dca_sl_sigs}
-        _sl_close_map = {
-            "1": "Stop-Loss",
-            "3": "Manual Close",
-            "5": "Liquidated",
-        }
-        _sl_rows = []
-        _sl_ghost_syms = []
-        for _ph in _sl_hist:
-            _inst_sl   = _ph.get("instId", "")
-            _sym_sl    = _inst_sl.replace("-USDT-SWAP", "USDT").replace("-", "")
-            _rpnl_sl   = float(_ph.get("realizedPnl", 0) or 0)
-            _close_ts_sl = ""
-            try:
-                _close_ts_sl = datetime.fromtimestamp(
-                    int(_ph.get("uTime", 0)) / 1000,
-                    tz=dubai_now().tzinfo
-                ).strftime("%d %b %Y  %H:%M GST")
-            except Exception:
-                pass
-            _reason_sl  = _sl_close_map.get(_ph.get("type", ""), "SL")
-            _matched_sl = _sym_sl in _sl_sig_syms or _inst_sl in _sl_sig_syms
-            if not _matched_sl:
-                _sl_ghost_syms.append(_inst_sl)
-            _sl_rows.append({
-                "Symbol":       _inst_sl,
-                "Direction":    _ph.get("direction", "").capitalize(),
-                "Close Reason": _reason_sl,
-                "Contracts":    int(float(_ph.get("closeTotalPos", 0) or 0)),
-                "Avg Entry":    float(_ph.get("openAvgPx",  0) or 0),
-                "Close Price":  float(_ph.get("closeAvgPx", 0) or 0),
-                "Realized PnL": round(_rpnl_sl, 4),
-                "Close Time":   _close_ts_sl,
-                "Match":        "✅" if _matched_sl else "⚠️ no signal",
-            })
 
-        st.dataframe(
-            _sl_rows,
-            use_container_width=True,
-            hide_index=True,
-            height=len(_sl_rows) * 35 + 48,
-            column_config={
-                "Avg Entry":    st.column_config.NumberColumn(format="%.6f"),
-                "Close Price":  st.column_config.NumberColumn(format="%.6f"),
-                "Realized PnL": st.column_config.NumberColumn(
-                                    "Realized PnL $", format="%.4f"),
-            },
-        )
-        if _sl_ghost_syms:
-            st.caption(
-                f"⚠️ {len(_sl_ghost_syms)} OKX SL/liquidated position(s) have no matching signal: "
-                + ", ".join(_sl_ghost_syms)
-            )
+_signal_tables_fragment()
 
-st.divider()
-
-# ── Table 4: DCA SL Hit (ladder-exhausted closures) ────────────────────────────
-# Dedicated table for trades that consumed every allowed DCA add and then hit
-# the final −3%-below-blended-average SL. Keeping these separate from regular
-# SL hits makes it easy to audit DCA-strategy performance in isolation.
-_render_sig_table(_dca_sl_sigs, "❌ DCA SL Hit (ladder exhausted)",
-                  "No DCA ladder-exhausted SL hits yet.",
-                  show_pnl=True)
-st.divider()
-
-# ── Table 5: Queue Limit ────────────────────────────────────────────────────────
-# No PnL shown — queue_limit signals never opened a real trade.
-_render_sig_table(_queue_sigs, "⏳ Queue Limit",    "No queued signals.")
-
-if _queue_sigs:
-    if st.button("🗑️ Clear Queue Limit Records", key="clear_queue_limit"):
-        with _log_lock:
-            _b._bsc_log["signals"] = [
-                s for s in _b._bsc_log["signals"]
-                if s.get("status") != "queue_limit"
-            ]
-            save_log(_b._bsc_log)
-        st.success("✅ Queue Limit records cleared.")
-        st.rerun()
+# ── Page-load signal buckets (used by debug panel below) ───────────────────────
+# The fragment above has its own live copies; these are page-load snapshots used
+# only by the static debug/snapshot panel further down the page.
+_filtered_pg   = signals if st.session_state.get("sector_filter","All") == "All" else \
+                 [s for s in signals if s.get("sector") == st.session_state.get("sector_filter","All")]
+_fsorted_pg    = sorted(_filtered_pg, key=lambda x: x.get("timestamp",""), reverse=True)
+_open_sigs     = [s for s in _fsorted_pg if s.get("status") == "open"]
+_tp_sigs       = [s for s in _fsorted_pg if s.get("status") == "tp_hit"]
+_sl_sigs       = [s for s in _fsorted_pg if s.get("status") == "sl_hit"]
+_dca_sl_sigs   = [s for s in _fsorted_pg if s.get("status") == "dca_sl_hit"]
+_queue_sigs    = [s for s in _fsorted_pg if s.get("status") == "queue_limit"]
 
 # ─────────────────────────────────────────────────────────────────────────────
 # OKX Live Positions Panel
@@ -7786,50 +7816,17 @@ def _build_diagnostics_text() -> str:
         if _fc_snap.get("total_watchlist", 0) > 0:
             for _k in sorted(_fc_snap.keys()):
                 _v = _fc_snap[_k]
-                if _k == "scan_cfg":
+                if _k in ("scan_cfg", "flushed_at", "scan_completed_at"):
                     continue
                 if isinstance(_v, list):
-                    _v = "[" + str(len(_v)) + " items] " + ", ".join(str(x) for x in _v[:30])
-                _kv(_k, _v)
-        else:
-            _push("  (no scan has completed yet)")
-    except Exception as _fex:
-        _push("  <error reading filter counts: " + str(_fex) + ">")
-
-    # ── API errors (recent) ───────────────────────────────────────────────────────
-    _hdr("API ERRORS (recent)")
-    try:
-        _err_log = list(_b._bsc_log.get("api_errors", []) or []) if hasattr(_b, "_bsc_log") else []
-        if _err_log:
-            for _e in _err_log[-50:]:
-                if isinstance(_e, dict):
-                    _push(
-                        "  " + _fmt_ts(_e.get("ts","")) + "  "
-                        + str(_e.get("type","?")) + "  "
-                        + str(_e.get("msg",""))[:200]
-                    )
+                    _push(f"  {_k:<32} : [{len(_v)} items]")
                 else:
-                    _push("  " + str(_e)[:240])
+                    _push(f"  {_k:<32} : {_v}")
         else:
-            _push("  (none)")
-    except Exception as _err_ex:
-        _push("  <error reading api_errors: " + str(_err_ex) + ">")
+            _push("  (no scan data yet)")
+    except Exception as _fe:
+        _push(f"  <error reading filter counts: {_fe}>")
 
     return "\n".join(_lines)
 
-
-# ── Download Diagnostics button ────────────────────────────────────────────────────────────
-try:
-    _diag_text = _build_diagnostics_text()
-    _diag_text = _build_diagnostics_text()
-    _diag_fname = "diagnostics_" + dubai_now().strftime("%Y%m%d_%H%M%S") + ".txt"
-    st.download_button(
-        label="⬇️ Download Diagnostics",
-        data=_diag_text,
-        file_name=_diag_fname,
-        mime="text/plain",
-        key="btn_download_diagnostics",
-        help="Full plain-text snapshot of app state: config, signals, DCA fills, filter funnel, API errors.",
-    )
-except Exception as _dex:
-    st.warning("Diagnostics unavailable: " + str(_dex))
+st.text_area("📋 Debug Snapshot", _debug_snapshot(), height=400, key="debug_snap_area")
