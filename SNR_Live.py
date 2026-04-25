@@ -7102,7 +7102,7 @@ def _signal_tables_fragment():
                         _ghost_syms.append(_inst)
                     _inline_rows.append({
                         "Symbol":     _inst,
-                        "Contracts":  int(_p.get("pos", 0) or 0),
+                        "Contracts":  int(float(_p.get("pos", 0) or 0)),
                         "Avg Entry":  float(_p.get("avgPx",       0) or 0),
                         "Mark Price": float(_p.get("markPx",      0) or 0),
                         "Unreal PnL": round(_upnl, 4),
@@ -7474,7 +7474,7 @@ with st.expander("📡 OKX Live Positions", expanded=False):
                             "Symbol":        _p.get("instId", ""),
                             "Side":          _p.get("posSide", "net").capitalize(),
                             "Mode":          _mgn_mode.capitalize(),
-                            "Contracts":     int(_p.get("pos", 0) or 0),
+                            "Contracts":     int(float(_p.get("pos", 0) or 0)),
                             "Avg Entry":     float(_p.get("avgPx",       0) or 0),
                             "Mark Price":    float(_p.get("markPx",      0) or 0),
                             "Unreal PnL":    round(_upnl, 4),
