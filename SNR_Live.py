@@ -1308,7 +1308,56 @@ def place_okx_order(sig: dict, cfg: dict) -> dict:
             sl_pct    = float(cfg.get("sl_pct", 3.0)) / 100
             actual_sl = _pround(actual_entry * (1 - sl_pct))
 
-        # ── Step 4: Place OCO algo (TP + SL) using actual fill price ─────────
+        # ── Step 4: Place TP/SL algo using actual fill price ────────────────
+        # Cross margin: TP-only conditional order (no SL on OKX — user accepts
+        # OKX liquidation as the only backstop). All DCA levels are pre-placed
+        # as limit buy orders so they fire automatically without watcher latency.
+        # Isolated margin: unchanged OCO (TP + SL together).
+        if mode == "cross":
+            # ── Cross: TP-only algo ───────────────────────────────────────────
+            _tp_sig = _place_tp_only_order(
+                {"symbol": sym, "order_margin_mode": mode,
+                 "order_is_hedge": is_hedge},
+                cfg, actual_tp, contracts
+            )
+            if not _tp_sig:
+                return {"ordId": ord_id, "algoId": "", "sz": contracts,
+                        "status": "partial",
+                        "error": "Entry ✅ · TP algo ❌ (cross mode, no SL)",
+                        "actual_entry": actual_entry,
+                        "actual_tp": actual_tp, "actual_sl": actual_sl,
+                        **_base_info}
+
+            # ── Cross: pre-place all DCA limit buy orders ─────────────────────
+            _dca_max_p  = int(cfg.get("trade_max_dca", 0) or 0)
+            _cross_drop = float(cfg.get("dca_cross_drop_pct", 7.0) or 7.0)
+            _tp_pct_p   = float(cfg.get("tp_pct", 1.5) or 1.5)
+            _dca_preorders: list = []
+            if _dca_max_p > 0:
+                _ladder_p = _calc_cross_dca_ladder(
+                    actual_entry,
+                    float(cfg.get("trade_usdt_amount", 5)),
+                    lev, _dca_max_p, _cross_drop, _tp_pct_p
+                )
+                _sig_stub = {
+                    "symbol": sym,
+                    "order_margin_mode": mode,
+                    "trade_lev": lev,
+                    "order_is_hedge": is_hedge,
+                }
+                _dca_preorders = _place_cross_dca_preorders(
+                    _sig_stub, cfg, _ladder_p, ct_val, is_hedge
+                )
+
+            return {"ordId": ord_id, "algoId": _tp_sig, "sz": contracts,
+                    "status": "placed", "error": "",
+                    "actual_entry": actual_entry,
+                    "actual_tp": actual_tp, "actual_sl": actual_sl,
+                    "tp_algo_id":    _tp_sig,
+                    "dca_preorders": _dca_preorders,
+                    **_base_info}
+
+        # ── Isolated: OCO (TP + SL) ───────────────────────────────────────────
         # In hedge mode, closing a long requires posSide="long" on the sell too.
         algo_body: dict = {
             "instId":       _to_okx(sym),
@@ -2539,6 +2588,22 @@ def _init_signal_trade_snapshot(sig: dict, cfg: dict) -> None:
     except Exception:
         sig["next_dca_px"] = 0.0
 
+    # ── DCA ladder (cross margin only) ───────────────────────────────────────
+    # Pre-calculate all DCA trigger prices and blended averages at entry time.
+    # Stored on the signal so the DCA Levels column can display exact prices
+    # for all levels (past and future) without recomputing on every render.
+    # Also used by _place_cross_dca_preorders() to place limit orders on OKX.
+    _snap_mode2 = (sig.get("order_margin_mode") or "isolated").strip().lower()
+    if _dca_max_snap > 0 and _snap_mode2 == "cross" and _entry_px > 0:
+        _tp_pct_l  = float(cfg.get("tp_pct", 1.5) or 1.5)
+        _cdrop_l   = float(cfg.get("dca_cross_drop_pct", 7.0) or 7.0)
+        sig["dca_ladder"] = _calc_cross_dca_ladder(
+            _entry_px, _entry_usdt, _entry_lev,
+            _dca_max_snap, _cdrop_l, _tp_pct_l
+        )
+    else:
+        sig.setdefault("dca_ladder", [])
+
 
 def _migrate_legacy_signals(log: dict, cfg: dict) -> int:
     """Backfill the DCA/trade snapshot onto pre-existing OPEN signals that
@@ -2572,6 +2637,8 @@ def _migrate_legacy_signals(log: dict, cfg: dict) -> int:
             "dca_enabled" not in _sig
             or not _sig.get("dca_fills")
             or "original_entry" not in _sig
+            or ((_sig.get("order_margin_mode") or "isolated").strip().lower() == "cross"
+                and not _sig.get("dca_ladder"))
         )
         if not _missing_dca:
             continue
@@ -2639,6 +2706,68 @@ def _dca_compute_trigger(sig: dict, cfg: dict = None) -> float:
         cross_drop = max(0.1, min(50.0, cross_drop))  # clamp 0.1–50
         dca_drop_pct = cross_drop / 100.0
     return _pround(avg_entry * (1.0 - dca_drop_pct))
+
+
+def _calc_cross_dca_ladder(entry_px: float, base_usdt: float, leverage: int,
+                            max_dca: int, cross_drop_pct: float,
+                            tp_pct: float) -> list:
+    """Pre-calculate the full DCA price cascade for cross margin mode.
+
+    All values are deterministic at entry time because we know:
+      • entry price, base USDT, leverage
+      • cross_drop_pct  — fixed % drop below blended avg for each DCA trigger
+      • tp_pct          — fixed % above blended avg for TP
+
+    Assumes each DCA fills exactly at its trigger price (actual slippage is
+    tiny and does not materially change the cascade).
+
+    Returns a list of dicts, one per DCA level (1-indexed):
+        {
+            "level":       int,    # 1, 2, 3 …
+            "trigger_px":  float,  # price at which this DCA fires
+            "usdt":        float,  # USDT margin added at this level
+            "blended_avg": float,  # blended avg AFTER this DCA fills
+            "tp_px":       float,  # TP price after this DCA (tp_pct% above blended_avg)
+        }
+    """
+    if entry_px <= 0 or base_usdt <= 0 or leverage <= 0 or max_dca <= 0:
+        return []
+    drop_frac = cross_drop_pct / 100.0
+    tp_frac   = tp_pct / 100.0
+    lev       = max(1, int(leverage))
+
+    # Seed with entry fill
+    fills = [{"price": entry_px, "notional": base_usdt * lev}]
+    ladder = []
+
+    for i in range(1, max_dca + 1):
+        # Blended average BEFORE this DCA fires (from fills so far)
+        tot_not  = sum(f["notional"] for f in fills)
+        tot_unit = sum(f["notional"] / f["price"] for f in fills if f["price"] > 0)
+        blended_before = tot_not / tot_unit if tot_unit > 0 else fills[-1]["price"]
+
+        trigger_px = _pround(blended_before * (1.0 - drop_frac))
+        dca_usdt   = base_usdt * (2 ** (i - 1))   # DCA 1=base, 2=2×, 3=4×, …
+        dca_not    = dca_usdt * lev
+
+        # Blended average AFTER this DCA fills at trigger_px
+        fills_after  = fills + [{"price": trigger_px, "notional": dca_not}]
+        tot_not_a    = sum(f["notional"] for f in fills_after)
+        tot_unit_a   = sum(f["notional"] / f["price"] for f in fills_after if f["price"] > 0)
+        blend_after  = tot_not_a / tot_unit_a if tot_unit_a > 0 else trigger_px
+        tp_after     = _pround(blend_after * (1.0 + tp_frac))
+
+        ladder.append({
+            "level":       i,
+            "trigger_px":  trigger_px,
+            "usdt":        dca_usdt,
+            "blended_avg": _pround(blend_after),
+            "tp_px":       tp_after,
+        })
+        # Add this fill for the next iteration
+        fills.append({"price": trigger_px, "notional": dca_not})
+
+    return ladder
 
 
 def _dca_next_usdt(sig: dict) -> float:
@@ -2854,6 +2983,152 @@ def _place_dca_oco_algo(sig: dict, cfg: dict, new_tp: float,
         return ""
 
 
+def _place_tp_only_order(sig: dict, cfg: dict,
+                         tp_price: float, total_contracts: int) -> str:
+    """Place a standalone conditional TP sell order on OKX (cross margin mode).
+
+    No SL attached — the user has chosen OKX liquidation as the only backstop.
+    Returns algoId on success, "" on failure (non-fatal, logged).
+    """
+    try:
+        sym      = sig.get("symbol", "")
+        mode     = (sig.get("order_margin_mode") or
+                    cfg.get("trade_margin_mode", "isolated")).strip().lower()
+        is_hedge = bool(sig.get("order_is_hedge", False))
+        algo_body: dict = {
+            "instId":      _to_okx(sym),
+            "tdMode":      mode,
+            "side":        "sell",
+            "ordType":     "conditional",
+            "sz":          str(int(max(1, total_contracts))),
+            "tpTriggerPx": str(_pround(tp_price)),
+            "tpOrdPx":     "-1",   # market fill when TP triggers
+        }
+        if is_hedge:
+            algo_body["posSide"] = "long"
+        resp = _trade_post("/api/v5/trade/order-algo", algo_body, cfg)
+        ad   = (resp.get("data") or [{}])[0]
+        if resp.get("code") != "0" or (ad.get("sCode", "0") not in ("0", "") and ad.get("sCode")):
+            err = (_okx_err(resp) if resp.get("code") != "0"
+                   else f"{ad.get('sCode')}: {ad.get('sMsg', '')}")
+            _append_error("trade", f"TP-only algo failed: {err}",
+                          symbol=sym, endpoint="/api/v5/trade/order-algo")
+            return ""
+        return ad.get("algoId", "")
+    except Exception as exc:
+        _append_error("trade", f"TP-only algo exception: {exc}",
+                      symbol=sig.get("symbol", ""),
+                      endpoint="/api/v5/trade/order-algo")
+        return ""
+
+
+def _place_cross_dca_preorders(sig: dict, cfg: dict,
+                                ladder: list, ct_val: float,
+                                is_hedge: bool) -> list:
+    """Pre-place all DCA limit buy orders on OKX for cross margin mode.
+
+    Each order sits on the exchange as a passive limit bid at the pre-calculated
+    trigger price. Returns a list of preorder dicts stored on the signal:
+        [{"level": int, "order_id": str, "trigger_px": float,
+          "contracts": int, "status": "pending"|"error"}]
+    """
+    sym   = sig.get("symbol", "")
+    mode  = (sig.get("order_margin_mode") or
+             cfg.get("trade_margin_mode", "isolated")).strip().lower()
+    lev   = int(sig.get("trade_lev", cfg.get("trade_leverage", 10)) or 10)
+    preorders = []
+    for item in ladder:
+        trigger_px = float(item.get("trigger_px", 0))
+        dca_usdt   = float(item.get("usdt", 0))
+        level      = int(item.get("level", 0))
+        if trigger_px <= 0 or dca_usdt <= 0:
+            continue
+        notional  = dca_usdt * lev
+        contracts = max(1, int(notional / (ct_val * trigger_px))) if ct_val > 0 else 1
+        order_body: dict = {
+            "instId":  _to_okx(sym),
+            "tdMode":  mode,
+            "side":    "buy",
+            "ordType": "limit",
+            "px":      str(_pround(trigger_px)),
+            "sz":      str(contracts),
+        }
+        if is_hedge:
+            order_body["posSide"] = "long"
+        resp   = _trade_post("/api/v5/trade/order", order_body, cfg)
+        d0     = (resp.get("data") or [{}])[0]
+        ord_id = d0.get("ordId", "")
+        if resp.get("code") != "0" or (d0.get("sCode", "0") not in ("0", "") and d0.get("sCode")):
+            err = (_okx_err(resp) if resp.get("code") != "0"
+                   else f"{d0.get('sCode')}: {d0.get('sMsg', '')}")
+            _append_error("trade",
+                          f"DCA pre-order level {level} failed: {err}",
+                          symbol=sym, endpoint="/api/v5/trade/order")
+            preorders.append({"level": level, "order_id": "",
+                               "trigger_px": trigger_px, "contracts": contracts,
+                               "status": "error", "error": err})
+        else:
+            preorders.append({"level": level, "order_id": ord_id,
+                               "trigger_px": trigger_px, "contracts": contracts,
+                               "status": "pending"})
+        time.sleep(0.05)
+    return preorders
+
+
+def _cancel_cross_dca_preorders(sig: dict, cfg: dict) -> None:
+    """Cancel all pending DCA pre-placed limit orders on OKX.
+
+    Called when TP fires (no DCA needed) or when the signal is closed
+    by any other mechanism, to clean up dangling limit bids on the book.
+    """
+    sym       = sig.get("symbol", "")
+    preorders = sig.get("dca_preorders", [])
+    for po in preorders:
+        if po.get("status") != "pending" or not po.get("order_id"):
+            continue
+        try:
+            _trade_post("/api/v5/trade/cancel-order",
+                        {"instId": _to_okx(sym), "ordId": po["order_id"]},
+                        cfg)
+            po["status"] = "cancelled"
+        except Exception as exc:
+            _append_error("trade",
+                          f"cancel DCA pre-order {po.get('order_id')} failed: {exc}",
+                          symbol=sym, endpoint="/api/v5/trade/cancel-order")
+
+
+def _fetch_cross_dca_fill(sig: dict, cfg: dict, level: int) -> dict:
+    """Fetch fill details for a pre-placed DCA order at the given level.
+
+    Returns {"fill_px": float, "fill_sz": int, "ord_id": str} or empty on failure.
+    """
+    preorders = sig.get("dca_preorders", [])
+    po = next((p for p in preorders if p.get("level") == level), None)
+    if not po:
+        return {}
+    ord_id     = po.get("order_id", "")
+    trigger_px = float(po.get("trigger_px", 0))
+    contracts  = int(po.get("contracts", 0))
+    if not ord_id:
+        return {"fill_px": trigger_px, "fill_sz": contracts, "ord_id": ""}
+    try:
+        resp = _trade_get("/api/v5/trade/order",
+                          {"instId": _to_okx(sig.get("symbol", "")), "ordId": ord_id},
+                          cfg)
+        if resp.get("code") == "0":
+            d = (resp.get("data") or [{}])[0]
+            avg_px = float(d.get("avgPx", 0) or 0)
+            sz     = int(d.get("accFillSz", d.get("sz", 0)) or 0)
+            return {
+                "fill_px": avg_px if avg_px > 0 else trigger_px,
+                "fill_sz": sz if sz > 0 else contracts,
+                "ord_id":  ord_id,
+            }
+    except Exception:
+        pass
+    return {"fill_px": trigger_px, "fill_sz": contracts, "ord_id": ord_id}
+
+
 def _execute_dca_fill_paper(sig: dict, cfg: dict) -> bool:
     """Paper-mode DCA fill (no OKX API calls).
 
@@ -2958,9 +3233,17 @@ def _execute_dca_fill_paper(sig: dict, cfg: dict) -> bool:
         # the same value so breaches route to the DCA SL Hit table correctly.
         # The NEXT-DCA-TRIGGER price lives in sig["next_dca_px"].
         dca_max  = int(sig.get("dca_max", 0) or 0)
+        _mode_paper = (sig.get("order_margin_mode") or "isolated").strip().lower()
+
+        # ── SL distance for post-DCA recompute ───────────────────────────────
+        # Cross paper mode: when the full ladder is exhausted, the final SL is
+        # set at -dca_cross_drop_pct% below the final blended average (mirrors
+        # the gap used for DCA triggers so the SL is intuitive). While the
+        # ladder still has slots, no SL is applied (open field stays for display
+        # only — the watcher ignores it in the _ladder_slots_left branch).
+        # Isolated mode: unchanged — sl_distance_pct = 1/leverage.
         _sl_dist = float(sig.get("sl_distance_pct", 0.0) or 0.0)
         if _sl_dist <= 0:
-            # Legacy fallback: derive from fills[0] (entry price and sl)
             _f0 = (sig.get("dca_fills") or [{}])[0]
             _p0 = float(_f0.get("price", 0) or 0)
             _s0 = float(_f0.get("sl", 0) or 0)
@@ -2968,13 +3251,24 @@ def _execute_dca_fill_paper(sig: dict, cfg: dict) -> bool:
                 _sl_dist = (_p0 - _s0) / _p0
             else:
                 _sl_dist = float(cfg.get("sl_pct", 3.0) or 3.0) / 100.0
-        new_sl = _pround(sig["avg_entry"] * (1.0 - _sl_dist))
+
+        ladder_exhausted = (sig.get("dca_count", 0) >= dca_max)
+        if _mode_paper == "cross" and ladder_exhausted:
+            # Final SL for cross paper mode: -cross_drop_pct% below blended avg
+            _cross_drop_p = float(sig.get("dca_cross_drop_pct",
+                                          cfg.get("dca_cross_drop_pct", 7.0)) or 7.0)
+            new_sl = _pround(sig["avg_entry"] * (1.0 - _cross_drop_p / 100.0))
+        else:
+            new_sl = _pround(sig["avg_entry"] * (1.0 - _sl_dist))
         sig["sl"] = new_sl
-        if sig["dca_count"] >= dca_max:
-            # Ladder fully exhausted — mark final SL so UI routes breach
-            # to DCA SL Hit table; zero out next_dca_px (no more adds).
-            sig["final_sl_price"] = new_sl
-            sig["next_dca_px"]    = 0.0
+
+        if ladder_exhausted:
+            if _mode_paper == "cross":
+                # Cross paper: activate final SL at -cross_drop_pct%
+                sig["final_sl_price"] = new_sl
+            else:
+                sig["final_sl_price"] = new_sl
+            sig["next_dca_px"] = 0.0
         else:
             sig["final_sl_price"] = None
             try:
@@ -3060,20 +3354,40 @@ def _execute_dca_fill(sig: dict, cfg: dict) -> bool:
             sig.pop("_dca_pending", None)
             return False
 
-        result = place_okx_dca_order(sig, cfg, dca_usdt)
-        if result.get("status") != "placed":
-            # Leave _dca_pending=True so the next cycle retries? For safety,
-            # clear it to avoid hammering on a structural failure. User can
-            # see the error in the error log. Add it back as True only on
-            # retryable paths; for now clear unconditionally.
-            sig.pop("_dca_pending", None)
-            sig["_dca_last_error"] = result.get("error", "")
-            return False
+        _mode_live = (sig.get("order_margin_mode") or "isolated").strip().lower()
+        _next_level = int(sig.get("dca_count", 0) or 0) + 1  # 1-indexed DCA level
 
-        fill_px   = float(result.get("actual_entry", 0) or 0)
-        fill_sz   = int(result.get("sz", 0) or 0)
-        fill_not  = float(result.get("notional", 0) or 0) or (dca_usdt * int(sig.get("trade_lev", 10) or 10))
-        fill_ordid = result.get("ordId", "")
+        if _mode_live == "cross" and sig.get("dca_preorders"):
+            # ── Cross mode: DCA was pre-placed as a limit order; fetch its fill ─
+            # No new market buy needed — OKX already executed the limit order.
+            _fill_info = _fetch_cross_dca_fill(sig, cfg, _next_level)
+            if not _fill_info:
+                _append_error("trade",
+                              f"Cross DCA level {_next_level}: preorder not found",
+                              symbol=sym)
+                sig.pop("_dca_pending", None)
+                return False
+            # Mark the preorder as filled
+            for _po in sig.get("dca_preorders", []):
+                if _po.get("level") == _next_level:
+                    _po["status"] = "filled"
+                    _po["actual_px"] = _fill_info.get("fill_px", _po.get("trigger_px", 0))
+                    break
+            fill_px    = float(_fill_info.get("fill_px", 0))
+            fill_sz    = int(_fill_info.get("fill_sz", 0))
+            fill_ordid = _fill_info.get("ord_id", "")
+            fill_not   = dca_usdt * int(sig.get("trade_lev", 10) or 10)
+        else:
+            # ── Isolated mode: place a live market DCA buy ────────────────────
+            result = place_okx_dca_order(sig, cfg, dca_usdt)
+            if result.get("status") != "placed":
+                sig.pop("_dca_pending", None)
+                sig["_dca_last_error"] = result.get("error", "")
+                return False
+            fill_px    = float(result.get("actual_entry", 0) or 0)
+            fill_sz    = int(result.get("sz", 0) or 0)
+            fill_not   = float(result.get("notional", 0) or 0) or (dca_usdt * int(sig.get("trade_lev", 10) or 10))
+            fill_ordid = result.get("ordId", "")
 
         # Append fill record
         fills = sig.get("dca_fills") or []
@@ -3197,13 +3511,23 @@ def _execute_dca_fill(sig: dict, cfg: dict) -> bool:
         if total_contracts <= 0:
             total_contracts = fill_sz   # last-resort: latest DCA fill only
 
-        _old_algo = sig.get("algo_id", "")
+        _old_algo = sig.get("algo_id", "") or sig.get("tp_algo_id", "")
         if _old_algo:
             _cancel_algo_best_effort(_old_algo, sym, cfg)
-        new_algo = _place_dca_oco_algo(sig, cfg, sig["tp"], sig["sl"],
-                                       total_contracts)
-        if new_algo:
-            sig["algo_id"] = new_algo
+
+        # Cross mode: TP-only order (no SL on OKX ever).
+        # Isolated mode: full OCO (TP + SL).
+        _mode_fill = (sig.get("order_margin_mode") or "isolated").strip().lower()
+        if _mode_fill == "cross":
+            new_algo = _place_tp_only_order(sig, cfg, sig["tp"], total_contracts)
+            if new_algo:
+                sig["algo_id"]    = new_algo
+                sig["tp_algo_id"] = new_algo
+        else:
+            new_algo = _place_dca_oco_algo(sig, cfg, sig["tp"], sig["sl"],
+                                           total_contracts)
+            if new_algo:
+                sig["algo_id"] = new_algo
 
         sig.pop("_dca_pending", None)
         sig.pop("_dca_trigger_px", None)
@@ -3278,6 +3602,15 @@ def _update_one_signal(sig: dict) -> None:
                                tp_time/1000, tz=timezone.utc)).isoformat())
                 sig.pop("price_alert", None)
                 sig.pop("_dca_pending", None)
+                # Cross mode: cancel any pending DCA preorders on OKX
+                _mm_tp = (sig.get("order_margin_mode") or "").strip().lower()
+                if _mm_tp == "cross" and sig.get("dca_preorders"):
+                    try:
+                        with _config_lock:
+                            _cfg_cancel = dict(_b._bsc_cfg)
+                        _cancel_cross_dca_preorders(sig, _cfg_cancel)
+                    except Exception:
+                        pass
             elif dca_time is not None:
                 # DCA trigger fired — main loop will place the order.
                 sig["_dca_pending"]      = True
@@ -4012,6 +4345,9 @@ def _bg_loop():
                         or cfg.get("trade_margin_mode", "isolated")
                     )
                     sig["order_is_hedge"]    = bool(result.get("is_hedge", False))
+                    # Cross mode extras — pre-placed DCA orders and TP algo id
+                    sig["dca_preorders"]     = result.get("dca_preorders", [])
+                    sig["tp_algo_id"]        = result.get("tp_algo_id", "")
                     # Overwrite entry/TP/SL with actual fill values if available.
                     # Market orders fill at the live price, not the signal price —
                     # the OCO algo order was placed using these corrected levels.
@@ -4033,6 +4369,13 @@ def _bg_loop():
                     # count is exact on every future DCA for this trade.
                     if sig.get("dca_fills") and sig.get("order_sz"):
                         sig["dca_fills"][0]["sz"] = int(sig["order_sz"])
+                    # Cross mode: restore dca_preorders from OKX result
+                    # (_init_signal_trade_snapshot uses setdefault for dca_ladder
+                    # so we must restore the preorder IDs that OKX returned).
+                    if result.get("dca_preorders"):
+                        sig["dca_preorders"] = result["dca_preorders"]
+                    if result.get("tp_algo_id"):
+                        sig["tp_algo_id"] = result["tp_algo_id"]
                 with _log_lock:
                     save_log(_b._bsc_log)
             _b._bsc_last_error = ""
@@ -6061,7 +6404,11 @@ def _build_signal_row(s: dict, is_open_table: bool = False,
     ord_env     = "🟡 Demo" if s.get("demo_mode") else "🔴 Live"
     ord_status  = s.get("order_status", "")
     ord_err     = s.get("order_error",  "")
-    if   ord_status == "placed":  ord_status_str = f"✅ Entry+OCO {ord_env}"
+    _is_cross_ord = (s.get("order_margin_mode") or
+                     _snap_cfg.get("trade_margin_mode","isolated")).strip().lower() == "cross"
+    if   ord_status == "placed":
+        ord_status_str = (f"✅ Entry+TP {ord_env}" if _is_cross_ord
+                          else f"✅ Entry+OCO {ord_env}")
     elif ord_status == "partial": ord_status_str = f"⚠️ Entry only {ord_env} · {ord_err[:80]}"
     elif ord_status == "error":   ord_status_str = f"❌ {ord_err[:80]}" if ord_err else "❌ Error"
     else:                         ord_status_str = "—"
@@ -6196,6 +6543,65 @@ def _build_signal_row(s: dict, is_open_table: bool = False,
             except (TypeError, ValueError):
                 pass
 
+    # ── DCA Levels column (all tables when DCA is enabled) ──────────────────
+    # Shows the full pre-calculated DCA ladder for every signal — all levels,
+    # past and future — so it acts as both a forecast and a history column.
+    # ✅ = already triggered   ⏳ = still pending
+    dca_levels_col = "—"
+    _dca_en_lv  = bool(s.get("dca_enabled", False))
+    _dca_max_lv = int(s.get("dca_max", 0) or 0)
+    if _dca_en_lv and _dca_max_lv > 0:
+        _ladder_lv  = s.get("dca_ladder") or []
+        _count_lv   = int(s.get("dca_count", 0) or 0)
+        _mode_lv    = (s.get("order_margin_mode") or
+                       _snap_cfg.get("trade_margin_mode", "isolated") or
+                       "isolated").strip().lower()
+        if _ladder_lv:
+            _lines = []
+            for _item in _ladder_lv:
+                _lvl = int(_item.get("level", 0))
+                _px  = float(_item.get("trigger_px", 0) or 0)
+                if _px <= 0:
+                    continue
+                _icon = "✅" if _lvl <= _count_lv else "⏳"
+                if _px >= 1:
+                    _px_str = f"{_px:.4f}"
+                elif _px >= 0.01:
+                    _px_str = f"{_px:.6f}"
+                else:
+                    _px_str = f"{_px:.8f}"
+                _lines.append(f"{_icon} DCA-{_lvl}: {_px_str}")
+            dca_levels_col = "\n".join(_lines) if _lines else "—"
+        elif _mode_lv == "cross":
+            # Legacy signal without stored ladder — compute on the fly
+            _cdrop_lv = float(s.get("dca_cross_drop_pct",
+                                    _snap_cfg.get("dca_cross_drop_pct", 7.0)) or 7.0)
+            _tp_lv    = float(_snap_cfg.get("tp_pct", 1.5) or 1.5)
+            _base_lv  = float(s.get("trade_usdt", _snap_cfg.get("trade_usdt_amount", 5)) or 5)
+            _lev_lv   = int(s.get("trade_lev", _snap_cfg.get("trade_leverage", 10)) or 10)
+            _entry_lv = float(s.get("original_entry", s.get("entry", 0)) or 0)
+            if _entry_lv > 0:
+                try:
+                    _ladder_fly = _calc_cross_dca_ladder(
+                        _entry_lv, _base_lv, _lev_lv, _dca_max_lv, _cdrop_lv, _tp_lv)
+                    _lines = []
+                    for _item in _ladder_fly:
+                        _lvl = int(_item.get("level", 0))
+                        _px  = float(_item.get("trigger_px", 0) or 0)
+                        if _px <= 0:
+                            continue
+                        _icon = "✅" if _lvl <= _count_lv else "⏳"
+                        if _px >= 1:
+                            _px_str = f"{_px:.4f}"
+                        elif _px >= 0.01:
+                            _px_str = f"{_px:.6f}"
+                        else:
+                            _px_str = f"{_px:.8f}"
+                        _lines.append(f"{_icon} DCA-{_lvl}: {_px_str}")
+                    dca_levels_col = "\n".join(_lines) if _lines else "—"
+                except Exception:
+                    dca_levels_col = "—"
+
     # ── Next DCA price column (Open Signals only) ────────────────────────────
     # Shows the price at which the NEXT DCA add would trigger, using the
     # signal's own snapshotted drop percentages (isolated / cross) so the
@@ -6297,6 +6703,7 @@ def _build_signal_row(s: dict, is_open_table: bool = False,
             "Signal Entry":    _sig_entry_display,
             "Original Entry":  _orig_entry_display,
             "Current Price":   current_price_col,
+            "DCA Levels":      dca_levels_col,
             "Next DCA":        next_dca_col,
             "TP":              s.get("tp", ""),
             "SL":              s.get("sl", ""),
@@ -6339,6 +6746,7 @@ def _build_signal_row(s: dict, is_open_table: bool = False,
     if show_pnl:
         row["PnL $"] = pnl_col
     row.update({
+        "DCA Levels":     dca_levels_col,
         "Signal Entry":   _sig_entry_display,
         "Original Entry": _orig_entry_display,
         "Fill $":         s.get("entry", "") if s.get("signal_entry") else "—",
@@ -6377,6 +6785,14 @@ _SIG_COL_CFG = {
                                "vs. the ATR% measured at entry, so it gets easier as price "
                                "moves toward TP. Shows '—' when ATR was not computed (ATR "
                                "filter disabled at entry time)."),
+    "DCA Levels":     st.column_config.TextColumn(
+                          "📊 DCA Levels", width="medium",
+                          help=(
+                               "Pre-calculated DCA trigger prices for all levels.\n\n"
+                               "✅ = already triggered   ⏳ = pending\n\n"
+                               "Prices are exact — calculated at entry time from the "
+                               "blended average cascade. Cross margin only; shows '—' "
+                               "for isolated mode or when DCA is disabled.")),
     "Alert":          st.column_config.TextColumn(
                           "🚨 Alert", width="small",
                           help="🔴 DL = price ≥3% below entry  |  🔴 TL = open ≥2 hours"),
@@ -7863,197 +8279,212 @@ def _build_diagnostics_text() -> str:
     _kv("queue_limit", len(_queue_sigs))
     _kv("total",       len(signals))
 
-    # ── Per-signal detail (all buckets) ───────────────────────────────────────────
-    def _dump_signal(s: dict):
-        _sub(s.get("symbol","?") + "  ·  " + _fmt_ts(s.get("timestamp","")))
-        _kv("status",              s.get("status", ""))
-        _kv("sector",              s.get("sector", ""))
-        _kv("setup",               "Super" if s.get("is_super_setup") else "Normal")
-        _kv("margin_mode",         s.get("order_margin_mode", "") or "—")
-        _kv("leverage",            s.get("trade_lev", "—"))
-        _kv("trade_usdt (base)",   s.get("trade_usdt", "—"))
-        _kv("original_entry",      s.get("original_entry", s.get("signal_entry", s.get("entry", ""))))
-        _kv("signal_entry",        s.get("signal_entry", "—"))
-        _kv("entry (current ref)", s.get("entry", "—"))
-        _kv("avg_entry (blended)", s.get("avg_entry", "—"))
-        _kv("tp",                  s.get("tp", "—"))
-        _kv("sl",                  s.get("sl", "—"))
-        _kv("latest_price",        s.get("latest_price", "—"))
-        _kv("price_alert_pct",     s.get("price_alert_pct", "—"))
-        _kv("dca_enabled",         s.get("dca_enabled", False))
-        _kv("dca_count",           s.get("dca_count", 0))
-        _kv("dca_max",             s.get("dca_max", 0))
-        _kv("dca_iso_distance_pct", s.get("dca_iso_distance_pct", "—"))
-        _kv("dca_cross_drop_pct",   s.get("dca_cross_drop_pct", "—"))
-        _kv("sl_distance_pct",      s.get("sl_distance_pct", "—"))
-        _kv("next_dca_px",          s.get("next_dca_px", "—"))
-        _kv("final_sl_price",      s.get("final_sl_price", "—"))
-        _kv("order_id",            s.get("order_id", "—") or "—")
-        _kv("algo_id",             s.get("algo_id",  "—") or "—")
-        _kv("order_status",        s.get("order_status", "—"))
-        _kv("order_error",         (s.get("order_error", "") or "")[:200])
-        _kv("timestamp",           _fmt_ts(s.get("timestamp", "")))
-        _kv("close_time",          _fmt_ts(s.get("close_time", "")))
-        _kv("close_price",         s.get("close_price", "—"))
-        _fills = s.get("dca_fills") or []
-        if _fills:
-            _push("  dca_fills:")
-            for _f in _fills:
-                _idx = _f.get("dca_idx", "?")
-                _px  = str(_f.get("price",    "—"))
-                _us  = str(_f.get("usdt",     "—"))
-                _lv  = str(_f.get("leverage", "—"))
-                _nt  = str(_f.get("notional", "—"))
-                _tp2 = str(_f.get("tp",       "—"))
-                _sl2 = str(_f.get("sl",       "—"))
-                _oi  = str(_f.get("order_id", "") or "—")
-                _ts2 = _fmt_ts(_f.get("ts", ""))
-                _push(
-                    "    - idx=" + str(_idx) + "  px=" + _px + "  usdt=" + _us + "  "
-                    "lev=" + _lv + "  notional=" + _nt + "  "
-                    "tp=" + _tp2 + "  sl=" + _sl2 + "  ts=" + _ts2 + "  order_id=" + _oi
-                )
+
+    # ── Capital Requirement Summary ──────────────────────────────────────────
+    _hdr("CAPITAL REQUIREMENT SUMMARY")
+    try:
+        _dc_base    = float(_snap_cfg.get("trade_usdt_amount", 5.0))
+        _dc_dca_max = int(_snap_cfg.get("trade_max_dca", 3))
+        _dc_pool    = int(_snap_cfg.get("max_open_trades", 7))
+        _dc_per     = _dc_base * (2 ** _dc_dca_max)
+        _dc_min     = _dc_per * _dc_pool
+        _dc_buf     = _dc_min * 0.25
+        _dc_tot     = _dc_min + _dc_buf
+        _kv("base_margin_per_trade",    f"${_dc_base:.2f}")
+        _kv("max_dca_levels",           _dc_dca_max)
+        _kv("max_open_trades",          _dc_pool)
+        _kv("worst_case_per_trade",     f"${_dc_per:.2f}  (base × 2^dca_max)")
+        _kv("minimum_required",         f"${_dc_min:,.2f}  (per_trade × max_trades)")
+        _kv("buffer_25pct",             f"${_dc_buf:,.2f}")
+        _kv("total_recommended",        f"${_dc_tot:,.2f}")
+        _kv("margin_mode",              _snap_cfg.get("trade_margin_mode", "isolated"))
+    except Exception as _ce:
+        _push(f"  <error: {_ce}>")
+
+    # ── Filter Funnel (last scan) ─────────────────────────────────────────────
+    _hdr("FILTER FUNNEL — LAST SCAN")
+    try:
+        _fc = getattr(_b, "_bsc_filter_counts", {}) or {}
+        _fmap = [
+            ("pre_filtered_out",  "Pre-filter eliminated"),
+            ("checked",           "Deep-scanned"),
+            ("f_empty_data",      "F0  — Empty/bad data"),
+            ("f1_resistance",     "F1  — Resistance"),
+            ("f2_super_setup",    "F2  — Super setup passed"),
+            ("super_cap_demoted", "F2  — Super cap demoted"),
+            ("f3_pdz5m",          "F3  — PDZ 5m"),
+            ("f4_rsi5m",          "F4  — RSI 5m"),
+            ("f5_rsi1h",          "F5  — RSI 1h"),
+            ("f6_ema",            "F6  — EMA"),
+            ("f7_macd",           "F7  — MACD"),
+            ("f7b_macd5m",        "F7b — MACD 5m"),
+            ("f7c_macd15m",       "F7c — MACD 15m"),
+            ("f8_sar",            "F8  — SAR"),
+            ("f9_vol",            "F9  — Volume"),
+            ("f10_ema_cross",     "F10 — EMA Cross 15m"),
+            ("passed",            "✅ Passed all filters"),
+            ("super_setup",       "⭐ Super setup"),
+        ]
+        for _fk, _fl in _fmap:
+            _fv = _fc.get(_fk, 0)
+            if _fv:
+                _kv(_fl, _fv)
+        _kv("watchlist_size",   _fc.get("watchlist_size", "—"))
+    except Exception as _fe:
+        _push(f"  <error: {_fe}>")
+
+    # ── Per-signal detail (all buckets) ──────────────────────────────────────
+    def _sig_lines(sig: dict, idx: int):
+        _push(f"  [{idx}] {sig.get('symbol','?')} | status={sig.get('status','?')} "
+              f"| entry={sig.get('entry','—')} | tp={sig.get('tp','—')} "
+              f"| sl={sig.get('sl','—')} | avg_entry={sig.get('avg_entry','—')} "
+              f"| original_entry={sig.get('original_entry','—')} "
+              f"| next_dca_px={sig.get('next_dca_px','—')} "
+              f"| final_sl_price={sig.get('final_sl_price','—')} "
+              f"| sl_distance_pct={sig.get('sl_distance_pct','—')} "
+              f"| dca_count={sig.get('dca_count',0)}/{sig.get('dca_max',0)} "
+              f"| mode={sig.get('order_margin_mode','—')} "
+              f"| lev={sig.get('trade_lev','—')}x "
+              f"| usdt=${sig.get('trade_usdt','—')} "
+              f"| dca_cross_drop={sig.get('dca_cross_drop_pct','—')}% "
+              f"| dca_iso_dist={sig.get('dca_iso_distance_pct','—')}% "
+              f"| ts={_fmt_ts(sig.get('timestamp',''))} "
+              f"| close_ts={_fmt_ts(sig.get('close_time',''))} "
+              f"| close_px={sig.get('close_price','—')} "
+              f"| order_id={sig.get('order_id','—')} "
+              f"| algo_id={sig.get('algo_id','—')} "
+              f"| tp_algo_id={sig.get('tp_algo_id','—')} "
+              f"| demo={sig.get('demo_mode','—')} "
+              f"| is_super={sig.get('is_super_setup',False)}")
+
+    for _bucket_name, _bucket in [
+        ("OPEN SIGNALS",    _open_sigs),
+        ("TP HIT",          _tp_sigs),
+        ("SL HIT",          _sl_sigs),
+        ("DCA SL HIT",      _dca_sl_sigs),
+        ("QUEUE LIMIT",     _queue_sigs),
+        ("CLOSED ON OKX",   _closed_okx_sigs),
+    ]:
+        _hdr(_bucket_name + f"  ({len(_bucket)} signals)")
+        if not _bucket:
+            _push("  (none)")
         else:
-            _kv("dca_fills", "(none)")
-        # ── Entry criteria ──────────────────────────────────────────────────────────────────
-        _crit = s.get("criteria") or {}
-        if _crit:
-            _push("  criteria:")
-            _crit_keys = [
-                ("pdz_zone_15m",    "pdz_zone_15m"),
-                ("pdz_zone_1h",     "pdz_zone_1h"),
-                ("pdz_zone_5m",     "pdz_zone_5m"),
-                ("rsi_5m",          "rsi_5m"),
-                ("rsi_1h",          "rsi_1h"),
-                ("ema_3m",          "ema_3m"),
-                ("ema_5m",          "ema_5m"),
-                ("ema_15m",         "ema_15m"),
-                ("macd_3m",         "macd_3m"),
-                ("macd_5m",         "macd_5m"),
-                ("macd_15m",        "macd_15m"),
-                ("sar_3m",          "sar_3m"),
-                ("sar_5m",          "sar_5m"),
-                ("sar_15m",         "sar_15m"),
-                ("vol_ratio",       "vol_ratio"),
-                ("ema_cross_12_15m","ema_cross_12_15m"),
-                ("ema_cross_21_15m","ema_cross_21_15m"),
-                ("atr_15m",         "atr_15m"),
-                ("atr_ratio",       "atr_ratio"),
-            ]
-            for _ck, _ck_key in _crit_keys:
-                if _ck_key in _crit:
-                    _cv = _crit[_ck_key]
-                    if isinstance(_cv, float):
-                        _cv = f"{_cv:.4f}"
-                    _push("    " + f"{_ck:<24}" + " : " + str(_cv))
-        else:
-            _push("  criteria                         : (none stored)")
+            for _i, _s in enumerate(_bucket, 1):
+                _sig_lines(_s, _i)
+                # Full entry criteria
+                _crit = _s.get("criteria") or {}
+                if _crit:
+                    _push(f"    criteria  : rsi_5m={_crit.get('rsi_5m','—')} "
+                          f"rsi_1h={_crit.get('rsi_1h','—')} "
+                          f"ema_3m={_crit.get('ema_3m','—')} "
+                          f"ema_5m={_crit.get('ema_5m','—')} "
+                          f"ema_15m={_crit.get('ema_15m','—')} "
+                          f"macd_3m={_crit.get('macd_3m','—')} "
+                          f"macd_5m={_crit.get('macd_5m','—')} "
+                          f"macd_15m={_crit.get('macd_15m','—')} "
+                          f"sar_3m={_crit.get('sar_3m','—')} "
+                          f"sar_5m={_crit.get('sar_5m','—')} "
+                          f"sar_15m={_crit.get('sar_15m','—')} "
+                          f"vol_ratio={_crit.get('vol_ratio','—')} "
+                          f"pdz_5m={_crit.get('pdz_zone_5m','—')} "
+                          f"pdz_15m={_crit.get('pdz_zone_15m','—')} "
+                          f"pdz_1h={_crit.get('pdz_zone_1h','—')} "
+                          f"ema_cross_12={_crit.get('ema_cross_12_15m','—')} "
+                          f"ema_cross_21={_crit.get('ema_cross_21_15m','—')} "
+                          f"atr_15m={_crit.get('atr_15m','—')} "
+                          f"atr_ratio={_crit.get('atr_ratio','—')}")
+                # DCA ladder — use stored ladder or compute on-the-fly if missing
+                _ladder = _s.get("dca_ladder") or []
+                if not _ladder:
+                    _diag_mode  = (_s.get("order_margin_mode") or "isolated").strip().lower()
+                    _diag_entry = float(_s.get("original_entry", _s.get("entry", 0)) or 0)
+                    _diag_max   = int(_s.get("dca_max", 0) or 0)
+                    if _diag_mode == "cross" and _diag_entry > 0 and _diag_max > 0:
+                        try:
+                            _diag_usdt  = float(_s.get("trade_usdt", 5) or 5)
+                            _diag_lev   = int(_s.get("trade_lev", 20) or 20)
+                            _diag_cdrop = float(_s.get("dca_cross_drop_pct", 7.0) or 7.0)
+                            _diag_tp    = float(_snap_cfg.get("tp_pct", 1.0) or 1.0)
+                            _ladder = _calc_cross_dca_ladder(
+                                _diag_entry, _diag_usdt, _diag_lev,
+                                _diag_max, _diag_cdrop, _diag_tp)
+                        except Exception:
+                            _ladder = []
+                if _ladder:
+                    _lvls = [f"DCA-{item['level']}@{item['trigger_px']} "
+                             f"(blend={item.get('blended_avg','?')} tp={item.get('tp_px','?')})"
+                             for item in _ladder]
+                    _push(f"    dca_ladder: {' | '.join(_lvls)}")
+                # DCA fills
+                _fills = _s.get("dca_fills") or []
+                if len(_fills) > 1:
+                    _push(f"    dca_fills : {len(_fills)-1} DCA(s) fired — "
+                          + " | ".join(f"DCA-{f.get('dca_idx',i)}@{f.get('price','?')} "
+                                       f"usdt=${f.get('usdt','?')} "
+                                       f"{'[paper]' if f.get('paper') else '[live]'}"
+                                       for i, f in enumerate(_fills[1:], 1)))
+                # DCA pre-orders (cross mode)
+                _preorders = _s.get("dca_preorders") or []
+                if _preorders:
+                    _push(f"    dca_preorders ({len(_preorders)}):")
+                    for _po in _preorders:
+                        _push(f"      DCA-{_po.get('level','?')} "
+                              f"order_id={_po.get('order_id','—')} "
+                              f"trigger_px={_po.get('trigger_px','—')} "
+                              f"contracts={_po.get('contracts','—')} "
+                              f"status={_po.get('status','—')}"
+                              + (f" actual_px={_po.get('actual_px','—')}"
+                                 if _po.get('actual_px') else ""))
 
-    _hdr("SIGNALS · OPEN")
-    if _open_sigs:
-        for _s in _open_sigs:
-            _dump_signal(_s)
-    else:
-        _push("  (none)")
-
-    _hdr("SIGNALS · TP HIT")
-    if _tp_sigs:
-        for _s in _tp_sigs:
-            _dump_signal(_s)
-    else:
-        _push("  (none)")
-
-    _hdr("SIGNALS · SL HIT")
-    if _sl_sigs:
-        for _s in _sl_sigs:
-            _dump_signal(_s)
-    else:
-        _push("  (none)")
-
-    _hdr("SIGNALS · DCA SL HIT")
-    if _dca_sl_sigs:
-        for _s in _dca_sl_sigs:
-            _dump_signal(_s)
-    else:
-        _push("  (none)")
-
-    _hdr("QUEUE LIMIT (never opened)")
-    if _queue_sigs:
-        for _s in _queue_sigs:
-            _dump_signal(_s)
-    else:
-        _push("  (none)")
-
-    _hdr("SIGNALS · CLOSED ON OKX (manual / undetected close)")
-    if _closed_okx_sigs:
-        for _s in _closed_okx_sigs:
-            _dump_signal(_s)
-    else:
-        _push("  (none)")
-
-    # ── Watchlist ──────────────────────────────────────────────────────────────────
+    # ── Active Watchlist ──────────────────────────────────────────────────────
     _hdr("WATCHLIST")
     try:
-        _wl = list(_snap_cfg.get("watchlist", []))
-        _push(f"  Total coins: {len(_wl)}")
+        _wl = list(_snap_cfg.get("watchlist") or [])
+        _push(f"  Total: {len(_wl)} symbols")
         for _wi, _wsym in enumerate(_wl, 1):
             _push(f"  {_wi:>3}. {_wsym}")
-    except Exception as _wle:
-        _push(f"  <error reading watchlist: {_wle}>")
+    except Exception as _we:
+        _push(f"  <error reading watchlist: {_we}>")
 
-    # ── API Error Log ──────────────────────────────────────────────────────────────
-    _hdr("API ERROR LOG (most recent 200 entries)")
+    # ── API Error Log ─────────────────────────────────────────────────────────
+    _hdr("API ERROR LOG (last 200 entries, newest first)")
     try:
-        with _log_lock:
-            _err_snap = list((_b._bsc_log.get("errors") or []))
-        _err_snap_sorted = sorted(_err_snap, key=lambda e: e.get("ts", ""), reverse=True)
-        _err_limit = _err_snap_sorted[:200]
-        if _err_limit:
-            for _e in _err_limit:
-                _ets  = _fmt_ts(_e.get("ts", ""))
-                _etype = _e.get("type", "?")
-                _emsg  = _e.get("message", "") or _e.get("msg", "")
-                _esym  = _e.get("symbol", "")
-                _eep   = _e.get("endpoint", "")
-                _line  = f"  [{_ets}] [{_etype}]"
-                if _esym: _line += f" [{_esym}]"
-                if _eep:  _line += f" [{_eep}]"
-                _line += f"  {_emsg}"
-                _push(_line)
+        with getattr(_b, "_bsc_error_log_lock", threading.Lock()):
+            _err_entries = list(reversed(getattr(_b, "_bsc_error_log", [])))[:200]
+        if not _err_entries:
+            _push("  (no errors)")
         else:
-            _push("  (no errors logged)")
+            for _ei, _err in enumerate(_err_entries, 1):
+                _push(f"  [{_ei:>3}] {_fmt_ts(_err.get('ts',''))} "
+                      f"| {_err.get('type','?'):8} "
+                      f"| {_err.get('symbol',''):15} "
+                      f"| {_err.get('endpoint',''):40} "
+                      f"| {str(_err.get('msg',''))[:120]}")
     except Exception as _ele:
         _push(f"  <error reading error log: {_ele}>")
 
-    # ── Filter funnel (last scan) ──────────────────────────────────────────────────
-    _hdr("FILTER FUNNEL (last scan)")
-    try:
-        with _filter_lock:
-            _fc_snap = {k: (list(v) if isinstance(v, list) else v)
-                        for k, v in _filter_counts.items()}
-        if _fc_snap.get("total_watchlist", 0) > 0:
-            for _k in sorted(_fc_snap.keys()):
-                _v = _fc_snap[_k]
-                if _k in ("scan_cfg", "flushed_at", "scan_completed_at"):
-                    continue
-                if isinstance(_v, list):
-                    _push(f"  {_k:<32} : [{len(_v)} items]")
-                else:
-                    _push(f"  {_k:<32} : {_v}")
-        else:
-            _push("  (no scan data yet)")
-    except Exception as _fe:
-        _push(f"  <error reading filter counts: {_fe}>")
-
+    _push("")
+    _push("=" * 78)
+    _push("END OF DIAGNOSTICS")
+    _push("=" * 78)
     return "\n".join(_lines)
 
-_diag_text = _build_diagnostics_text()
-st.text_area("📋 Debug Snapshot", _diag_text, height=400, key="debug_snap_area")
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Download button — calls the builder and streams the result
+# ─────────────────────────────────────────────────────────────────────────────
+try:
+    _diag_text = _build_diagnostics_text()
+except Exception as _diag_exc:
+    _diag_text = f"Error building diagnostics: {_diag_exc}"
+
+st.text_area("📋 Diagnostics Preview", _diag_text, height=300, key="debug_snap_area")
+
 _diag_filename = f"diagnostics_{dubai_now().strftime('%Y%m%d_%H%M%S')}.txt"
 st.download_button(
     label="⬇️ Download Diagnostics",
     data=_diag_text.encode("utf-8"),
     file_name=_diag_filename,
     mime="text/plain",
-    use_container_width=False,
+    key="diag_download_btn",
 )
