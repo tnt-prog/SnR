@@ -7112,6 +7112,21 @@ def _style_alert_cell(val) -> str:
     return ""
 
 
+def _style_pnl_cell(val) -> str:
+    """Return CSS for the PnL $ column: green for positive, red for negative."""
+    try:
+        if val is None or str(val).strip() in ("—", "", "N/A"):
+            return ""
+        s = str(val).strip()
+        if s.startswith("-"):
+            return "color: #EF4444; font-weight: 600;"   # red
+        if s.startswith("+"):
+            return "color: #22C55E; font-weight: 600;"   # green
+    except Exception:
+        pass
+    return ""
+
+
 def _render_sig_table(sig_list: list, header: str, empty_msg: str,
                       auto_height: bool = False, is_open_table: bool = False,
                       show_pnl: bool = False, scroll_height: int = None):
@@ -7126,13 +7141,12 @@ def _render_sig_table(sig_list: list, header: str, empty_msg: str,
         try:
             import pandas as _pd
             _df = _pd.DataFrame(rows)
+            _styled = _df.style
             if "Alert" in _df.columns:
-                _styled = _df.style.applymap(
-                    _style_alert_cell, subset=["Alert"]
-                )
-                _render_obj = _styled
-            else:
-                _render_obj = _df
+                _styled = _styled.applymap(_style_alert_cell, subset=["Alert"])
+            if "PnL $" in _df.columns:
+                _styled = _styled.applymap(_style_pnl_cell, subset=["PnL $"])
+            _render_obj = _styled
         except Exception:
             _render_obj = rows
 
@@ -7189,50 +7203,69 @@ def _signal_tables_fragment():
     _closed_okx_sigs = [s for s in filtered_sorted if s.get("status") == "closed_okx"]
 
     # ── Table 1: Open Signals ───────────────────────────────────────────────────────
-    _render_sig_table(_open_sigs,  "🔵 Open Signals",  "No open signals right now.",
-                      scroll_height=450, is_open_table=True, show_pnl=True)
+    # ── Open Signals table with row selection + Force Close ─────────────────────
+    st.markdown(f"### 🔵 Open Signals ({len(_open_sigs)})")
+    if _open_sigs:
+        try:
+            import pandas as _pd
+            _open_rows = [_build_signal_row(s, is_open_table=True, show_pnl=True)
+                          for s in _open_sigs]
+            _open_df   = _pd.DataFrame(_open_rows)
+            _open_styled = _open_df.style
+            if "Alert" in _open_df.columns:
+                _open_styled = _open_styled.applymap(_style_alert_cell, subset=["Alert"])
+            if "PnL $" in _open_df.columns:
+                _open_styled = _open_styled.applymap(_style_pnl_cell, subset=["PnL $"])
+            _open_render = _open_styled
+        except Exception:
+            _open_rows   = [_build_signal_row(s, is_open_table=True, show_pnl=True)
+                            for s in _open_sigs]
+            _open_render = _open_rows
 
-    # ── Force Close buttons (auto-trading only, one per open signal) ───────────
-    _fc_trade_on  = _frag_cfg.get("trade_enabled", False)
-    _fc_has_creds = bool(
-        _frag_cfg.get("api_key") and _frag_cfg.get("api_secret")
-        and _frag_cfg.get("api_passphrase")
-    )
-    _fc_live_sigs = _open_sigs   # show for ALL open signals — paper + live
-    if _fc_live_sigs:
-        with st.expander("🔴 Force Close Position", expanded=False):
-            st.caption(
-                "Paper trades: closes the log entry instantly. "
-                "Demo/Live trades: cancels the OCO algo and places a market sell."
-            )
-            for _fc_sig in _fc_live_sigs:
-                _fc_sym   = _fc_sig.get("symbol", "?")
-                _fc_entry = float(_fc_sig.get("avg_entry") or
-                                  _fc_sig.get("entry") or 0)
-                _fc_price = float(_fc_sig.get("latest_price") or _fc_entry or 0)
-                _fc_upnl  = ((_fc_price - _fc_entry) / _fc_entry * 100
-                             if _fc_entry > 0 else 0)
-                _fc_upnl_str = f"{_fc_upnl:+.2f}%"
-                _fc_col1, _fc_col2, _fc_col3 = st.columns([3, 2, 2])
-                with _fc_col1:
-                    st.markdown(f"**{_fc_sym}**")
-                with _fc_col2:
-                    _fc_color  = "🟢" if _fc_upnl >= 0 else "🔴"
-                    _fc_mode   = "📄 Paper" if not _fc_sig.get("order_id") else (
-                                 "🟡 Demo" if _fc_sig.get("demo_mode") else "🔴 Live")
-                    st.markdown(f"{_fc_color} uPnL: `{_fc_upnl_str}`  ·  {_fc_mode}")
-                with _fc_col3:
-                    if st.button(f"⚡ Close {_fc_sym}",
-                                 key=f"fc_{_fc_sym}_{_fc_sig.get('timestamp','')}",
-                                 type="primary",
-                                 use_container_width=True):
-                        with st.spinner(f"Closing {_fc_sym}…"):
-                            _fc_result = _force_close_position(_fc_sig, _frag_cfg)
-                        if _fc_result["success"]:
-                            st.success(_fc_result["message"])
-                            st.rerun()
-                        else:
-                            st.error(_fc_result["message"])
+        _open_event = st.dataframe(
+            _open_render,
+            use_container_width=True,
+            hide_index=True,
+            height=450,
+            column_config=_SIG_COL_CFG,
+            selection_mode="single-row",
+            on_select="rerun",
+            key="open_signals_table",
+        )
+
+        # ── Force Close action bar — appears when a row is selected ──────────
+        _sel_rows = (_open_event.selection.rows
+                     if _open_event and hasattr(_open_event, "selection")
+                     else [])
+        if _sel_rows:
+            _fc_sig   = _open_sigs[_sel_rows[0]]
+            _fc_sym   = _fc_sig.get("symbol", "?")
+            _fc_entry = float(_fc_sig.get("avg_entry") or _fc_sig.get("entry") or 0)
+            _fc_price = float(_fc_sig.get("latest_price") or _fc_entry or 0)
+            _fc_upnl  = ((_fc_price - _fc_entry) / _fc_entry * 100
+                         if _fc_entry > 0 else 0)
+            _fc_mode  = ("📄 Paper" if not _fc_sig.get("order_id") else
+                         "🟡 Demo"  if _fc_sig.get("demo_mode") else "🔴 Live")
+            _fc_color = "🟢" if _fc_upnl >= 0 else "🔴"
+            _fca1, _fca2, _fca3 = st.columns([3, 2, 2])
+            with _fca1:
+                st.info(f"**{_fc_sym}** selected  ·  {_fc_mode}")
+            with _fca2:
+                st.markdown(f"{_fc_color} uPnL: `{_fc_upnl:+.2f}%`")
+            with _fca3:
+                if st.button("⚡ Force Close", type="primary",
+                             key="fc_execute", use_container_width=True):
+                    with st.spinner(f"Closing {_fc_sym}…"):
+                        _fc_result = _force_close_position(_fc_sig, _frag_cfg)
+                    if _fc_result["success"]:
+                        st.success(_fc_result["message"])
+                        st.rerun()
+                    else:
+                        st.error(_fc_result["message"])
+        else:
+            st.caption("👆 Click a row to select it, then use ⚡ Force Close.")
+    else:
+        st.info("No open signals right now.")
 
     # ── OKX Live Positions (inline, auto-fetch) ────────────────────────────────────
     # Shown only when auto-trading is ON. Fetches on every render using a dedicated
