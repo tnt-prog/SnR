@@ -2943,6 +2943,144 @@ def _cancel_algo_best_effort(algo_id: str, sym: str, cfg: dict) -> None:
                       symbol=sym, endpoint="/api/v5/trade/cancel-algos")
 
 
+
+
+def _force_close_position(sig: dict, cfg: dict) -> dict:
+    """Force-close a signal — works for both paper and Demo/Live trades.
+
+    Paper path  (no order_id): updates the log only — no OKX API calls.
+    Live path   (order_id set):
+      1. Fetch the actual live position size from OKX (authoritative source).
+      2. Cancel the OCO/TP algo order attached to the signal.
+      3. Cancel any pending DCA preorders (cross margin mode).
+      4. Place a market sell for the full contract count.
+      5. Mark the signal as closed_okx in the shared log.
+
+    Returns {"success": bool, "message": str}
+    """
+    sym      = sig.get("symbol", "?")
+    is_paper = not sig.get("order_id")
+
+    try:
+        # ── PAPER PATH ─────────────────────────────────────────────────────────
+        if is_paper:
+            _close_px = float(sig.get("latest_price") or
+                              sig.get("avg_entry") or sig.get("entry") or 0)
+            with _log_lock:
+                for _s in _b._bsc_log["signals"]:
+                    if (_s.get("timestamp") == sig.get("timestamp") and
+                            _s.get("symbol") == sym):
+                        _s["status"]      = "closed_okx"
+                        _s["close_price"] = _close_px
+                        _s["close_time"]  = dubai_now().isoformat()
+                        break
+                save_log(_b._bsc_log)
+            return {"success": True,
+                    "message": f"✅ {sym} paper trade closed at {_close_px}."}
+
+        # ── LIVE PATH (Demo or Live) ────────────────────────────────────────────
+        # Step 1: Fetch live position size from OKX ──────────────────────────
+        _pos_resp = _trade_get(
+            "/api/v5/account/positions",
+            {"instType": "SWAP", "instId": _to_okx(sym)},
+            cfg,
+        )
+        if _pos_resp.get("code") != "0":
+            return {"success": False,
+                    "message": f"Position fetch failed: {_pos_resp.get('msg', 'unknown')}"}
+
+        _live = [p for p in _pos_resp.get("data", [])
+                 if float(p.get("pos", 0) or 0) != 0]
+        if not _live:
+            # Position already gone on OKX — just clean up the log
+            with _log_lock:
+                for _s in _b._bsc_log["signals"]:
+                    if (_s.get("timestamp") == sig.get("timestamp") and
+                            _s.get("symbol") == sym):
+                        _s["status"]      = "closed_okx"
+                        _s["close_price"] = float(sig.get("latest_price") or
+                                                   sig.get("avg_entry") or
+                                                   sig.get("entry") or 0)
+                        _s["close_time"]  = dubai_now().isoformat()
+                        break
+                save_log(_b._bsc_log)
+            return {"success": True,
+                    "message": f"✅ {sym}: No open position on OKX — log updated."}
+
+        _pos      = _live[0]
+        contracts = abs(int(float(_pos.get("pos", 0) or 0)))
+        mode      = (sig.get("order_margin_mode") or
+                     cfg.get("trade_margin_mode", "isolated")).strip().lower()
+        is_hedge  = bool(sig.get("order_is_hedge", False))
+
+        # Step 2: Cancel OCO / TP algo ────────────────────────────────────────
+        for _aid_key in ("algo_id", "tp_algo_id"):
+            _aid = sig.get(_aid_key, "")
+            if _aid:
+                _cancel_algo_best_effort(_aid, sym, cfg)
+
+        # Step 3: Cancel pending DCA preorders (cross mode) ──────────────────
+        _preorders   = sig.get("dca_preorders") or []
+        _pending_pre = [p for p in _preorders
+                        if p.get("status") == "pending" and p.get("order_id")]
+        if _pending_pre:
+            try:
+                _trade_post(
+                    "/api/v5/trade/cancel-algos",
+                    [{"algoId": p["order_id"], "instId": _to_okx(sym)}
+                     for p in _pending_pre],
+                    cfg,
+                )
+            except Exception as _pre_exc:
+                _append_error("trade",
+                              f"Force close: DCA preorder cancel failed: {_pre_exc}",
+                              symbol=sym)
+
+        # Step 4: Market sell ─────────────────────────────────────────────────
+        _sell_body: dict = {
+            "instId":  _to_okx(sym),
+            "tdMode":  mode,
+            "side":    "sell",
+            "ordType": "market",
+            "sz":      str(contracts),
+        }
+        if is_hedge:
+            _sell_body["posSide"] = "long"
+
+        _sell_resp = _trade_post("/api/v5/trade/order", _sell_body, cfg)
+        _sd0       = (_sell_resp.get("data") or [{}])[0]
+
+        if _sell_resp.get("code") != "0" or _sd0.get("sCode", "0") != "0":
+            _err = (_okx_err(_sell_resp) if _sell_resp.get("code") != "0"
+                    else f"{_sd0.get('sCode')}: {_sd0.get('sMsg', '')}")
+            _append_error("trade", f"Force close sell failed for {sym}: {_err}",
+                          symbol=sym, endpoint="/api/v5/trade/order")
+            return {"success": False, "message": f"Sell order rejected: {_err}"}
+
+        # Step 5: Update log ──────────────────────────────────────────────────
+        _close_px = float(sig.get("latest_price") or
+                          sig.get("avg_entry") or sig.get("entry") or 0)
+        with _log_lock:
+            for _s in _b._bsc_log["signals"]:
+                if (_s.get("timestamp") == sig.get("timestamp") and
+                        _s.get("symbol") == sym):
+                    _s["status"]      = "closed_okx"
+                    _s["close_price"] = _close_px
+                    _s["close_time"]  = dubai_now().isoformat()
+                    break
+            save_log(_b._bsc_log)
+
+        _append_error("trade",
+                      f"Force closed {sym} — {contracts} contracts at market.",
+                      symbol=sym, endpoint="/api/v5/trade/order")
+        return {"success": True,
+                "message": f"✅ {sym} force closed ({contracts} contracts at market)."}
+
+    except Exception as exc:
+        _append_error("trade", f"Force close exception for {sym}: {exc}",
+                      symbol=sym, endpoint="_force_close_position")
+        return {"success": False, "message": f"Exception: {exc}"}
+
 def _place_dca_oco_algo(sig: dict, cfg: dict, new_tp: float,
                          new_sl: float, total_contracts: int) -> str:
     """Place a fresh OCO (TP + SL) algo on OKX after a DCA add.
@@ -7053,6 +7191,48 @@ def _signal_tables_fragment():
     # ── Table 1: Open Signals ───────────────────────────────────────────────────────
     _render_sig_table(_open_sigs,  "🔵 Open Signals",  "No open signals right now.",
                       scroll_height=450, is_open_table=True, show_pnl=True)
+
+    # ── Force Close buttons (auto-trading only, one per open signal) ───────────
+    _fc_trade_on  = _frag_cfg.get("trade_enabled", False)
+    _fc_has_creds = bool(
+        _frag_cfg.get("api_key") and _frag_cfg.get("api_secret")
+        and _frag_cfg.get("api_passphrase")
+    )
+    _fc_live_sigs = _open_sigs   # show for ALL open signals — paper + live
+    if _fc_live_sigs:
+        with st.expander("🔴 Force Close Position", expanded=False):
+            st.caption(
+                "Paper trades: closes the log entry instantly. "
+                "Demo/Live trades: cancels the OCO algo and places a market sell."
+            )
+            for _fc_sig in _fc_live_sigs:
+                _fc_sym   = _fc_sig.get("symbol", "?")
+                _fc_entry = float(_fc_sig.get("avg_entry") or
+                                  _fc_sig.get("entry") or 0)
+                _fc_price = float(_fc_sig.get("latest_price") or _fc_entry or 0)
+                _fc_upnl  = ((_fc_price - _fc_entry) / _fc_entry * 100
+                             if _fc_entry > 0 else 0)
+                _fc_upnl_str = f"{_fc_upnl:+.2f}%"
+                _fc_col1, _fc_col2, _fc_col3 = st.columns([3, 2, 2])
+                with _fc_col1:
+                    st.markdown(f"**{_fc_sym}**")
+                with _fc_col2:
+                    _fc_color  = "🟢" if _fc_upnl >= 0 else "🔴"
+                    _fc_mode   = "📄 Paper" if not _fc_sig.get("order_id") else (
+                                 "🟡 Demo" if _fc_sig.get("demo_mode") else "🔴 Live")
+                    st.markdown(f"{_fc_color} uPnL: `{_fc_upnl_str}`  ·  {_fc_mode}")
+                with _fc_col3:
+                    if st.button(f"⚡ Close {_fc_sym}",
+                                 key=f"fc_{_fc_sym}_{_fc_sig.get('timestamp','')}",
+                                 type="primary",
+                                 use_container_width=True):
+                        with st.spinner(f"Closing {_fc_sym}…"):
+                            _fc_result = _force_close_position(_fc_sig, _frag_cfg)
+                        if _fc_result["success"]:
+                            st.success(_fc_result["message"])
+                            st.rerun()
+                        else:
+                            st.error(_fc_result["message"])
 
     # ── OKX Live Positions (inline, auto-fetch) ────────────────────────────────────
     # Shown only when auto-trading is ON. Fetches on every render using a dedicated
