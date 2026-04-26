@@ -3020,21 +3020,11 @@ def _force_close_position(sig: dict, cfg: dict) -> dict:
                 _cancel_algo_best_effort(_aid, sym, cfg)
 
         # Step 3: Cancel pending DCA preorders (cross mode) ──────────────────
-        _preorders   = sig.get("dca_preorders") or []
-        _pending_pre = [p for p in _preorders
-                        if p.get("status") == "pending" and p.get("order_id")]
-        if _pending_pre:
-            try:
-                _trade_post(
-                    "/api/v5/trade/cancel-algos",
-                    [{"algoId": p["order_id"], "instId": _to_okx(sym)}
-                     for p in _pending_pre],
-                    cfg,
-                )
-            except Exception as _pre_exc:
-                _append_error("trade",
-                              f"Force close: DCA preorder cancel failed: {_pre_exc}",
-                              symbol=sym)
+        # DCA preorders are regular limit orders (/api/v5/trade/order), NOT algo
+        # orders — so they must be cancelled via /api/v5/trade/cancel-order, not
+        # cancel-algos. _cancel_cross_dca_preorders() handles this correctly.
+        if sig.get("dca_preorders"):
+            _cancel_cross_dca_preorders(sig, cfg)
 
         # Step 4: Market sell ─────────────────────────────────────────────────
         _sell_body: dict = {
@@ -4121,6 +4111,19 @@ def _okx_sync_open_signals(open_snapshot: list, cfg: dict) -> bool:
             sig["close_time"]  = _close_ts
             sig.pop("price_alert", None)
             sig.pop("_dca_pending", None)
+            # ── Fix: cancel pending DCA preorders when OKX sync closes a signal ─
+            # Path 1 (candle-based TP detection) already calls this, but Path 2
+            # (OKX sync) did not — leaving cross-mode DCA limit orders live on
+            # OKX's order book after TP/SL fires, risking unintended new positions.
+            _mm_sync = (sig.get("order_margin_mode") or "").strip().lower()
+            if _mm_sync == "cross" and sig.get("dca_preorders"):
+                try:
+                    _cancel_cross_dca_preorders(sig, cfg)
+                except Exception as _cancel_exc:
+                    _append_error("trade",
+                                  f"OKX sync: DCA preorder cancel failed for {sym}: "
+                                  f"{_cancel_exc}",
+                                  symbol=sym)
             _append_error(
                 "trade",
                 f"OKX sync: {sym} marked {_new_status} "
