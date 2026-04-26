@@ -3383,6 +3383,11 @@ def _execute_dca_fill(sig: dict, cfg: dict) -> bool:
             if result.get("status") != "placed":
                 sig.pop("_dca_pending", None)
                 sig["_dca_last_error"] = result.get("error", "")
+                # ── Fix: log the failure so it appears in the Error Log panel ─
+                _append_error("trade",
+                              f"DCA market order failed for {sym}: "
+                              f"{result.get('error', 'unknown error')}",
+                              symbol=sym, endpoint="/api/v5/trade/order")
                 return False
             fill_px    = float(result.get("actual_entry", 0) or 0)
             fill_sz    = int(result.get("sz", 0) or 0)
@@ -4050,6 +4055,9 @@ def _watcher_loop():
                             # missing the entry order failed — skip DCA and log
                             # clearly rather than silently paper-simulating.
                             if cfg.get("trade_enabled") and not _dsig.get("order_id"):
+                                # ── Fix: retroactively close legacy failed-entry signals ──
+                                if _dsig.get("order_status") == "error":
+                                    _dsig["status"] = "entry_failed"
                                 _append_error(
                                     "trade",
                                     f"DCA skipped for {_dsig.get('symbol','?')} — "
@@ -4157,6 +4165,9 @@ def _bg_loop():
                         # missing the entry order failed — skip DCA and log
                         # clearly rather than silently paper-simulating.
                         if cfg.get("trade_enabled") and not _dsig.get("order_id"):
+                            # ── Fix: retroactively close legacy failed-entry signals ──
+                            if _dsig.get("order_status") == "error":
+                                _dsig["status"] = "entry_failed"
                             _append_error(
                                 "trade",
                                 f"DCA skipped for {_dsig.get('symbol','?')} — "
@@ -4331,6 +4342,12 @@ def _bg_loop():
                     sig["order_sz"]          = result.get("sz", 0)
                     sig["order_status"]      = result.get("status", "")
                     sig["order_error"]       = result.get("error", "")
+                    # ── Fix: mark failed entries so watcher excludes them ──────
+                    # Without this, order_id="" signals stay "open" forever and
+                    # hit the DCA guard every tick in Demo/Live mode, permanently
+                    # blocking DCA while paper mode works fine.
+                    if result.get("status") == "error":
+                        sig["status"] = "entry_failed"
                     sig["trade_usdt"]        = float(cfg.get("trade_usdt_amount", 0))
                     sig["trade_lev"]         = int(cfg.get("trade_leverage", 10))
                     sig["demo_mode"]         = bool(cfg.get("demo_mode", True))
