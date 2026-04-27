@@ -5762,7 +5762,7 @@ with st.sidebar:
 # ─────────────────────────────────────────────────────────────────────────────
 # MAIN AREA
 # ─────────────────────────────────────────────────────────────────────────────
-_CODE_UPDATED = "27 Apr 2026  14:00 GST"
+_CODE_UPDATED = "27 Apr 2026  14:30 GST"
 st.title(f"S&R — Crypto Intelligent Portal   ·   🕐 {_CODE_UPDATED}")
 
 # ── Total Realized PnL computation ─────────────────────────────────────────────
@@ -7678,11 +7678,12 @@ _signal_tables_fragment()
 _filtered_pg   = signals if st.session_state.get("sector_filter","All") == "All" else \
                  [s for s in signals if s.get("sector") == st.session_state.get("sector_filter","All")]
 _fsorted_pg    = sorted(_filtered_pg, key=lambda x: x.get("timestamp",""), reverse=True)
-_open_sigs      = [s for s in _fsorted_pg if s.get("status") == "open"]
-_tp_sigs        = [s for s in _fsorted_pg if s.get("status") == "tp_hit"]
-_sl_sigs        = [s for s in _fsorted_pg if s.get("status") == "sl_hit"]
-_dca_sl_sigs    = [s for s in _fsorted_pg if s.get("status") == "dca_sl_hit"]
-_queue_sigs     = [s for s in _fsorted_pg if s.get("status") == "queue_limit"]
+_open_sigs       = [s for s in _fsorted_pg if s.get("status") == "open"]
+_tp_sigs         = [s for s in _fsorted_pg if s.get("status") == "tp_hit"]
+_sl_sigs         = [s for s in _fsorted_pg if s.get("status") == "sl_hit"]
+_dca_sl_sigs     = [s for s in _fsorted_pg if s.get("status") == "dca_sl_hit"]
+_fc_sigs_pg      = [s for s in _fsorted_pg if s.get("status") == "fc_hit"]
+_queue_sigs      = [s for s in _fsorted_pg if s.get("status") == "queue_limit"]
 _closed_okx_sigs = [s for s in _fsorted_pg if s.get("status") == "closed_okx"]
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -8556,7 +8557,9 @@ def _build_diagnostics_text() -> str:
     _kv("tp_hit",      len(_tp_sigs))
     _kv("sl_hit",      len(_sl_sigs))
     _kv("dca_sl_hit",  len(_dca_sl_sigs))
+    _kv("fc_hit",      len(_fc_sigs_pg))
     _kv("queue_limit", len(_queue_sigs))
+    _kv("closed_okx",  len(_closed_okx_sigs))
     _kv("total",       len(signals))
 
 
@@ -8622,6 +8625,7 @@ def _build_diagnostics_text() -> str:
               f"| next_dca_px={sig.get('next_dca_px','—')} "
               f"| final_sl_price={sig.get('final_sl_price','—')} "
               f"| sl_distance_pct={sig.get('sl_distance_pct','—')} "
+              f"| fc_trigger_px={sig.get('fc_trigger_px','—')} "
               f"| dca_count={sig.get('dca_count',0)}/{sig.get('dca_max',0)} "
               f"| mode={sig.get('order_margin_mode','—')} "
               f"| lev={sig.get('trade_lev','—')}x "
@@ -8636,14 +8640,23 @@ def _build_diagnostics_text() -> str:
               f"| tp_algo_id={sig.get('tp_algo_id','—')} "
               f"| demo={sig.get('demo_mode','—')} "
               f"| is_super={sig.get('is_super_setup',False)}")
+        # OKX Command log — one sub-line per entry
+        _log_entries = sig.get("okx_log")
+        if isinstance(_log_entries, list) and _log_entries:
+            _push(f"    okx_log ({len(_log_entries)} entries):")
+            for _li, _le in enumerate(_log_entries, 1):
+                _push(f"      #{_li:>2}  {_le}")
 
+    _entry_failed_sigs = [s for s in signals if s.get("status") == "entry_failed"]
     for _bucket_name, _bucket in [
         ("OPEN SIGNALS",    _open_sigs),
         ("TP HIT",          _tp_sigs),
         ("SL HIT",          _sl_sigs),
         ("DCA SL HIT",      _dca_sl_sigs),
+        ("FC HIT",          _fc_sigs_pg),
         ("QUEUE LIMIT",     _queue_sigs),
         ("CLOSED ON OKX",   _closed_okx_sigs),
+        ("ENTRY FAILED",    _entry_failed_sigs),
     ]:
         _hdr(_bucket_name + f"  ({len(_bucket)} signals)")
         if not _bucket:
@@ -8703,12 +8716,6 @@ def _build_diagnostics_text() -> str:
                                        f"usdt=${f.get('usdt','?')} "
                                        f"{'[paper]' if f.get('paper') else '[live]'}"
                                        for i, f in enumerate(_fills[1:], 1)))
-                # FC trigger price (cross mode, post-DCA)
-                _fc_px_dbg = _s.get("fc_trigger_px")
-                if _fc_px_dbg:
-                    _push(f"    fc_trigger_px={_fc_px_dbg} "
-                          f"(OKX algo set to this after DCA fills)")
-
     # ── Active Watchlist ──────────────────────────────────────────────────────
     _hdr("WATCHLIST")
     try:
