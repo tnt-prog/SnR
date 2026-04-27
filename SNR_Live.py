@@ -5762,7 +5762,7 @@ with st.sidebar:
 # ─────────────────────────────────────────────────────────────────────────────
 # MAIN AREA
 # ─────────────────────────────────────────────────────────────────────────────
-_CODE_UPDATED = "27 Apr 2026  14:30 GST"
+_CODE_UPDATED = "27 Apr 2026  15:10 GST"
 st.title(f"S&R — Crypto Intelligent Portal   ·   🕐 {_CODE_UPDATED}")
 
 # ── Total Realized PnL computation ─────────────────────────────────────────────
@@ -6378,6 +6378,7 @@ def _build_signal_row(s: dict, is_open_table: bool = False,
         "tp_hit":      "✅ TP Hit",
         "sl_hit":      "❌ SL Hit",
         "dca_sl_hit":  "❌ DCA SL Hit",
+        "fc_hit":      "🟣 FC Hit",
         "queue_limit": "⏳ Queue Limit",
         "closed_okx":  "🟠 Closed on OKX",
     }.get(status, status)
@@ -6403,9 +6404,9 @@ def _build_signal_row(s: dict, is_open_table: bool = False,
             if _dl and _tl:   alert_col = "🔴 DL / TL"
             elif _dl:          alert_col = "🔴 DL"
             elif _tl:          alert_col = "🔴 TL"
-    elif status in ("tp_hit", "sl_hit", "dca_sl_hit") and _dca_count_row > 0:
-        # Preserve the DCA-N tag on closed DCA trades so TP Hit / DCA SL Hit
-        # tables show it clearly.
+    elif status in ("tp_hit", "sl_hit", "dca_sl_hit", "fc_hit") and _dca_count_row > 0:
+        # Preserve the DCA-N tag on closed DCA trades so TP Hit / DCA SL Hit /
+        # FC Hit tables show it clearly.
         alert_col = f"DCA-{_dca_count_row}"
 
     # Current Status column — signed % change from entry for EVERY open trade
@@ -6471,7 +6472,7 @@ def _build_signal_row(s: dict, is_open_table: bool = False,
     #   • sl_hit  → sig["close_price"] (= SL level — realized loss)
     #   • queue   → "—" (no trade was ever opened)
     pnl_col = "—"
-    if status in ("open", "tp_hit", "sl_hit", "dca_sl_hit"):
+    if status in ("open", "tp_hit", "sl_hit", "dca_sl_hit", "fc_hit"):
         if status == "open":
             _ref_pnl = s.get("latest_price")
             if _ref_pnl is None:
@@ -6488,12 +6489,48 @@ def _build_signal_row(s: dict, is_open_table: bool = False,
                     except (TypeError, ValueError):
                         _ref_pnl = None
         else:
-            # tp_hit / sl_hit / dca_sl_hit — close_price is the realized exit
+            # tp_hit / sl_hit / dca_sl_hit / fc_hit — close_price is the realized exit
             _ref_pnl = s.get("close_price")
         # Use the shared helper — single source of truth for PnL math.
         _pnl_val = _calc_pnl_usd(s, _ref_pnl, _cfg_usdt_fallback, _cfg_lev_fallback)
         if _pnl_val is not None:
             pnl_col = f"{_pnl_val:+.2f} $"
+
+    # ── Exit % column (TP Hit / SL Hit / DCA SL Hit / FC Hit) ─────────────────
+    # Signed percentage of close_price vs the effective entry (blended avg for
+    # DCA trades, original entry otherwise).
+    #   Positive = closed above entry (TP or FC)  Negative = closed below (SL)
+    exit_pct_col = "—"
+    if status in ("tp_hit", "sl_hit", "dca_sl_hit", "fc_hit"):
+        try:
+            _close_ep  = float(s.get("close_price", 0) or 0)
+            _ref_ep    = float(s.get("avg_entry", 0) or 0) if _dca_count_row > 0 \
+                         else float(s.get("signal_entry", s.get("entry", 0)) or 0)
+            if _close_ep > 0 and _ref_ep > 0:
+                _ep_pct = (_close_ep - _ref_ep) / _ref_ep * 100.0
+                exit_pct_col = f"{_ep_pct:+.2f}%"
+        except (TypeError, ValueError):
+            exit_pct_col = "—"
+
+    # ── FC Trigger Price column ───────────────────────────────────────────────
+    # Displayed in Open Signals (so user can see the FC close target while live)
+    # and in FC Hit (showing what price actually closed the trade).
+    # For non-FC, non-open signals this column is "—".
+    _fc_px_raw  = s.get("fc_trigger_px")
+    fc_trig_col = "—"
+    if _fc_px_raw:
+        try:
+            _fcp = float(_fc_px_raw)
+            if _fcp > 0:
+                fc_trig_col = _fmt_px_auto(_fcp)
+                # For FC Hit, also annotate the delta above avg_entry
+                if status == "fc_hit":
+                    _avg_fc_disp = float(s.get("avg_entry", 0) or 0)
+                    if _avg_fc_disp > 0:
+                        _fc_delta = (_fcp - _avg_fc_disp) / _avg_fc_disp * 100.0
+                        fc_trig_col += f"  (+{_fc_delta:.3f}%)"
+        except (TypeError, ValueError):
+            fc_trig_col = "—"
 
     ts_str    = fmt_dubai(s.get("timestamp", ""))
     close_str = fmt_dubai(s["close_time"]) if s.get("close_time") else "—"
@@ -6860,83 +6897,92 @@ def _build_signal_row(s: dict, is_open_table: bool = False,
         # TP Hit / SL Hit / DCA SL Hit / Queue Limit tables use the non-Open
         # branch below.
         row: dict = {
-            "Difficulty":      diff_col,
-            "Time (GST)":      ts_str,
-            "Symbol":          s.get("symbol", ""),
-            "Alert":           alert_col,
-            "Setup":           setup_type,
-            "PnL $":           pnl_col,
-            "Margin Mode":     _mm_val,
-            "Current Status":  current_status_col,
-            "Signal Entry":    _sig_entry_display,
-            "Original Entry":  _orig_entry_display,
-            "Current Price":   current_price_col,
-            "DCA Levels":      dca_levels_col,
-            "Next DCA":        next_dca_col,
-            "TP":              s.get("tp", ""),
-            "SL":              s.get("sl", ""),
-            "Trade History":   trade_history_col,
-            "Est Liquidity":   est_liq_col,
-            "Duration":        duration_str,
-            "TP $":            tp_usd_str,
-            "SL $":            sl_usd_str,
-            "Status":          status_icon,
-            "Close Time":      close_str,
-            "Sector":          s.get("sector", "Other"),
-            "Close $":         s.get("close_price") or "—",
-            "Max Lev":         f"{max_lev}×",
-            "Order":           ord_status_str,
-            "OKX Command":     okx_cmd_str,
-            "Entry Criteria":  crit_str,
-            "Order ID":        ord_id_str,
-            "Algo ID":         algo_id_str,
-            "⚠️ SL Reason":   sl_reason,
-            "Order Size":      order_size_col,
+            "Difficulty":        diff_col,
+            "Time (GST)":        ts_str,
+            "Symbol":            s.get("symbol", ""),
+            "Alert":             alert_col,
+            "Setup":             setup_type,
+            "PnL $":             pnl_col,
+            "Margin Mode":       _mm_val,
+            "Current Status":    current_status_col,
+            "Signal Entry":      _sig_entry_display,
+            "Original Entry":    _orig_entry_display,
+            "Current Price":     current_price_col,
+            "DCA Levels":        dca_levels_col,
+            "Next DCA":          next_dca_col,
+            "FC Trigger Price":  fc_trig_col,
+            "TP":                s.get("tp", ""),
+            "SL":                s.get("sl", ""),
+            "Trade History":     trade_history_col,
+            "Est Liquidity":     est_liq_col,
+            "Duration":          duration_str,
+            "TP $":              tp_usd_str,
+            "SL $":              sl_usd_str,
+            "Status":            status_icon,
+            "Close Time":        close_str,
+            "Sector":            s.get("sector", "Other"),
+            "Close $":           s.get("close_price") or "—",
+            "Max Lev":           f"{max_lev}×",
+            "Order":             ord_status_str,
+            "OKX Command":       okx_cmd_str,
+            "Entry Criteria":    crit_str,
+            "Order ID":          ord_id_str,
+            "Algo ID":           algo_id_str,
+            "⚠️ SL Reason":     sl_reason,
+            "Order Size":        order_size_col,
         }
         return row
 
-    # ── Non-Open tables (TP Hit, SL Hit, Queue Limit) — unchanged ordering ──
-    # Optional columns (inserted via the flags):
-    #   • "Margin Mode"  → right after Setup — only when show_pnl=True
-    #                       (TP Hit and SL Hit tables set show_pnl=True;
-    #                        Queue Limit table leaves it False, since queued
-    #                        signals never actually placed a trade.)
-    #   • "PnL $"        → right after Sector — only when show_pnl=True
+    # ── Non-Open tables (TP Hit, SL Hit, FC Hit, Queue Limit) ───────────────
+    # FC Hit gets a tailored column set:
+    #   • FC Trigger Price column added (the price that actually closed the trade)
+    #   • TP $ renamed to "Max TP $" (planned TP never reached — label clarifies)
+    #   • SL $ removed (trade wasn't stopped out)
+    #   • ⚠️ SL Reason removed (not applicable)
+    #   • Exit % added (actual close % above avg entry)
+    #   • Difficulty added (post-trade insight)
+    _is_fc = (status == "fc_hit")
     row = {
         "Time (GST)":     ts_str,
         "Alert":          alert_col,
     }
-    row["Symbol"] = s.get("symbol", "")
-    row["Setup"]  = setup_type
+    row["Symbol"]     = s.get("symbol", "")
+    row["Difficulty"] = diff_col
+    row["Setup"]      = setup_type
     if show_pnl:
         row["Margin Mode"] = _mm_val
     row["Sector"] = s.get("sector", "Other")
     if show_pnl:
         row["PnL $"] = pnl_col
+    if show_pnl:
+        row["Exit %"] = exit_pct_col
     row.update({
-        "DCA Levels":     dca_levels_col,
-        "Signal Entry":   _sig_entry_display,
-        "Original Entry": _orig_entry_display,
-        "Fill $":         s.get("entry", "") if s.get("signal_entry") else "—",
-        "TP":             s.get("tp", ""),
-        "TP $":           tp_usd_str,
-        "SL":             s.get("sl", ""),
-        "SL $":           sl_usd_str,
-        "Trade History":  trade_history_col,
-        "Status":         status_icon,
-        "Duration":       duration_str,
-        "Close Time":     close_str,
-        "Close $":        s.get("close_price") or "—",
-        "Max Lev":        f"{max_lev}×",
-        "Order":          ord_status_str,
-        "OKX Command":    okx_cmd_str,
-        "Order ID":       ord_id_str,
-        "Algo ID":        algo_id_str,
-        "Entry Criteria": crit_str,
-        "⚠️ SL Reason":  sl_reason,
+        "DCA Levels":        dca_levels_col,
+        "Signal Entry":      _sig_entry_display,
+        "Original Entry":    _orig_entry_display,
+        "Fill $":            s.get("entry", "") if s.get("signal_entry") else "—",
+        "TP":                s.get("tp", ""),
+        "Max TP $" if _is_fc else "TP $": tp_usd_str,
+        "Trade History":     trade_history_col,
+        "Status":            status_icon,
+        "Duration":          duration_str,
+        "Close Time":        close_str,
+        "Close $":           s.get("close_price") or "—",
+        "Max Lev":           f"{max_lev}×",
+        "Order":             ord_status_str,
+        "OKX Command":       okx_cmd_str,
+        "Order ID":          ord_id_str,
+        "Algo ID":           algo_id_str,
+        "Entry Criteria":    crit_str,
     })
-    # For TP Hit / SL Hit / DCA SL Hit, surface the cumulative Order Size so
-    # DCA-exhausted closures show the full committed notional.
+    # FC Hit: show FC Trigger Price; include SL/SL$/SL Reason for all others
+    if _is_fc:
+        row["FC Trigger Price"] = fc_trig_col
+    else:
+        row["SL"]             = s.get("sl", "")
+        row["SL $"]           = sl_usd_str
+        row["⚠️ SL Reason"]  = sl_reason
+    # Order Size for trades that had real positions (TP/SL/FC/DCA SL)
     if show_pnl:
         row["Order Size"] = order_size_col
     return row
@@ -7073,7 +7119,34 @@ _SIG_COL_CFG = {
                                "Shown only when DCA is enabled on the trade "
                                "and ladder slots remain (dca_count < dca_max). "
                                "Otherwise \"—\"."),
-    "Fill $":         st.column_config.NumberColumn(format="%.8f",
+    "FC Trigger Price": st.column_config.TextColumn(
+                          "🟣 FC Trigger", width="medium",
+                          help="Force-Close trigger price set on OKX after a DCA fill.\n\n"
+                               "Formula: avg_entry + ($0.50 / total_contracts / ct_val)\n\n"
+                               "This is the price at which the OKX conditional algo will close "
+                               "the position, locking in at least +$0.50 above breakeven.\n\n"
+                               "In Open Signals: shows the live target (update each DCA).\n"
+                               "In FC Hit: shows the price that triggered the close, with "
+                               "the % above avg entry in parentheses.\n\n"
+                               "Shows '—' for non-DCA trades and isolated-mode trades."),
+    "Exit %":           st.column_config.TextColumn(
+                          "📊 Exit %", width="small",
+                          help="Signed % of close_price vs effective entry price.\n\n"
+                               "  • Positive → closed above entry (TP or FC hit)\n"
+                               "  • Negative → closed below entry (SL hit)\n\n"
+                               "Entry reference:\n"
+                               "  • DCA trades  → blended avg_entry (reflects actual cost)\n"
+                               "  • Non-DCA     → signal_entry (actual market fill)\n\n"
+                               "Useful for spotting consistent TP distance vs SL distance "
+                               "across your trade history."),
+    "Max TP $":         st.column_config.TextColumn(
+                          "🎯 Max TP $", width="small",
+                          help="Dollar gain that WOULD have been realized at the planned TP "
+                               "price — this target was NOT reached (the trade was closed "
+                               "earlier by the FC mechanism).\n\n"
+                               "Compare this against PnL $ to see how much of the planned "
+                               "gain was captured by the FC close vs what was left on the table."),
+    "Fill $":           st.column_config.NumberColumn(format="%.8f",
                           help="Actual market fill price (may differ from signal entry)"),
     "Trade History":  st.column_config.TextColumn(
                           "📜 Trade History", width="large",
