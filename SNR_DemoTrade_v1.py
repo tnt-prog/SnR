@@ -1339,15 +1339,17 @@ def place_okx_order(sig: dict, cfg: dict) -> dict:
         # ── Isolated: OCO (TP + SL) ───────────────────────────────────────────
         # In hedge mode, closing a long requires posSide="long" on the sell too.
         algo_body: dict = {
-            "instId":       _to_okx(sym),
-            "tdMode":       mode,
-            "side":         "sell",
-            "ordType":      "oco",
-            "sz":           str(contracts),
-            "tpTriggerPx":  str(actual_tp),
-            "tpOrdPx":      "-1",    # market fill when TP triggers
-            "slTriggerPx":  str(actual_sl),
-            "slOrdPx":      "-1",    # market fill when SL triggers
+            "instId":          _to_okx(sym),
+            "tdMode":          mode,
+            "side":            "sell",
+            "ordType":         "oco",
+            "sz":              str(contracts),
+            "tpTriggerPx":     str(actual_tp),
+            "tpTriggerPxType": "mark",
+            "tpOrdPx":         "-1",    # market fill when TP triggers
+            "slTriggerPx":     str(actual_sl),
+            "slTriggerPxType": "mark",
+            "slOrdPx":         "-1",    # market fill when SL triggers
         }
         if is_hedge:
             algo_body["posSide"] = "long"    # closing a long in hedge mode
@@ -3058,15 +3060,17 @@ def _place_dca_oco_algo(sig: dict, cfg: dict, new_tp: float,
                 cfg.get("trade_margin_mode", "isolated")).strip().lower()
         is_hedge = bool(sig.get("order_is_hedge", False))
         algo_body: dict = {
-            "instId":      _to_okx(sym),
-            "tdMode":      mode,
-            "side":        "sell",
-            "ordType":     "oco",
-            "sz":          str(int(total_contracts)),
-            "tpTriggerPx": str(_pround(new_tp)),
-            "tpOrdPx":     "-1",
-            "slTriggerPx": str(_pround(new_sl)),
-            "slOrdPx":     "-1",
+            "instId":          _to_okx(sym),
+            "tdMode":          mode,
+            "side":            "sell",
+            "ordType":         "oco",
+            "sz":              str(int(total_contracts)),
+            "tpTriggerPx":     str(_pround(new_tp)),
+            "tpTriggerPxType": "mark",
+            "tpOrdPx":         "-1",
+            "slTriggerPx":     str(_pround(new_sl)),
+            "slTriggerPxType": "mark",
+            "slOrdPx":         "-1",
         }
         if is_hedge:
             algo_body["posSide"] = "long"
@@ -3102,13 +3106,15 @@ def _place_tp_only_order(sig: dict, cfg: dict,
                     cfg.get("trade_margin_mode", "isolated")).strip().lower()
         is_hedge = bool(sig.get("order_is_hedge", False))
         algo_body: dict = {
-            "instId":      _to_okx(sym),
-            "tdMode":      mode,
-            "side":        "sell",
-            "ordType":     "conditional",
-            "sz":          str(int(max(1, total_contracts))),
-            "tpTriggerPx": str(_pround(tp_price)),
-            "tpOrdPx":     "-1",   # market fill when TP triggers
+            "instId":         _to_okx(sym),
+            "tdMode":         mode,
+            "side":           "sell",
+            "ordType":        "conditional",
+            "sz":             str(int(max(1, total_contracts))),
+            "tpTriggerPx":    str(_pround(tp_price)),
+            "tpTriggerPxType": "mark",   # use mark price — more reliable than
+                                         # last price for low-liquidity tokens
+            "tpOrdPx":        "-1",      # market fill when TP triggers
         }
         if is_hedge:
             algo_body["posSide"] = "long"
