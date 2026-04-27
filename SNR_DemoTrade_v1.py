@@ -3358,38 +3358,69 @@ def _execute_dca_fill(sig: dict, cfg: dict) -> bool:
     """
     sym = sig.get("symbol", "?")
     try:
-        # ── Change 3: verify OKX still holds an open position before adding.
-        # If the position was closed externally (manual close, OCO triggered)
-        # skip the DCA, mark the signal closed, and log clearly.
-        try:
-            _pos_chk = _trade_get("/api/v5/account/positions",
-                                  {"instType": "SWAP", "instId": _to_okx(sym)},
-                                  cfg)
-            if _pos_chk.get("code") == "0":
-                _live_pos = [p for p in _pos_chk.get("data", [])
-                             if float(p.get("pos", 0) or 0) != 0]
-                if not _live_pos:
-                    _append_error(
-                        "trade",
-                        f"DCA aborted for {sym} — no open OKX position found. "
-                        f"Position may have been closed externally (manual close "
-                        f"or OCO hit). Marking signal as closed.",
-                        symbol=sym,
-                        endpoint="/api/v5/account/positions",
-                    )
-                    sig["status"]      = "sl_hit"
-                    sig["close_price"] = float(sig.get("latest_price") or
-                                               sig.get("avg_entry") or
-                                               sig.get("entry") or 0)
-                    sig["close_time"]  = dubai_now().isoformat()
-                    sig.pop("_dca_pending", None)
-                    return False
-        except Exception as _pos_exc:
-            # Position check failed — proceed with DCA rather than blocking.
-            _append_error("trade",
-                          f"DCA position pre-check failed for {sym}: {_pos_exc} "
-                          f"— proceeding with DCA anyway.",
-                          symbol=sym, endpoint="/api/v5/account/positions")
+        # ── Position pre-check: verify OKX still holds an open position before
+        # adding margin.  If the position was closed externally (manual close,
+        # OCO triggered) skip the DCA, mark the signal closed, and log clearly.
+        #
+        # Grace-period guard: skip the check entirely for the first 90 seconds
+        # after the entry timestamp.  OKX's position API can take several seconds
+        # to reflect a freshly filled market order, so firing the check too soon
+        # after entry produces a false "no position" result and incorrectly closes
+        # the signal as sl_hit (race condition observed on ACTUSDT 27-Apr-2026).
+        _entry_ts_str = sig.get("timestamp", "")
+        _now_utc      = dubai_now()
+        _age_secs     = 9999  # default: assume old enough to check
+        if _entry_ts_str:
+            try:
+                _entry_dt = datetime.fromisoformat(
+                    _entry_ts_str.replace("Z", "+00:00"))
+                _age_secs = (_now_utc - _entry_dt).total_seconds()
+            except Exception:
+                pass
+
+        _GRACE_SECS = 90   # configurable constant — do not check within 90 s of entry
+
+        if _age_secs < _GRACE_SECS:
+            # Too soon after entry — skip position check, proceed with DCA.
+            _append_error(
+                "trade",
+                f"DCA position pre-check skipped for {sym} — signal is only "
+                f"{int(_age_secs)}s old (grace period = {_GRACE_SECS}s). "
+                f"OKX may not have confirmed the position yet.",
+                symbol=sym,
+                endpoint="grace_period_skip",
+            )
+        else:
+            try:
+                _pos_chk = _trade_get("/api/v5/account/positions",
+                                      {"instType": "SWAP", "instId": _to_okx(sym)},
+                                      cfg)
+                if _pos_chk.get("code") == "0":
+                    _live_pos = [p for p in _pos_chk.get("data", [])
+                                 if float(p.get("pos", 0) or 0) != 0]
+                    if not _live_pos:
+                        _append_error(
+                            "trade",
+                            f"DCA aborted for {sym} — no open OKX position found "
+                            f"(signal age {int(_age_secs)}s, past grace period). "
+                            f"Position may have been closed externally (manual "
+                            f"close or OCO hit). Marking signal as closed.",
+                            symbol=sym,
+                            endpoint="/api/v5/account/positions",
+                        )
+                        sig["status"]      = "sl_hit"
+                        sig["close_price"] = float(sig.get("latest_price") or
+                                                   sig.get("avg_entry") or
+                                                   sig.get("entry") or 0)
+                        sig["close_time"]  = dubai_now().isoformat()
+                        sig.pop("_dca_pending", None)
+                        return False
+            except Exception as _pos_exc:
+                # Position check failed — proceed with DCA rather than blocking.
+                _append_error("trade",
+                              f"DCA position pre-check failed for {sym}: {_pos_exc} "
+                              f"— proceeding with DCA anyway.",
+                              symbol=sym, endpoint="/api/v5/account/positions")
 
         dca_usdt = _dca_next_usdt(sig)
         if dca_usdt <= 0:
@@ -5782,7 +5813,7 @@ with st.sidebar:
 # ─────────────────────────────────────────────────────────────────────────────
 # MAIN AREA
 # ─────────────────────────────────────────────────────────────────────────────
-_CODE_UPDATED = "27 Apr 2026  19:00 GST"
+_CODE_UPDATED = "27 Apr 2026  22:45 GST"
 st.title(f"S&R — Crypto Intelligent Portal   ·   🕐 {_CODE_UPDATED}")
 
 # ── Total Realized PnL computation ─────────────────────────────────────────────
