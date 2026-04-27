@@ -848,8 +848,13 @@ def get_symbols(watchlist: list) -> tuple:
             sym = _from_okx(inst_id)
             active.add(sym)
             try:
-                _cv = float(s.get("ctVal") or 0)
-                ct_vals[sym] = _cv if _cv > 0 else 0.0
+                _cv   = float(s.get("ctVal")  or 0)
+                _cmul = float(s.get("ctMult") or 1)
+                # Effective contract value = ctVal × ctMult (OKX uses ctMult
+                # as a multiplier for some tokens, e.g. LIT has ctVal=1,
+                # ctMult=10 → effective 10 LIT per contract).
+                _eff = _cv * _cmul if _cv > 0 else 0.0
+                ct_vals[sym] = _eff
                 # Store 0 on parse failure so _get_ct_val treats it as a cache
                 # miss and forces a re-fetch rather than silently using 1.0.
             except (TypeError, ValueError):
@@ -1047,14 +1052,18 @@ def _get_ct_val(sym: str) -> float:
         data = safe_get(f"{BASE}/api/v5/public/instruments",
                         {"instType": "SWAP", "instId": _to_okx(sym)})
         for s in data.get("data", []):
-            raw = s.get("ctVal", "")
-            val = float(raw) if raw not in ("", None) else 0.0
-            if val > 0:
-                _b._bsc_symbol_cache.setdefault("ct_val", {})[sym] = val
+            raw   = s.get("ctVal", "")
+            rmul  = s.get("ctMult", "")
+            val   = float(raw)  if raw  not in ("", None) else 0.0
+            cmul  = float(rmul) if rmul not in ("", None) else 1.0
+            # Effective ctVal = ctVal × ctMult (e.g. LIT: 1 × 10 = 10)
+            eff = val * cmul if val > 0 else 0.0
+            if eff > 0:
+                _b._bsc_symbol_cache.setdefault("ct_val", {})[sym] = eff
                 _append_error("info",
-                    f"ctVal for {_to_okx(sym)} fetched on-demand: {val} "
-                    f"(cache was cold — populated now)")
-                return val
+                    f"ctVal for {_to_okx(sym)} fetched on-demand: {eff} "
+                    f"(ctVal={val} × ctMult={cmul}) — cache populated now")
+                return eff
     except Exception as _e:
         raise ValueError(
             f"ctVal for {_to_okx(sym)} could not be fetched from OKX "
