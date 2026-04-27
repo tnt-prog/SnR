@@ -188,6 +188,17 @@ DEFAULT_CONFIG: dict = {
     # retroactively change already-open trades.
     "dca_iso_distance_pct":  80.0,   # 10–95 (step 5), isolated
     "dca_cross_drop_pct":    7.0,    # 0.1–50, cross
+    # ── Fixed Dollar TP/SL after any DCA fires ────────────────────────────────
+    # After any DCA fill the TP and SL switch to fixed dollar targets so the
+    # profit goal and maximum loss are always expressed in USDT, not as a % of
+    # an ever-changing blended average.
+    # TP price = avg_entry + (dca_tp_usd  / total_coins_held)
+    # SL price = avg_entry − (dca_sl_usd  / total_coins_held)
+    # The SL replaces the percentage-based SL entirely for DCA trades.
+    # Priority: fixed dollar SL beats the next DCA trigger — the bot will never
+    # add more margin into a position that has already hit its loss limit.
+    "dca_tp_usd":            0.50,   # Fixed $ profit target after any DCA
+    "dca_sl_usd":            5.00,   # Fixed $ max loss   after any DCA (replaces % SL)
     # ── Open-Trade Watcher loop (1-minute DCA/TP checker) ─────────────────────
     # When > 0 AND < loop_minutes: a dedicated background thread runs every
     # `watcher_minutes` minutes, fetching 1m candles for each open trade and
@@ -1109,7 +1120,7 @@ def _okx_log_entry(sig: dict, label: str, **fields) -> None:
 
     Each entry is a single line: "[MM/DD HH:MM:SS] LABEL | key: val | ..."
     Entries are stored in sig["okx_log"] (a list[str]) and joined with
-    "\\n######\\n" when rendered in the OKX Command column.
+    "\\n########\\n" when rendered in the OKX Command column.
     """
     ts    = dubai_now().strftime("%m/%d %H:%M:%S")
     parts = [f"[{ts}] {label}"]
@@ -3255,64 +3266,34 @@ def _execute_dca_fill_paper(sig: dict, cfg: dict) -> bool:
         sig["total_notional"] = total_notional
         sig["dca_count"]      = next_idx
 
-        # Recompute TP from sidebar tp_pct and new blended avg
-        tp_pct = float(cfg.get("tp_pct", 1.5)) / 100.0
-        sig["tp"] = _pround(sig["avg_entry"] * (1.0 + tp_pct))
-
-        # Post-DCA SL recompute — single unified rule for ALL DCAs including
-        # the final one: sl = avg_entry × (1 − sl_distance_pct).
-        #
-        # sl_distance_pct is snapshotted at entry time:
-        #   • Isolated → 1 / leverage  (e.g. 20× = 0.05)
-        #   • Cross    → sl_pct / 100  (sidebar value)
-        #
-        # Using the same formula throughout ensures the SL always moves
-        # FURTHER from price as the blended average is pulled down by each
-        # DCA fill. The previous hardcoded −3% floor was replaced because it
-        # produced a HIGHER (tighter) SL than the normal formula for any
-        # isolated-mode trade below 33× leverage, causing the SL to jump
-        # upward after the final DCA — the opposite of intended behaviour.
-        #
-        # When the ladder is fully exhausted, final_sl_price is also set to
-        # the same value so breaches route to the DCA SL Hit table correctly.
-        # The NEXT-DCA-TRIGGER price lives in sig["next_dca_px"].
-        dca_max  = int(sig.get("dca_max", 0) or 0)
-        _mode_paper = (sig.get("order_margin_mode") or "isolated").strip().lower()
-
-        # ── SL distance for post-DCA recompute ───────────────────────────────
-        # Cross paper mode: when the full ladder is exhausted, the final SL is
-        # set at -dca_cross_drop_pct% below the final blended average (mirrors
-        # the gap used for DCA triggers so the SL is intuitive). While the
-        # ladder still has slots, no SL is applied (open field stays for display
-        # only — the watcher ignores it in the _ladder_slots_left branch).
-        # Isolated mode: unchanged — sl_distance_pct = 1/leverage.
-        _sl_dist = float(sig.get("sl_distance_pct", 0.0) or 0.0)
-        if _sl_dist <= 0:
-            _f0 = (sig.get("dca_fills") or [{}])[0]
-            _p0 = float(_f0.get("price", 0) or 0)
-            _s0 = float(_f0.get("sl", 0) or 0)
-            if _p0 > 0 and 0 < _s0 < _p0:
-                _sl_dist = (_p0 - _s0) / _p0
-            else:
-                _sl_dist = float(cfg.get("sl_pct", 3.0) or 3.0) / 100.0
-
-        ladder_exhausted = (sig.get("dca_count", 0) >= dca_max)
-        if _mode_paper == "cross" and ladder_exhausted:
-            # Final SL for cross paper mode: -cross_drop_pct% below blended avg
-            _cross_drop_p = float(sig.get("dca_cross_drop_pct",
-                                          cfg.get("dca_cross_drop_pct", 7.0)) or 7.0)
-            new_sl = _pround(sig["avg_entry"] * (1.0 - _cross_drop_p / 100.0))
+        # ── Fixed dollar TP/SL after any DCA (paper path) ───────────────────
+        # TP = avg + ($dca_tp_usd / total_coins)
+        # SL = avg − ($dca_sl_usd / total_coins)
+        # Replaces the legacy percentage-based formulas entirely for DCA trades.
+        _dca_tp_usd_p = float(cfg.get("dca_tp_usd", 0.50) or 0.50)
+        _dca_sl_usd_p = float(cfg.get("dca_sl_usd", 5.00) or 5.00)
+        _avg_p        = float(sig["avg_entry"])
+        _tot_not_p    = float(sig.get("total_notional", 0) or 0)
+        if _avg_p > 0 and _tot_not_p > 0:
+            _total_coins_p = _tot_not_p / _avg_p
+            new_tp = _pround(_avg_p + _dca_tp_usd_p / _total_coins_p)
+            new_sl = _pround(_avg_p - _dca_sl_usd_p / _total_coins_p)
         else:
-            new_sl = _pround(sig["avg_entry"] * (1.0 - _sl_dist))
-        sig["sl"] = new_sl
+            # Fallback to percentage if avg or notional unavailable
+            _tp_pct_fb = float(cfg.get("tp_pct", 1.5)) / 100.0
+            _sl_d_fb   = float(sig.get("sl_distance_pct",
+                                        cfg.get("sl_pct", 3.0) / 100.0) or 0.03)
+            new_tp = _pround(_avg_p * (1.0 + _tp_pct_fb))
+            new_sl = _pround(_avg_p * (1.0 - _sl_d_fb))
+        sig["tp"]            = new_tp
+        sig["sl"]            = new_sl
+        sig["fc_trigger_px"] = new_tp   # paper FC detection uses the same price
 
+        dca_max          = int(sig.get("dca_max", 0) or 0)
+        ladder_exhausted = (sig.get("dca_count", 0) >= dca_max)
         if ladder_exhausted:
-            if _mode_paper == "cross":
-                # Cross paper: activate final SL at -cross_drop_pct%
-                sig["final_sl_price"] = new_sl
-            else:
-                sig["final_sl_price"] = new_sl
-            sig["next_dca_px"] = 0.0
+            sig["final_sl_price"] = new_sl
+            sig["next_dca_px"]    = 0.0
         else:
             sig["final_sl_price"] = None
             try:
@@ -3332,6 +3313,23 @@ def _execute_dca_fill_paper(sig: dict, cfg: dict) -> bool:
         # No order_id / algo_id change — paper trade has no OKX position.
         # Mark display-level status so the UI can reflect the paper fill.
         sig["order_status"] = "paper_filled"
+
+        # ── OKX Command log — paper DCA fill ──────────────────────────────────
+        _okx_log_entry(
+            sig, f"DCA-{next_idx} [PAPER]",
+            instId     = _to_okx(sym),
+            ordType    = "market (simulated)",
+            fill_px    = _pround(fill_px),
+            collateral = f"${dca_usdt:.2f}",
+            avg_entry  = sig.get("avg_entry", ""),
+        )
+        _okx_log_entry(
+            sig, f"DCA-{next_idx} TP/SL [PAPER]",
+            new_tp  = sig.get("tp", ""),
+            new_sl  = sig.get("sl", ""),
+            tp_usd  = f"+${_dca_tp_usd_p:.2f}",
+            sl_usd  = f"-${_dca_sl_usd_p:.2f}",
+        )
 
         sig.pop("_dca_pending", None)
         sig.pop("_dca_trigger_px", None)
@@ -3469,44 +3467,30 @@ def _execute_dca_fill(sig: dict, cfg: dict) -> bool:
         sig["total_notional"] = total_notional
         sig["dca_count"]      = next_idx  # fill 0 is entry; DCA count = fills-1
 
-        # Recompute TP from sidebar tp_pct and new blended avg
-        tp_pct = float(cfg.get("tp_pct", 1.5)) / 100.0
-        new_tp = _pround(sig["avg_entry"] * (1.0 + tp_pct))
-        sig["tp"] = new_tp
+        # ── Fixed dollar TP/SL after any DCA (live path) ────────────────────
+        # TP = avg + ($dca_tp_usd / total_coins)
+        # SL = avg − ($dca_sl_usd / total_coins)
+        # Replaces the legacy percentage-based formulas entirely for DCA trades.
+        _dca_tp_usd_l = float(cfg.get("dca_tp_usd", 0.50) or 0.50)
+        _dca_sl_usd_l = float(cfg.get("dca_sl_usd", 5.00) or 5.00)
+        _avg_l        = float(sig["avg_entry"])
+        if _avg_l > 0 and total_notional > 0:
+            _total_coins_l = total_notional / _avg_l
+            new_tp = _pround(_avg_l + _dca_tp_usd_l / _total_coins_l)
+            new_sl = _pround(_avg_l - _dca_sl_usd_l / _total_coins_l)
+        else:
+            # Fallback to percentage if avg or notional unavailable
+            _tp_pct_fb = float(cfg.get("tp_pct", 1.5)) / 100.0
+            _sl_d_fb   = float(sig.get("sl_distance_pct",
+                                        cfg.get("sl_pct", 3.0) / 100.0) or 0.03)
+            new_tp = _pround(_avg_l * (1.0 + _tp_pct_fb))
+            new_sl = _pround(_avg_l * (1.0 - _sl_d_fb))
+        sig["tp"]            = new_tp
+        sig["sl"]            = new_sl
+        sig["fc_trigger_px"] = new_tp   # keeps FC detection consistent
 
-        # Post-DCA SL recompute — single unified rule for ALL DCAs including
-        # the final one: sl = avg_entry × (1 − sl_distance_pct).
-        #
-        # sl_distance_pct is snapshotted at entry time:
-        #   • Isolated → 1 / leverage  (e.g. 20× = 0.05)
-        #   • Cross    → sl_pct / 100  (sidebar value)
-        #
-        # Using the same formula throughout ensures the SL always moves
-        # FURTHER from price as the blended average is pulled down by each
-        # DCA fill. The previous hardcoded −3% floor was replaced because it
-        # produced a HIGHER (tighter) SL than the normal formula for any
-        # isolated-mode trade below 33× leverage, causing the SL to jump
-        # upward after the final DCA — the opposite of intended behaviour.
-        #
-        # When the ladder is fully exhausted, final_sl_price is also set to
-        # the same value so breaches route to the DCA SL Hit table correctly.
-        # The NEXT-DCA-TRIGGER price lives in sig["next_dca_px"].
-        dca_max  = int(sig.get("dca_max", 0) or 0)
-        _sl_dist = float(sig.get("sl_distance_pct", 0.0) or 0.0)
-        if _sl_dist <= 0:
-            # Legacy fallback: derive from fills[0]
-            _f0 = (sig.get("dca_fills") or [{}])[0]
-            _p0 = float(_f0.get("price", 0) or 0)
-            _s0 = float(_f0.get("sl", 0) or 0)
-            if _p0 > 0 and 0 < _s0 < _p0:
-                _sl_dist = (_p0 - _s0) / _p0
-            else:
-                _sl_dist = float(cfg.get("sl_pct", 3.0) or 3.0) / 100.0
-        new_sl = _pround(sig["avg_entry"] * (1.0 - _sl_dist))
-        sig["sl"] = new_sl
+        dca_max = int(sig.get("dca_max", 0) or 0)
         if sig["dca_count"] >= dca_max:
-            # Ladder fully exhausted — mark final SL so UI routes breach
-            # to DCA SL Hit table; zero out next_dca_px (no more adds).
             sig["final_sl_price"] = new_sl
             sig["next_dca_px"]    = 0.0
         else:
@@ -3560,53 +3544,36 @@ def _execute_dca_fill(sig: dict, cfg: dict) -> bool:
                 reason  = f"replaced after DCA-{next_idx}",
             )
 
-        # ── FC-B: compute the FC trigger price (cross mode only) ─────────────
-        # After any DCA fill, we replace the TP algo with a tighter price that
-        # closes the position as soon as unrealized PnL reaches +$0.50.
-        #   fc_trigger_px = avg_entry + (0.50 / (total_contracts × ct_val))
-        # The original TP is preserved in sig["tp"] for display; the OKX algo
-        # watches fc_trigger_px.  When OKX fires, _okx_sync detects it as
-        # fc_hit by comparing close_price ≤ fc_trigger_px × 1.005.
-        _mode_fill  = (sig.get("order_margin_mode") or "isolated").strip().lower()
-        _ct_val_fc  = float(sig.get("order_ct_val", 0) or 0)
-        _avg_fc     = float(sig.get("avg_entry", 0) or 0)
-        if _mode_fill == "cross" and _ct_val_fc > 0 and total_contracts > 0 and _avg_fc > 0:
-            _fc_raw = _avg_fc + (0.50 / (total_contracts * _ct_val_fc))
-            sig["fc_trigger_px"] = _pround(_fc_raw)
-
-        # Cross mode: TP-only order — uses fc_trigger_px after first DCA.
-        # Isolated mode: full OCO (TP + SL).
-        if _mode_fill == "cross":
-            _tp_target = sig.get("fc_trigger_px") or sig["tp"]
-            new_algo = _place_tp_only_order(sig, cfg, _tp_target, total_contracts)
-            if new_algo:
-                sig["algo_id"]    = new_algo
-                sig["tp_algo_id"] = new_algo
-                _okx_log_entry(
-                    sig, f"FC-B ALGO [{_dca_env_tag}]",
-                    ordType         = "conditional",
-                    tpTriggerPx     = _tp_target,
-                    tpTriggerPxType = "mark",
-                    sz              = f"{total_contracts} contracts",
-                    algoId          = new_algo,
-                    fc_trigger_px   = sig.get("fc_trigger_px", ""),
-                    avg_entry       = sig.get("avg_entry", ""),
-                )
+        # ── Place fresh OCO (TP + SL) at fixed dollar levels ─────────────────
+        # Both cross and isolated mode now use a full OCO so OKX holds BOTH
+        # the fixed dollar TP and the fixed dollar SL simultaneously.
+        # fc_trigger_px is already set to sig["tp"] above, so the existing
+        # OKX-sync / FC-detection path continues to work unchanged.
+        new_algo = _place_dca_oco_algo(sig, cfg, sig["tp"], sig["sl"],
+                                       total_contracts)
+        if new_algo:
+            sig["algo_id"]    = new_algo
+            sig["tp_algo_id"] = new_algo
+            _okx_log_entry(
+                sig, f"DCA OCO ALGO [{_dca_env_tag}]",
+                ordType         = "oco",
+                tpTriggerPx     = sig["tp"],
+                slTriggerPx     = sig["sl"],
+                tpTriggerPxType = "mark",
+                slTriggerPxType = "mark",
+                sz              = f"{total_contracts} contracts",
+                algoId          = new_algo,
+                tp_usd          = f"+${_dca_tp_usd_l:.2f}",
+                sl_usd          = f"-${_dca_sl_usd_l:.2f}",
+            )
         else:
-            new_algo = _place_dca_oco_algo(sig, cfg, sig["tp"], sig["sl"],
-                                           total_contracts)
-            if new_algo:
-                sig["algo_id"] = new_algo
-                _okx_log_entry(
-                    sig, f"DCA OCO ALGO [{_dca_env_tag}]",
-                    ordType         = "oco",
-                    tpTriggerPx     = sig["tp"],
-                    slTriggerPx     = sig["sl"],
-                    tpTriggerPxType = "mark",
-                    slTriggerPxType = "mark",
-                    sz              = f"{total_contracts} contracts",
-                    algoId          = new_algo,
-                )
+            _okx_log_entry(
+                sig, f"DCA OCO ALGO FAILED [{_dca_env_tag}]",
+                tpTriggerPx = sig["tp"],
+                slTriggerPx = sig["sl"],
+                sz          = f"{total_contracts} contracts",
+                error       = "algo placement returned no algoId",
+            )
 
         sig.pop("_dca_pending", None)
         sig.pop("_dca_trigger_px", None)
@@ -3664,35 +3631,52 @@ def _update_one_signal(sig: dict) -> None:
                     ).timestamp() * 1000)
                 except Exception:
                     _last_fill_ts_ms = sig_ts_ms
-            _post_dca = [c for c in post if c["time"] >= _last_fill_ts_ms]
-            tp_time  = None
-            dca_time = None
+            _post_dca  = [c for c in post if c["time"] >= _last_fill_ts_ms]
+            tp_time    = None
+            dca_time   = None
+            sl_time    = None
+            _dca_sl_px = float(sig.get("sl", 0) or 0)   # fixed dollar SL price
             for c in _post_dca:
                 if tp_time is None and c["high"] >= sig["tp"]:
                     tp_time = c["time"]
                 if (dca_time is None and _dca_trigger_price > 0
                         and c["low"] <= _dca_trigger_price):
                     dca_time = c["time"]
-            # ── FC-B: check fc_trigger_px for paper mode ──────────────────────
-            _fc_px_w  = float(sig.get("fc_trigger_px", 0) or 0)
-            fc_time   = None
+                if (sl_time is None and _dca_sl_px > 0
+                        and c["low"] <= _dca_sl_px):
+                    sl_time = c["time"]
+            # ── FC-B: check fc_trigger_px (= fixed dollar TP price) ──────────
+            _fc_px_w = float(sig.get("fc_trigger_px", 0) or 0)
+            fc_time  = None
             if _fc_px_w > 0:
                 for _c in _post_dca:
                     if fc_time is None and _c["high"] >= _fc_px_w:
                         fc_time = _c["time"]
                         break
 
-            # Priority: FC (price-based, fires before TP since fc_px < tp) →
-            #           TP → DCA trigger.
-            # fc_time ≤ tp_time is guaranteed when both fire because fc_px < tp.
-            _fc_wins = (fc_time is not None
+            # Priority: SL (fixed dollar — beats everything, including DCA) →
+            #           FC / TP → DCA trigger.
+            _sl_wins = (sl_time is not None
+                        and (tp_time  is None or sl_time <= tp_time)
+                        and (fc_time  is None or sl_time <= fc_time)
+                        and (dca_time is None or sl_time <= dca_time))
+            _fc_wins = (not _sl_wins
+                        and fc_time is not None
                         and (dca_time is None or fc_time <= dca_time)
-                        and (tp_time is None or fc_time <= tp_time))
-            _tp_wins = (tp_time is not None
+                        and (tp_time  is None or fc_time <= tp_time))
+            _tp_wins = (not _sl_wins
                         and not _fc_wins
+                        and tp_time is not None
                         and (dca_time is None or tp_time <= dca_time))
 
-            if _fc_wins:
+            if _sl_wins:
+                # Fixed dollar SL hit — routes to DCA SL Hit table.
+                sig.update(status="dca_sl_hit", close_price=_dca_sl_px,
+                           close_time=to_dubai(datetime.fromtimestamp(
+                               sl_time/1000, tz=timezone.utc)).isoformat())
+                sig.pop("price_alert", None)
+                sig.pop("_dca_pending", None)
+            elif _fc_wins:
                 sig.update(status="fc_hit", close_price=_fc_px_w,
                            close_time=to_dubai(datetime.fromtimestamp(
                                fc_time/1000, tz=timezone.utc)).isoformat())
@@ -5044,6 +5028,40 @@ with st.sidebar:
             ))
         new_dca_iso_distance_pct = float(_snap_cfg.get("dca_iso_distance_pct", 70.0) or 70.0)
 
+    # ── Fixed dollar TP/SL after DCA ──────────────────────────────────────────
+    _cur_dca_tp_usd = float(_snap_cfg.get("dca_tp_usd", 0.50) or 0.50)
+    new_dca_tp_usd = st.number_input(
+        "DCA TP — Fixed $ profit target",
+        min_value=0.10, max_value=50.0,
+        value=float(max(0.10, min(50.0, _cur_dca_tp_usd))), step=0.10,
+        key="cfg_dca_tp_usd",
+        help=(
+            "After any DCA fill (DCA-1 through max ladder), the TP is set to "
+            "close the position at exactly this dollar profit.\n\n"
+            "Formula: TP price = blended avg + (this value ÷ total coins held)\n\n"
+            "Example: avg $0.0504, $400 notional (7,936 coins) →\n"
+            "  TP = avg + ($0.50 ÷ 7,936) ≈ avg + $0.000063 per coin.\n\n"
+            "Applies to BOTH paper and live modes. Default: $0.50."
+        ))
+    _cur_dca_sl_usd = float(_snap_cfg.get("dca_sl_usd", 5.00) or 5.00)
+    new_dca_sl_usd = st.number_input(
+        "DCA SL — Fixed $ loss limit",
+        min_value=0.50, max_value=500.0,
+        value=float(max(0.50, min(500.0, _cur_dca_sl_usd))), step=0.50,
+        key="cfg_dca_sl_usd",
+        help=(
+            "After any DCA fill, the SL is set to close the position at this "
+            "maximum dollar loss from the blended average. Fully replaces the "
+            "percentage-based SL for DCA trades.\n\n"
+            "Formula: SL price = blended avg − (this value ÷ total coins held)\n\n"
+            "Example: avg $0.0504, $400 notional (7,936 coins) →\n"
+            "  SL = avg − ($5.00 ÷ 7,936) ≈ avg − $0.000630 per coin.\n\n"
+            "Priority: SL hit takes precedence over the next DCA trigger — the "
+            "bot will NOT add more margin into a position whose loss has already "
+            "reached this limit.\n\n"
+            "Applies to BOTH paper and live modes. Default: $5.00."
+        ))
+
     # Notional preview — always shown (even when Auto-Trading is off) so the
     # user can see the effective trade size driven by Size × Leverage.
     notional_usdt = new_trade_usdt * new_trade_lev
@@ -5749,6 +5767,8 @@ with st.sidebar:
             "trade_max_dca":     max(0, min(6, int(new_trade_max_dca))),
             "dca_iso_distance_pct": max(10.0, min(95.0, float(new_dca_iso_distance_pct))),
             "dca_cross_drop_pct":   max(0.1, min(50.0,  float(new_dca_cross_drop_pct))),
+            "dca_tp_usd":           max(0.10, min(50.0,  float(new_dca_tp_usd))),
+            "dca_sl_usd":           max(0.50, min(500.0, float(new_dca_sl_usd))),
         }
         with _config_lock: _b._bsc_cfg.clear(); _b._bsc_cfg.update(new_cfg)
         save_config(new_cfg)
@@ -5762,7 +5782,7 @@ with st.sidebar:
 # ─────────────────────────────────────────────────────────────────────────────
 # MAIN AREA
 # ─────────────────────────────────────────────────────────────────────────────
-_CODE_UPDATED = "27 Apr 2026  15:10 GST"
+_CODE_UPDATED = "27 Apr 2026  19:00 GST"
 st.title(f"S&R — Crypto Intelligent Portal   ·   🕐 {_CODE_UPDATED}")
 
 # ── Total Realized PnL computation ─────────────────────────────────────────────
@@ -6606,7 +6626,7 @@ def _build_signal_row(s: dict, is_open_table: bool = False,
     # the log (no okx_log key or empty list).
     _okx_log_list = s.get("okx_log")
     if isinstance(_okx_log_list, list) and _okx_log_list:
-        okx_cmd_str = "\n######\n".join(_okx_log_list)
+        okx_cmd_str = "\n########\n".join(_okx_log_list)
     else:
         # ── Legacy fallback: reconstruct a single summary line ─────────────
         _ord_sz       = int(s.get("order_sz", 0) or 0)
@@ -8656,6 +8676,17 @@ def _build_diagnostics_text() -> str:
         _kv("margin_mode",              _snap_cfg.get("trade_margin_mode", "isolated"))
     except Exception as _ce:
         _push(f"  <error: {_ce}>")
+
+    # ── DCA Fixed Dollar TP/SL ────────────────────────────────────────────────
+    _hdr("DCA FIXED DOLLAR TP / SL")
+    try:
+        _dca_tp_usd_d = float(_snap_cfg.get("dca_tp_usd", 0.50) or 0.50)
+        _dca_sl_usd_d = float(_snap_cfg.get("dca_sl_usd", 5.00) or 5.00)
+        _kv("dca_tp_usd  (fixed $ profit after DCA)", f"${_dca_tp_usd_d:.2f}")
+        _kv("dca_sl_usd  (fixed $ max loss  after DCA)", f"${_dca_sl_usd_d:.2f}")
+        _kv("note", "SL takes priority over DCA trigger if both fire on same candle")
+    except Exception as _de:
+        _push(f"  <error: {_de}>")
 
     # ── Filter Funnel (last scan) ─────────────────────────────────────────────
     _hdr("FILTER FUNNEL — LAST SCAN")
