@@ -4273,14 +4273,14 @@ def _reconcile_tier1(cfg: dict) -> int:
                               f"sz={_p.get('pos','?')} — no matching bot signal.",
                               endpoint="reconcile_t1_orphan")
 
-        # Record last-run timestamp and action count
-        _b._bsc_reconcile_t1_last     = int(time.time())
-        _b._bsc_reconcile_t1_actions  = getattr(_b, "_bsc_reconcile_t1_actions", 0) + _actions
-
     except Exception as _t1_exc:
         _append_error("watcher", f"Tier-1 reconcile error: {_t1_exc}",
                       endpoint="reconcile_t1")
 
+    # Record last-run timestamp, run count, and action count — always, even on error
+    _b._bsc_reconcile_t1_last    = int(time.time())
+    _b._bsc_reconcile_t1_runs    = getattr(_b, "_bsc_reconcile_t1_runs",    0) + 1
+    _b._bsc_reconcile_t1_actions = getattr(_b, "_bsc_reconcile_t1_actions", 0) + _actions
     return _actions
 
 
@@ -4460,14 +4460,14 @@ def _reconcile_tier2(cfg: dict) -> int:
                               f"[T2-Sync] {_sym} — algo re-place failed: {_repl_exc}",
                               symbol=_sym, endpoint="reconcile_t2")
 
-        # Record last-run timestamp and action count
-        _b._bsc_reconcile_t2_last    = int(time.time())
-        _b._bsc_reconcile_t2_actions = getattr(_b, "_bsc_reconcile_t2_actions", 0) + _actions
-
     except Exception as _t2_exc:
         _append_error("watcher", f"Tier-2 reconcile error: {_t2_exc}",
                       endpoint="reconcile_t2")
 
+    # Record last-run timestamp, run count, and action count — always, even on error
+    _b._bsc_reconcile_t2_last    = int(time.time())
+    _b._bsc_reconcile_t2_runs    = getattr(_b, "_bsc_reconcile_t2_runs",    0) + 1
+    _b._bsc_reconcile_t2_actions = getattr(_b, "_bsc_reconcile_t2_actions", 0) + _actions
     return _actions
 
 
@@ -6458,19 +6458,22 @@ m7.metric("TP Hit ✅",     tp_count)
 m8.metric("SL Hit ❌",     sl_count,      help="Regular SL hits (non-DCA trades, or DCA disabled)")
 m8b.metric("DCA-SL ❌",    dca_sl_count,  help="Ladder-exhausted SL hits — DCA trade closed at final SL (blended avg × (1 − sl_distance_pct)) after max DCAs were consumed")
 m9.metric("⏳ Queued",     queue_count,   help=f"Signals detected while the {_max_open_cap}-trade limit was reached — no order placed, coin rescanned each cycle")
-_sync_total = (getattr(_b, "_bsc_reconcile_t1_actions", 0) +
-               getattr(_b, "_bsc_reconcile_t2_actions", 0))
+_sync_runs    = (getattr(_b, "_bsc_reconcile_t1_runs",    0) +
+                 getattr(_b, "_bsc_reconcile_t2_runs",    0))
+_sync_actions = (getattr(_b, "_bsc_reconcile_t1_actions", 0) +
+                 getattr(_b, "_bsc_reconcile_t2_actions", 0))
 with m_sync:
     st.markdown(
         f"""<div style="background:#0d1117;border:1px solid #21262d;border-radius:8px;
-                        padding:12px 16px 10px 16px;min-height:88px;">
+                        padding:12px 16px 10px 16px;min-height:88px;"
+             title="T1+T2 sync checks run since startup. Corrections made: {_sync_actions}">
             <p style="margin:0 0 4px 0;font-size:0.72rem;font-weight:600;
                       color:#4da6ff;letter-spacing:.05em;line-height:1.2;">
                 🔄 SYNC CHECKS</p>
             <p style="margin:0;font-size:1.9rem;font-weight:700;
-                      color:#4da6ff;line-height:1.1;">{_sync_total}</p>
+                      color:#4da6ff;line-height:1.1;">{_sync_runs}</p>
             <p style="margin:4px 0 0 0;font-size:0.72rem;color:#4da6ff;opacity:.7;">
-                since startup</p>
+                {_sync_actions} fix(es) &nbsp;&middot;&nbsp; since startup</p>
         </div>""",
         unsafe_allow_html=True,
     )
