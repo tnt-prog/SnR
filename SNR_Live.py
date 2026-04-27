@@ -1104,6 +1104,23 @@ def _okx_err(resp: dict) -> str:
             return f"[{s_code}] {detail}"
     return top
 
+def _okx_log_entry(sig: dict, label: str, **fields) -> None:
+    """Append a timestamped OKX command entry to sig['okx_log'].
+
+    Each entry is a single line: "[MM/DD HH:MM:SS] LABEL | key: val | ..."
+    Entries are stored in sig["okx_log"] (a list[str]) and joined with
+    "\\n######\\n" when rendered in the OKX Command column.
+    """
+    ts    = dubai_now().strftime("%m/%d %H:%M:%S")
+    parts = [f"[{ts}] {label}"]
+    for k, v in fields.items():
+        parts.append(f"{k}: {v}")
+    entry = " | ".join(parts)
+    if not isinstance(sig.get("okx_log"), list):
+        sig["okx_log"] = []
+    sig["okx_log"].append(entry)
+
+
 def place_okx_order(sig: dict, cfg: dict) -> dict:
     """
     Place a market LONG order on OKX (demo or live), then immediately place a
@@ -2997,11 +3014,18 @@ def _force_close_position(sig: dict, cfg: dict) -> dict:
                      cfg.get("trade_margin_mode", "isolated")).strip().lower()
         is_hedge  = bool(sig.get("order_is_hedge", False))
 
+        _fc_env_tag = "DEMO" if sig.get("demo_mode") else "LIVE"
+
         # Step 2: Cancel OCO / TP algo ────────────────────────────────────────
         for _aid_key in ("algo_id", "tp_algo_id"):
             _aid = sig.get(_aid_key, "")
             if _aid:
                 _cancel_algo_best_effort(_aid, sym, cfg)
+                _okx_log_entry(
+                    sig, f"ALGO CANCEL [{_fc_env_tag}]",
+                    algoId = _aid,
+                    reason = "force close",
+                )
 
         # Step 3: Market sell ─────────────────────────────────────────────────
         _sell_body: dict = {
@@ -3023,6 +3047,17 @@ def _force_close_position(sig: dict, cfg: dict) -> dict:
             _append_error("trade", f"Force close sell failed for {sym}: {_err}",
                           symbol=sym, endpoint="/api/v5/trade/order")
             return {"success": False, "message": f"Sell order rejected: {_err}"}
+
+        # ── OKX Command log — force close sell ────────────────────────────────
+        _okx_log_entry(
+            sig, f"FORCE CLOSE [{_fc_env_tag}]",
+            instId  = _to_okx(sym),
+            ordType = "market",
+            side    = "sell",
+            tdMode  = mode,
+            sz      = f"{contracts} contracts",
+            ordId   = _sd0.get("ordId", "—"),
+        )
 
         # Step 5: Update log ──────────────────────────────────────────────────
         _close_px = float(sig.get("latest_price") or
@@ -3395,6 +3430,19 @@ def _execute_dca_fill(sig: dict, cfg: dict) -> bool:
         })
         sig["dca_fills"] = fills
 
+        # ── OKX Command log — DCA market order ────────────────────────────────
+        _dca_env_tag = "DEMO" if sig.get("demo_mode") else "LIVE"
+        _okx_log_entry(
+            sig, f"DCA-{next_idx} [{_dca_env_tag}]",
+            instId     = _to_okx(sym),
+            ordType    = "market",
+            tdMode     = (sig.get("order_margin_mode") or "isolated"),
+            sz         = f"{fill_sz} contracts",
+            ordId      = fill_ordid or "—",
+            fill_px    = fill_px,
+            collateral = f"${dca_usdt:.2f}",
+        )
+
         # Recompute blended average as notional-weighted mean of fills.
         # If any fill is missing notional, fall back to equal weighting.
         total_notional = 0.0
@@ -3506,6 +3554,11 @@ def _execute_dca_fill(sig: dict, cfg: dict) -> bool:
         _old_algo = sig.get("algo_id", "") or sig.get("tp_algo_id", "")
         if _old_algo:
             _cancel_algo_best_effort(_old_algo, sym, cfg)
+            _okx_log_entry(
+                sig, f"ALGO CANCEL [{_dca_env_tag}]",
+                algoId  = _old_algo,
+                reason  = f"replaced after DCA-{next_idx}",
+            )
 
         # ── FC-B: compute the FC trigger price (cross mode only) ─────────────
         # After any DCA fill, we replace the TP algo with a tighter price that
@@ -3529,11 +3582,31 @@ def _execute_dca_fill(sig: dict, cfg: dict) -> bool:
             if new_algo:
                 sig["algo_id"]    = new_algo
                 sig["tp_algo_id"] = new_algo
+                _okx_log_entry(
+                    sig, f"FC-B ALGO [{_dca_env_tag}]",
+                    ordType         = "conditional",
+                    tpTriggerPx     = _tp_target,
+                    tpTriggerPxType = "mark",
+                    sz              = f"{total_contracts} contracts",
+                    algoId          = new_algo,
+                    fc_trigger_px   = sig.get("fc_trigger_px", ""),
+                    avg_entry       = sig.get("avg_entry", ""),
+                )
         else:
             new_algo = _place_dca_oco_algo(sig, cfg, sig["tp"], sig["sl"],
                                            total_contracts)
             if new_algo:
                 sig["algo_id"] = new_algo
+                _okx_log_entry(
+                    sig, f"DCA OCO ALGO [{_dca_env_tag}]",
+                    ordType         = "oco",
+                    tpTriggerPx     = sig["tp"],
+                    slTriggerPx     = sig["sl"],
+                    tpTriggerPxType = "mark",
+                    slTriggerPxType = "mark",
+                    sz              = f"{total_contracts} contracts",
+                    algoId          = new_algo,
+                )
 
         sig.pop("_dca_pending", None)
         sig.pop("_dca_trigger_px", None)
@@ -4416,6 +4489,41 @@ def _bg_loop():
                         sig["dca_fills"][0]["sz"] = int(sig["order_sz"])
                     if result.get("tp_algo_id"):
                         sig["tp_algo_id"] = result["tp_algo_id"]
+                    # ── OKX Command log — entry order ──────────────────────────
+                    _env_tag = "DEMO" if sig.get("demo_mode") else "LIVE"
+                    if result.get("status") in ("placed", "partial", "error"):
+                        _okx_log_entry(
+                            sig, f"ENTRY [{_env_tag}]",
+                            instId   = _to_okx(sig.get("symbol", "")),
+                            ordType  = "market",
+                            tdMode   = sig.get("order_margin_mode", ""),
+                            sz       = f"{sig.get('order_sz', 0)} contracts",
+                            ordId    = result.get("ordId", "—"),
+                            entry_px = result.get("actual_entry", sig.get("entry", "")),
+                            status   = result.get("status", ""),
+                        )
+                    # ── OKX Command log — TP/OCO algo ─────────────────────────
+                    _algo_placed = result.get("algoId", "") or result.get("tp_algo_id", "")
+                    if _algo_placed:
+                        _is_cross_log = (sig.get("order_margin_mode", "").strip().lower() == "cross")
+                        if _is_cross_log:
+                            _okx_log_entry(
+                                sig, f"TP ALGO [{_env_tag}]",
+                                ordType  = "conditional",
+                                tpTriggerPx = result.get("actual_tp", sig.get("tp", "")),
+                                tpTriggerPxType = "mark",
+                                algoId   = _algo_placed,
+                            )
+                        else:
+                            _okx_log_entry(
+                                sig, f"OCO ALGO [{_env_tag}]",
+                                ordType  = "oco",
+                                tpTriggerPx = result.get("actual_tp", sig.get("tp", "")),
+                                slTriggerPx = result.get("actual_sl", sig.get("sl", "")),
+                                tpTriggerPxType = "mark",
+                                slTriggerPxType = "mark",
+                                algoId   = _algo_placed,
+                            )
                 with _log_lock:
                     save_log(_b._bsc_log)
             _b._bsc_last_error = ""
@@ -5654,7 +5762,7 @@ with st.sidebar:
 # ─────────────────────────────────────────────────────────────────────────────
 # MAIN AREA
 # ─────────────────────────────────────────────────────────────────────────────
-_CODE_UPDATED = "27 Apr 2026  08:13 GST"
+_CODE_UPDATED = "27 Apr 2026  14:00 GST"
 st.title(f"S&R — Crypto Intelligent Portal   ·   🕐 {_CODE_UPDATED}")
 
 # ── Total Realized PnL computation ─────────────────────────────────────────────
@@ -6455,47 +6563,44 @@ def _build_signal_row(s: dict, is_open_table: bool = False,
     elif ord_status == "error":   ord_status_str = f"❌ {ord_err[:80]}" if ord_err else "❌ Error"
     else:                         ord_status_str = "—"
 
-    # ── OKX Command column — shows exact parameters sent to OKX ──────────────
-    # A real order was placed iff we have an ordId OR order_status indicates
-    # the call reached OKX (placed / partial / error — an explicit rejection
-    # counts because OKX did see the request). Signals without these hallmarks
-    # never actually talked to OKX (auto-trading OFF, creds missing, or the
-    # pre-flight validation in place_okx_order short-circuited); we must not
-    # display a fabricated command string for them.
-    _ord_sz       = int(s.get("order_sz", 0) or 0)
-    _ct_val       = float(s.get("order_ct_val", 0) or 0)
-    _notional     = float(s.get("order_notional", 0) or 0)
-    _is_hedge     = bool(s.get("order_is_hedge", False))
-    _order_id     = (s.get("order_id") or "").strip()
-    _ord_status   = (s.get("order_status") or "").strip()
-    _order_sent   = bool(_order_id) or _ord_status in ("placed", "partial", "error")
-    # Fallback margin mode reflects the CURRENT sidebar setting — this matches
-    # what `place_okx_order` would send RIGHT NOW, and keeps the Margin Mode
-    # column (which uses the same fallback) in sync.
-    _margin_mode  = (s.get("order_margin_mode") or "").strip().lower()
-    if _margin_mode not in ("isolated", "cross"):
-        _margin_mode = (_snap_cfg.get("trade_margin_mode") or "isolated").strip().lower()
-    if not _notional and _usdt > 0 and _lev > 0:
-        _notional = _usdt * _lev   # reconstruct for older signals without stored notional
-    if status == "queue_limit":
-        okx_cmd_str = "No order placed — Queue Limit"
-    elif not _order_sent:
-        # Signal fired but no OKX order was ever placed (auto-trading off,
-        # missing creds, or early-return). Don't manufacture a fake command.
-        okx_cmd_str = "No order placed — auto-trading off or rejected pre-flight"
-    elif _usdt > 0 or _ord_sz > 0:
-        _sym_okx = _to_okx(s.get("symbol", ""))
-        _ps_part = " | posSide: long" if _is_hedge else ""
-        _ct_part = f" | ctVal: {_ct_val}" if _ct_val else ""
-        okx_cmd_str = (
-            f"instId: {_sym_okx} | ordType: market"
-            f" | tdMode: {_margin_mode}{_ps_part}"
-            f" | sz: {_ord_sz} contracts"
-            f" | collateral: ${_usdt:.2f} | lev: {_lev}×"
-            f" | notional: ${_notional:.2f}{_ct_part}"
-        )
+    # ── OKX Command column ────────────────────────────────────────────────────
+    # Prefer the structured okx_log list (appended at every real OKX call).
+    # Fall back to the legacy static string for older signals that pre-date
+    # the log (no okx_log key or empty list).
+    _okx_log_list = s.get("okx_log")
+    if isinstance(_okx_log_list, list) and _okx_log_list:
+        okx_cmd_str = "\n######\n".join(_okx_log_list)
     else:
-        okx_cmd_str = "—"
+        # ── Legacy fallback: reconstruct a single summary line ─────────────
+        _ord_sz       = int(s.get("order_sz", 0) or 0)
+        _ct_val       = float(s.get("order_ct_val", 0) or 0)
+        _notional     = float(s.get("order_notional", 0) or 0)
+        _is_hedge     = bool(s.get("order_is_hedge", False))
+        _order_id     = (s.get("order_id") or "").strip()
+        _ord_status   = (s.get("order_status") or "").strip()
+        _order_sent   = bool(_order_id) or _ord_status in ("placed", "partial", "error")
+        _margin_mode  = (s.get("order_margin_mode") or "").strip().lower()
+        if _margin_mode not in ("isolated", "cross"):
+            _margin_mode = (_snap_cfg.get("trade_margin_mode") or "isolated").strip().lower()
+        if not _notional and _usdt > 0 and _lev > 0:
+            _notional = _usdt * _lev
+        if status == "queue_limit":
+            okx_cmd_str = "No order placed — Queue Limit"
+        elif not _order_sent:
+            okx_cmd_str = "No order placed — auto-trading off or rejected pre-flight"
+        elif _usdt > 0 or _ord_sz > 0:
+            _sym_okx = _to_okx(s.get("symbol", ""))
+            _ps_part = " | posSide: long" if _is_hedge else ""
+            _ct_part = f" | ctVal: {_ct_val}" if _ct_val else ""
+            okx_cmd_str = (
+                f"instId: {_sym_okx} | ordType: market"
+                f" | tdMode: {_margin_mode}{_ps_part}"
+                f" | sz: {_ord_sz} contracts"
+                f" | collateral: ${_usdt:.2f} | lev: {_lev}×"
+                f" | notional: ${_notional:.2f}{_ct_part}"
+            )
+        else:
+            okx_cmd_str = "—"
 
     duration_str = "—"
     if s.get("timestamp"):
