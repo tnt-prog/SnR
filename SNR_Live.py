@@ -7159,7 +7159,9 @@ def _signal_tables_fragment():
         _sel_rows = (_open_event.selection.rows
                      if _open_event and hasattr(_open_event, "selection")
                      else [])
-        if _sel_rows:
+        # Guard: the fragment reruns every 30 s and _open_sigs may shrink
+        # (signals close) while Streamlit still holds the old selection index.
+        if _sel_rows and _sel_rows[0] < len(_open_sigs):
             _fc_sig   = _open_sigs[_sel_rows[0]]
             _fc_sym   = _fc_sig.get("symbol", "?")
             _fc_entry = float(_fc_sig.get("avg_entry") or _fc_sig.get("entry") or 0)
