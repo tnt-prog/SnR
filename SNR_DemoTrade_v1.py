@@ -6434,17 +6434,37 @@ if open_count > _max_open_cap:
 pre_out     = health.get("pre_filtered_out", 0)
 deep_sc     = health.get("deep_scanned",     0)
 
-m1,m2,m3,m4,m5c,m6,m7,m8,m8b,m9 = st.columns(10)
-m1.metric("Cycles",        health.get("total_cycles",0))
-m2.metric("Scan Time",     f"{health.get('last_scan_duration_s',0)}s")
-m3.metric("API Errors",    health.get("total_api_errors",0))
-m4.metric("Pre-filtered ⚡", pre_out, help="Coins removed by bulk ticker pre-filter (saves API calls)")
-m5c.metric("Deep Scanned", deep_sc, help="Coins that passed pre-filter and received full candle analysis")
-m6.metric("Open",          open_count,  help=f"Active open trades (max {_max_open_cap} allowed simultaneously — configurable in sidebar)")
+# ── Row 1: Scanner health ────────────────────────────────────────────────────
+m1, m2, m3, m4, m5c = st.columns(5)
+m1.metric("Cycles",          health.get("total_cycles", 0))
+m2.metric("Scan Time",       f"{health.get('last_scan_duration_s', 0)}s")
+m3.metric("API Errors",      health.get("total_api_errors", 0))
+m4.metric("Pre-filtered ⚡", pre_out,  help="Coins removed by bulk ticker pre-filter (saves API calls)")
+m5c.metric("Deep Scanned",   deep_sc,  help="Coins that passed pre-filter and received full candle analysis")
+
+# ── Row 2: Trade results ──────────────────────────────────────────────────────
+m6, m7, m8, m8b, m9, m_sync = st.columns(6)
+m6.metric("Open",          open_count,    help=f"Active open trades (max {_max_open_cap} allowed simultaneously — configurable in sidebar)")
 m7.metric("TP Hit ✅",     tp_count)
-m8.metric("SL Hit ❌",     sl_count,   help="Regular SL hits (non-DCA trades, or DCA disabled)")
-m8b.metric("DCA-SL ❌",    dca_sl_count, help="Ladder-exhausted SL hits — DCA trade closed at final SL (blended avg × (1 − sl_distance_pct)) after max DCAs were consumed")
-m9.metric("⏳ Queued",     queue_count, help=f"Signals detected while the {_max_open_cap}-trade limit was reached — no order placed, coin rescanned each cycle")
+m8.metric("SL Hit ❌",     sl_count,      help="Regular SL hits (non-DCA trades, or DCA disabled)")
+m8b.metric("DCA-SL ❌",    dca_sl_count,  help="Ladder-exhausted SL hits — DCA trade closed at final SL (blended avg × (1 − sl_distance_pct)) after max DCAs were consumed")
+m9.metric("⏳ Queued",     queue_count,   help=f"Signals detected while the {_max_open_cap}-trade limit was reached — no order placed, coin rescanned each cycle")
+_sync_total = (getattr(_b, "_bsc_reconcile_t1_actions", 0) +
+               getattr(_b, "_bsc_reconcile_t2_actions", 0))
+with m_sync:
+    st.markdown(
+        f"""<div style="background:#0d1117;border:1px solid #21262d;border-radius:8px;
+                        padding:12px 16px 10px 16px;min-height:88px;">
+            <p style="margin:0 0 4px 0;font-size:0.72rem;font-weight:600;
+                      color:#4da6ff;letter-spacing:.05em;line-height:1.2;">
+                🔄 SYNC CHECKS</p>
+            <p style="margin:0;font-size:1.9rem;font-weight:700;
+                      color:#4da6ff;line-height:1.1;">{_sync_total}</p>
+            <p style="margin:4px 0 0 0;font-size:0.72rem;color:#4da6ff;opacity:.7;">
+                since startup</p>
+        </div>""",
+        unsafe_allow_html=True,
+    )
 
 if getattr(_b, "_bsc_last_error", ""):
     st.warning(f"⚠️ {_b._bsc_last_error}")
