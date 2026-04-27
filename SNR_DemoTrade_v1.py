@@ -5813,7 +5813,7 @@ with st.sidebar:
 # ─────────────────────────────────────────────────────────────────────────────
 # MAIN AREA
 # ─────────────────────────────────────────────────────────────────────────────
-_CODE_UPDATED = "27 Apr 2026  22:45 GST"
+_CODE_UPDATED = "27 Apr 2026  23:30 GST"
 st.title(f"S&R — Crypto Intelligent Portal   ·   🕐 {_CODE_UPDATED}")
 
 # ── Total Realized PnL computation ─────────────────────────────────────────────
@@ -8718,6 +8718,102 @@ def _build_diagnostics_text() -> str:
         _kv("note", "SL takes priority over DCA trigger if both fire on same candle")
     except Exception as _de:
         _push(f"  <error: {_de}>")
+
+    # ── Live OKX Positions (real-time API call) ───────────────────────────────
+    _hdr("LIVE OKX POSITIONS (from /api/v5/account/positions)")
+    try:
+        _has_creds = bool(
+            _snap_cfg.get("api_key") and
+            _snap_cfg.get("api_secret") and
+            _snap_cfg.get("api_passphrase")
+        )
+        if not _has_creds:
+            _push("  <skipped — API credentials not configured>")
+        else:
+            _pos_resp = _trade_get(
+                "/api/v5/account/positions",
+                {"instType": "SWAP"},
+                _snap_cfg,
+            )
+            if _pos_resp.get("code") != "0":
+                _push(f"  <OKX API error: code={_pos_resp.get('code')} "
+                      f"msg={_pos_resp.get('msg', '?')}>")
+            else:
+                _pos_data = [p for p in (_pos_resp.get("data") or [])
+                             if float(p.get("pos", 0) or 0) != 0]
+                if not _pos_data:
+                    _push("  (no open swap positions on OKX)")
+                else:
+                    _kv("total_open_positions", len(_pos_data))
+                    _push("")
+                    for _pi, _p in enumerate(_pos_data, 1):
+                        _inst      = _p.get("instId", "?")
+                        _pos_sz    = _p.get("pos", "?")
+                        _avg_px    = _p.get("avgPx", "?")
+                        _upnl      = _p.get("upl", "?")
+                        _upnl_r    = _p.get("uplRatio", "?")
+                        _margin    = _p.get("imr", "?") or _p.get("margin", "?")
+                        _lev       = _p.get("lever", "?")
+                        _liq_px    = _p.get("liqPx", "?")
+                        _mm_mode   = _p.get("mgnMode", "?")
+                        _pos_side  = _p.get("posSide", "net")
+                        _ctime     = _p.get("cTime", "")
+                        _utime     = _p.get("uTime", "")
+                        # Format timestamps
+                        try:
+                            _ct_fmt = (datetime.fromtimestamp(int(_ctime)/1000,
+                                       tz=timezone.utc)
+                                       .strftime("%m/%d %H:%M:%S") if _ctime else "—")
+                        except Exception:
+                            _ct_fmt = str(_ctime or "—")
+                        try:
+                            _ut_fmt = (datetime.fromtimestamp(int(_utime)/1000,
+                                       tz=timezone.utc)
+                                       .strftime("%m/%d %H:%M:%S") if _utime else "—")
+                        except Exception:
+                            _ut_fmt = str(_utime or "—")
+                        # Format uPnL with sign
+                        try:
+                            _upnl_f = float(_upnl or 0)
+                            _upnl_r_f = float(_upnl_r or 0)
+                            _upnl_str = f"{_upnl_f:+.4f} USDT ({_upnl_r_f*100:+.2f}%)"
+                        except Exception:
+                            _upnl_str = str(_upnl)
+                        _push(f"  [{_pi}] {_inst}")
+                        _push(f"        pos_sz      : {_pos_sz}  |  posSide: {_pos_side}")
+                        _push(f"        avg_px      : {_avg_px}")
+                        _push(f"        uPnL        : {_upnl_str}")
+                        _push(f"        margin      : {_margin} USDT  |  lev: {_lev}×  |  mode: {_mm_mode}")
+                        _push(f"        liq_px      : {_liq_px}")
+                        _push(f"        opened_at   : {_ct_fmt}  |  updated: {_ut_fmt}")
+
+                # ── Cross-reference with bot's open signals ────────────────────
+                _push("")
+                _push("  -- Cross-reference vs bot open signals " + "-" * 36)
+                _bot_open = {s.get("symbol", ""): s for s in _open_sigs}
+                _okx_inst_set = {p.get("instId", "") for p in _pos_data}
+                # Bot says open but OKX has no position
+                for _bsym, _bsig in _bot_open.items():
+                    _okx_inst = _bsig.get("symbol", "").replace("USDT", "-USDT-SWAP")
+                    if _bsig.get("order_id") and _okx_inst not in _okx_inst_set:
+                        _push(f"  ⚠️  MISMATCH — bot=OPEN  okx=NO POSITION : {_bsym} "
+                              f"(order_id={_bsig.get('order_id','')})")
+                # OKX has position but bot doesn't track it
+                for _p in _pos_data:
+                    _inst = _p.get("instId", "")
+                    _bsym_chk = _inst.replace("-USDT-SWAP", "USDT")
+                    if _bsym_chk not in _bot_open:
+                        _push(f"  ⚠️  MISMATCH — okx=OPEN  bot=NOT TRACKED : {_inst}")
+                if not any(True for _bsym, _bsig in _bot_open.items()
+                           if _bsig.get("order_id") and
+                           _bsig.get("symbol","").replace("USDT","-USDT-SWAP")
+                           not in _okx_inst_set) and \
+                   not any(True for _p in _pos_data
+                           if _p.get("instId","").replace("-USDT-SWAP","USDT")
+                           not in _bot_open):
+                    _push("  ✅  All bot open signals match OKX positions")
+    except Exception as _pe:
+        _push(f"  <error fetching OKX positions: {_pe}>")
 
     # ── Filter Funnel (last scan) ─────────────────────────────────────────────
     _hdr("FILTER FUNNEL — LAST SCAN")
