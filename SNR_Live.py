@@ -5648,7 +5648,7 @@ with st.sidebar:
 # ─────────────────────────────────────────────────────────────────────────────
 # MAIN AREA
 # ─────────────────────────────────────────────────────────────────────────────
-_CODE_UPDATED = "27 Apr 2026  19:45 GST"
+_CODE_UPDATED = "27 Apr 2026  08:13 GST"
 st.title(f"S&R — Crypto Intelligent Portal   ·   🕐 {_CODE_UPDATED}")
 
 # ── Total Realized PnL computation ─────────────────────────────────────────────
