@@ -207,6 +207,8 @@ DEFAULT_CONFIG: dict = {
     # double-execution. When 0 or ≥ loop_minutes, watcher is disabled and
     # main loop handles open-trade checks as before (legacy behaviour).
     "watcher_minutes":       1,
+    "reconcile_t1_minutes":  2,    # Tier-1 sync: active positions check (every N min)
+    "reconcile_t2_minutes":  10,   # Tier-2 sync: algo orders reconciliation (every N min)
     # ── Hours of operation (GST / Dubai UTC+4) ────────────────────────────────
     # When enabled, new signal scanning is paused outside the defined window.
     # Open-trade monitoring (TP/SL/DCA) always runs regardless of this setting.
@@ -846,8 +848,13 @@ def get_symbols(watchlist: list) -> tuple:
             sym = _from_okx(inst_id)
             active.add(sym)
             try:
-                _cv = float(s.get("ctVal") or 0)
-                ct_vals[sym] = _cv if _cv > 0 else 0.0
+                _cv   = float(s.get("ctVal")  or 0)
+                _cmul = float(s.get("ctMult") or 1)
+                # Effective contract value = ctVal × ctMult (OKX uses ctMult
+                # as a multiplier for some tokens, e.g. LIT has ctVal=1,
+                # ctMult=10 → effective 10 LIT per contract).
+                _eff = _cv * _cmul if _cv > 0 else 0.0
+                ct_vals[sym] = _eff
                 # Store 0 on parse failure so _get_ct_val treats it as a cache
                 # miss and forces a re-fetch rather than silently using 1.0.
             except (TypeError, ValueError):
@@ -1045,14 +1052,18 @@ def _get_ct_val(sym: str) -> float:
         data = safe_get(f"{BASE}/api/v5/public/instruments",
                         {"instType": "SWAP", "instId": _to_okx(sym)})
         for s in data.get("data", []):
-            raw = s.get("ctVal", "")
-            val = float(raw) if raw not in ("", None) else 0.0
-            if val > 0:
-                _b._bsc_symbol_cache.setdefault("ct_val", {})[sym] = val
+            raw   = s.get("ctVal", "")
+            rmul  = s.get("ctMult", "")
+            val   = float(raw)  if raw  not in ("", None) else 0.0
+            cmul  = float(rmul) if rmul not in ("", None) else 1.0
+            # Effective ctVal = ctVal × ctMult (e.g. LIT: 1 × 10 = 10)
+            eff = val * cmul if val > 0 else 0.0
+            if eff > 0:
+                _b._bsc_symbol_cache.setdefault("ct_val", {})[sym] = eff
                 _append_error("info",
-                    f"ctVal for {_to_okx(sym)} fetched on-demand: {val} "
-                    f"(cache was cold — populated now)")
-                return val
+                    f"ctVal for {_to_okx(sym)} fetched on-demand: {eff} "
+                    f"(ctVal={val} × ctMult={cmul}) — cache populated now")
+                return eff
     except Exception as _e:
         raise ValueError(
             f"ctVal for {_to_okx(sym)} could not be fetched from OKX "
@@ -3358,38 +3369,69 @@ def _execute_dca_fill(sig: dict, cfg: dict) -> bool:
     """
     sym = sig.get("symbol", "?")
     try:
-        # ── Change 3: verify OKX still holds an open position before adding.
-        # If the position was closed externally (manual close, OCO triggered)
-        # skip the DCA, mark the signal closed, and log clearly.
-        try:
-            _pos_chk = _trade_get("/api/v5/account/positions",
-                                  {"instType": "SWAP", "instId": _to_okx(sym)},
-                                  cfg)
-            if _pos_chk.get("code") == "0":
-                _live_pos = [p for p in _pos_chk.get("data", [])
-                             if float(p.get("pos", 0) or 0) != 0]
-                if not _live_pos:
-                    _append_error(
-                        "trade",
-                        f"DCA aborted for {sym} — no open OKX position found. "
-                        f"Position may have been closed externally (manual close "
-                        f"or OCO hit). Marking signal as closed.",
-                        symbol=sym,
-                        endpoint="/api/v5/account/positions",
-                    )
-                    sig["status"]      = "sl_hit"
-                    sig["close_price"] = float(sig.get("latest_price") or
-                                               sig.get("avg_entry") or
-                                               sig.get("entry") or 0)
-                    sig["close_time"]  = dubai_now().isoformat()
-                    sig.pop("_dca_pending", None)
-                    return False
-        except Exception as _pos_exc:
-            # Position check failed — proceed with DCA rather than blocking.
-            _append_error("trade",
-                          f"DCA position pre-check failed for {sym}: {_pos_exc} "
-                          f"— proceeding with DCA anyway.",
-                          symbol=sym, endpoint="/api/v5/account/positions")
+        # ── Position pre-check: verify OKX still holds an open position before
+        # adding margin.  If the position was closed externally (manual close,
+        # OCO triggered) skip the DCA, mark the signal closed, and log clearly.
+        #
+        # Grace-period guard: skip the check entirely for the first 90 seconds
+        # after the entry timestamp.  OKX's position API can take several seconds
+        # to reflect a freshly filled market order, so firing the check too soon
+        # after entry produces a false "no position" result and incorrectly closes
+        # the signal as sl_hit (race condition observed on ACTUSDT 27-Apr-2026).
+        _entry_ts_str = sig.get("timestamp", "")
+        _now_utc      = dubai_now()
+        _age_secs     = 9999  # default: assume old enough to check
+        if _entry_ts_str:
+            try:
+                _entry_dt = datetime.fromisoformat(
+                    _entry_ts_str.replace("Z", "+00:00"))
+                _age_secs = (_now_utc - _entry_dt).total_seconds()
+            except Exception:
+                pass
+
+        _GRACE_SECS = 90   # configurable constant — do not check within 90 s of entry
+
+        if _age_secs < _GRACE_SECS:
+            # Too soon after entry — skip position check, proceed with DCA.
+            _append_error(
+                "trade",
+                f"DCA position pre-check skipped for {sym} — signal is only "
+                f"{int(_age_secs)}s old (grace period = {_GRACE_SECS}s). "
+                f"OKX may not have confirmed the position yet.",
+                symbol=sym,
+                endpoint="grace_period_skip",
+            )
+        else:
+            try:
+                _pos_chk = _trade_get("/api/v5/account/positions",
+                                      {"instType": "SWAP", "instId": _to_okx(sym)},
+                                      cfg)
+                if _pos_chk.get("code") == "0":
+                    _live_pos = [p for p in _pos_chk.get("data", [])
+                                 if float(p.get("pos", 0) or 0) != 0]
+                    if not _live_pos:
+                        _append_error(
+                            "trade",
+                            f"DCA aborted for {sym} — no open OKX position found "
+                            f"(signal age {int(_age_secs)}s, past grace period). "
+                            f"Position may have been closed externally (manual "
+                            f"close or OCO hit). Marking signal as closed.",
+                            symbol=sym,
+                            endpoint="/api/v5/account/positions",
+                        )
+                        sig["status"]      = "sl_hit"
+                        sig["close_price"] = float(sig.get("latest_price") or
+                                                   sig.get("avg_entry") or
+                                                   sig.get("entry") or 0)
+                        sig["close_time"]  = dubai_now().isoformat()
+                        sig.pop("_dca_pending", None)
+                        return False
+            except Exception as _pos_exc:
+                # Position check failed — proceed with DCA rather than blocking.
+                _append_error("trade",
+                              f"DCA position pre-check failed for {sym}: {_pos_exc} "
+                              f"— proceeding with DCA anyway.",
+                              symbol=sym, endpoint="/api/v5/account/positions")
 
         dca_usdt = _dca_next_usdt(sig)
         if dca_usdt <= 0:
@@ -4084,6 +4126,351 @@ def _okx_sync_open_signals(open_snapshot: list, cfg: dict) -> bool:
         return False
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Two-Tier Reconciliation (Option C sync mechanism)
+# ─────────────────────────────────────────────────────────────────────────────
+def _reconcile_tier1(cfg: dict) -> int:
+    """Tier-1 sync: fast active-positions check (runs every reconcile_t1_minutes).
+
+    One API call: GET /api/v5/account/positions?instType=SWAP
+
+    Checks:
+      1. Bot=open + has order_id, OKX=no position → mark closed_okx   (skip if <90s old)
+      2. Bot=sl_hit/dca_sl_hit within last 15 min, OKX=still open     → cancel algos + market sell
+      3. OKX position with no matching bot signal                       → log warning
+
+    Returns the number of corrective actions taken.
+    """
+    _actions = 0
+    try:
+        if not cfg.get("api_key"):
+            return 0   # credentials not configured — skip silently
+
+        _pos_resp = _trade_get("/api/v5/account/positions",
+                               {"instType": "SWAP"}, cfg)
+        if _pos_resp.get("code") != "0":
+            _append_error("watcher",
+                          f"Tier-1 reconcile: positions fetch failed — {_pos_resp.get('msg','')}",
+                          endpoint="/api/v5/account/positions")
+            return 0
+
+        # Build lookup: okx_inst_id (e.g. "BTC-USDT-SWAP") → position dict
+        _okx_pos: dict[str, dict] = {}
+        for _p in (_pos_resp.get("data") or []):
+            if float(_p.get("pos", 0) or 0) != 0:
+                _okx_pos[_p.get("instId", "")] = _p
+
+        _now = dubai_now()
+        _GRACE_SECS = 90
+        _RECENTLY_CLOSED_MINS = 15
+
+        with _log_lock:
+            _signals_copy = list(_b._bsc_log["signals"])
+
+        # ── Check 1: bot=open + order_id, OKX=no position ──────────────────
+        for _sig in _signals_copy:
+            if _sig.get("status") != "open":
+                continue
+            if not _sig.get("order_id"):
+                continue   # paper trade — no OKX position expected
+
+            _sym      = _sig.get("symbol", "")
+            _inst_id  = _to_okx(_sym)
+
+            # Grace period: skip very recent entries (position may not be confirmed yet)
+            _entry_ts = _sig.get("timestamp", "")
+            _age_secs = 9999
+            if _entry_ts:
+                try:
+                    _entry_dt = datetime.fromisoformat(_entry_ts.replace("Z", "+00:00"))
+                    _age_secs = (_now - _entry_dt).total_seconds()
+                except Exception:
+                    pass
+            if _age_secs < _GRACE_SECS:
+                continue   # too new — skip
+
+            if _inst_id not in _okx_pos:
+                # OKX has no position — close in bot
+                _close_px = float(_sig.get("latest_price") or
+                                  _sig.get("avg_entry") or _sig.get("entry") or 0)
+                with _log_lock:
+                    for _s in _b._bsc_log["signals"]:
+                        if (_s.get("timestamp") == _sig.get("timestamp") and
+                                _s.get("symbol") == _sym):
+                            _s["status"]      = "closed_okx"
+                            _s["close_price"] = _close_px
+                            _s["close_time"]  = _now.isoformat()
+                            break
+                    save_log(_b._bsc_log)
+                _append_error("watcher",
+                              f"[T1-Sync] {_sym} — bot=open but OKX has no position. "
+                              f"Marked closed_okx (age={int(_age_secs)}s).",
+                              symbol=_sym, endpoint="reconcile_t1")
+                _actions += 1
+
+        # ── Check 2: bot recently sl_hit/dca_sl_hit, OKX still has position ──
+        for _sig in _signals_copy:
+            if _sig.get("status") not in ("sl_hit", "dca_sl_hit"):
+                continue
+            _close_t = _sig.get("close_time", "")
+            if not _close_t:
+                continue
+            try:
+                _close_dt = datetime.fromisoformat(_close_t.replace("Z", "+00:00"))
+                _mins_ago = (_now - _close_dt).total_seconds() / 60
+            except Exception:
+                continue
+            if _mins_ago > _RECENTLY_CLOSED_MINS:
+                continue   # too old — skip
+
+            _sym     = _sig.get("symbol", "")
+            _inst_id = _to_okx(_sym)
+            if _inst_id not in _okx_pos:
+                continue   # already closed on OKX — no action needed
+
+            # OKX still has the position — cancel algos then market sell
+            _append_error("watcher",
+                          f"[T1-Sync] {_sym} — bot=sl_hit but OKX still has position. "
+                          f"Cancelling algos and force-closing...",
+                          symbol=_sym, endpoint="reconcile_t1")
+            for _aid_key in ("algo_id", "tp_algo_id"):
+                _aid = _sig.get(_aid_key, "")
+                if _aid:
+                    _cancel_algo_best_effort(_aid, _sym, cfg)
+
+            # Market sell the full live position size
+            _live_sz = abs(float(_okx_pos[_inst_id].get("pos", 0) or 0))
+            if _live_sz > 0:
+                try:
+                    _sell_resp = _trade_post("/api/v5/trade/order", {
+                        "instId":  _inst_id,
+                        "tdMode":  "cross",
+                        "side":    "sell",
+                        "ordType": "market",
+                        "sz":      str(int(_live_sz)),
+                        "posSide": "long",
+                    }, cfg)
+                    _append_error("watcher",
+                                  f"[T1-Sync] {_sym} force-sell response: "
+                                  f"code={_sell_resp.get('code')} "
+                                  f"msg={_sell_resp.get('msg','')}",
+                                  symbol=_sym, endpoint="reconcile_t1_sell")
+                except Exception as _sell_exc:
+                    _append_error("watcher",
+                                  f"[T1-Sync] {_sym} force-sell failed: {_sell_exc}",
+                                  symbol=_sym, endpoint="reconcile_t1_sell")
+            _actions += 1
+
+        # ── Check 3: OKX positions with no matching bot signal ───────────────
+        _open_inst_ids = set()
+        for _sig in _signals_copy:
+            if _sig.get("status") == "open" and _sig.get("order_id"):
+                _open_inst_ids.add(_to_okx(_sig.get("symbol", "")))
+        for _inst_id, _p in _okx_pos.items():
+            if _inst_id not in _open_inst_ids:
+                _append_error("watcher",
+                              f"[T1-Sync] OKX has orphan position: {_inst_id} "
+                              f"sz={_p.get('pos','?')} — no matching bot signal.",
+                              endpoint="reconcile_t1_orphan")
+
+    except Exception as _t1_exc:
+        _append_error("watcher", f"Tier-1 reconcile error: {_t1_exc}",
+                      endpoint="reconcile_t1")
+
+    # Record last-run timestamp, run count, and action count — always, even on error
+    _b._bsc_reconcile_t1_last    = int(time.time())
+    _b._bsc_reconcile_t1_runs    = getattr(_b, "_bsc_reconcile_t1_runs",    0) + 1
+    _b._bsc_reconcile_t1_actions = getattr(_b, "_bsc_reconcile_t1_actions", 0) + _actions
+    return _actions
+
+
+def _reconcile_tier2(cfg: dict) -> int:
+    """Tier-2 sync: algo order reconciliation (runs every reconcile_t2_minutes).
+
+    Two API calls:
+      A. GET /api/v5/trade/orders-algo-pending?instType=SWAP&ordType=conditional,oco
+      B. GET /api/v5/account/positions?instType=SWAP
+
+    Checks:
+      1. Bot=closed (within 30 min) but algo still pending on OKX → cancel orphaned algo
+      2. Bot=open + OKX has position + no active algo on OKX → re-place TP (no DCA) or OCO (post-DCA)
+
+    Returns the number of corrective actions taken.
+    """
+    _actions = 0
+    try:
+        if not cfg.get("api_key"):
+            return 0
+
+        # ── Fetch A: pending algo orders ───────────────────────────────────
+        _algo_resp = _trade_get("/api/v5/trade/orders-algo-pending",
+                                {"instType": "SWAP", "ordType": "conditional,oco"},
+                                cfg)
+        if _algo_resp.get("code") != "0":
+            _append_error("watcher",
+                          f"Tier-2 reconcile: algo-pending fetch failed — {_algo_resp.get('msg','')}",
+                          endpoint="/api/v5/trade/orders-algo-pending")
+            return 0
+
+        # Build lookup: algoId → algo record, and instId → list of algo records
+        _pending_algos_by_id:   dict[str, dict] = {}
+        _pending_algos_by_inst: dict[str, list]  = {}
+        for _a in (_algo_resp.get("data") or []):
+            _aid  = _a.get("algoId", "")
+            _inst = _a.get("instId", "")
+            if _aid:
+                _pending_algos_by_id[_aid] = _a
+            if _inst:
+                _pending_algos_by_inst.setdefault(_inst, []).append(_a)
+
+        # ── Fetch B: live positions ────────────────────────────────────────
+        _pos_resp = _trade_get("/api/v5/account/positions",
+                               {"instType": "SWAP"}, cfg)
+        _okx_pos: dict[str, dict] = {}
+        if _pos_resp.get("code") == "0":
+            for _p in (_pos_resp.get("data") or []):
+                if float(_p.get("pos", 0) or 0) != 0:
+                    _okx_pos[_p.get("instId", "")] = _p
+
+        _now = dubai_now()
+        _RECENTLY_CLOSED_MINS = 30
+
+        with _log_lock:
+            _signals_copy = list(_b._bsc_log["signals"])
+
+        # ── Check 1: bot=closed recently, algo still pending on OKX ────────
+        for _sig in _signals_copy:
+            if _sig.get("status") not in (
+                "tp_hit", "sl_hit", "dca_sl_hit", "closed_okx",
+                "closed_manual", "entry_failed",
+            ):
+                continue
+            _close_t = _sig.get("close_time", "")
+            if not _close_t:
+                continue
+            try:
+                _close_dt = datetime.fromisoformat(_close_t.replace("Z", "+00:00"))
+                _mins_ago = (_now - _close_dt).total_seconds() / 60
+            except Exception:
+                continue
+            if _mins_ago > _RECENTLY_CLOSED_MINS:
+                continue
+
+            _sym = _sig.get("symbol", "")
+            for _aid_key in ("algo_id", "tp_algo_id"):
+                _aid = _sig.get(_aid_key, "")
+                if _aid and _aid in _pending_algos_by_id:
+                    _cancel_algo_best_effort(_aid, _sym, cfg)
+                    _append_error("watcher",
+                                  f"[T2-Sync] {_sym} — cancelled orphaned algo {_aid} "
+                                  f"(bot status={_sig.get('status')}, closed {_mins_ago:.1f} min ago).",
+                                  symbol=_sym, endpoint="reconcile_t2")
+                    _actions += 1
+
+        # ── Check 2: bot=open + OKX has position + no pending algo ─────────
+        for _sig in _signals_copy:
+            if _sig.get("status") != "open":
+                continue
+            if not _sig.get("order_id"):
+                continue   # paper trade
+
+            _sym     = _sig.get("symbol", "")
+            _inst_id = _to_okx(_sym)
+
+            # Must have a confirmed OKX position
+            if _inst_id not in _okx_pos:
+                continue
+
+            # Check if any of the signal's algos are still pending
+            _algo_id  = _sig.get("algo_id", "")
+            _tp_algo  = _sig.get("tp_algo_id", "")
+            _has_algo = (
+                (_algo_id and _algo_id in _pending_algos_by_id) or
+                (_tp_algo  and _tp_algo  in _pending_algos_by_id)
+            )
+            if _has_algo:
+                continue   # algo is alive — nothing to do
+
+            # Grace period: skip very recently entered signals
+            _entry_ts = _sig.get("timestamp", "")
+            _age_secs = 9999
+            if _entry_ts:
+                try:
+                    _entry_dt = datetime.fromisoformat(_entry_ts.replace("Z", "+00:00"))
+                    _age_secs = (_now - _entry_dt).total_seconds()
+                except Exception:
+                    pass
+            if _age_secs < 120:
+                continue   # too new — skip
+
+            # Determine: post-DCA → re-place OCO; no DCA yet → re-place TP-only
+            _dca_count   = int(_sig.get("dca_count", 0) or 0)
+            _margin_mode = _sig.get("order_margin_mode", "cross")
+            _live_pos    = _okx_pos[_inst_id]
+            _live_sz     = abs(float(_live_pos.get("pos", 0) or 0))
+
+            if _live_sz <= 0:
+                continue
+
+            _current_tp = float(_sig.get("tp") or 0)
+            _current_sl = float(_sig.get("sl") or 0)
+            if not _current_tp:
+                continue   # no TP level — cannot re-place
+
+            _append_error("watcher",
+                          f"[T2-Sync] {_sym} — open position has no active algo. "
+                          f"Attempting to re-place {'OCO' if _dca_count > 0 else 'TP'} order "
+                          f"(dca_count={_dca_count}, sz={_live_sz}).",
+                          symbol=_sym, endpoint="reconcile_t2")
+
+            try:
+                if _dca_count > 0 and _current_sl:
+                    # Re-place OCO (TP + SL)
+                    _new_result = _place_dca_oco_algo(
+                        _sig, cfg,
+                        new_tp=_current_tp,
+                        new_sl=_current_sl,
+                        contracts=int(_live_sz),
+                    )
+                else:
+                    # Re-place TP-only
+                    _new_result = _place_tp_only_order(
+                        _sig, cfg,
+                        tp_price=_current_tp,
+                        contracts=int(_live_sz),
+                    )
+                if _new_result:
+                    _new_algo = (_new_result.get("algoId", "") or
+                                 _new_result.get("tp_algo_id", ""))
+                    if _new_algo:
+                        with _log_lock:
+                            for _s in _b._bsc_log["signals"]:
+                                if (_s.get("timestamp") == _sig.get("timestamp") and
+                                        _s.get("symbol") == _sym):
+                                    _s["algo_id"]    = _new_algo
+                                    _s["tp_algo_id"] = _new_algo
+                                    break
+                            save_log(_b._bsc_log)
+                        _append_error("watcher",
+                                      f"[T2-Sync] {_sym} — algo re-placed successfully: {_new_algo}",
+                                      symbol=_sym, endpoint="reconcile_t2")
+                        _actions += 1
+            except Exception as _repl_exc:
+                _append_error("watcher",
+                              f"[T2-Sync] {_sym} — algo re-place failed: {_repl_exc}",
+                              symbol=_sym, endpoint="reconcile_t2")
+
+    except Exception as _t2_exc:
+        _append_error("watcher", f"Tier-2 reconcile error: {_t2_exc}",
+                      endpoint="reconcile_t2")
+
+    # Record last-run timestamp, run count, and action count — always, even on error
+    _b._bsc_reconcile_t2_last    = int(time.time())
+    _b._bsc_reconcile_t2_runs    = getattr(_b, "_bsc_reconcile_t2_runs",    0) + 1
+    _b._bsc_reconcile_t2_actions = getattr(_b, "_bsc_reconcile_t2_actions", 0) + _actions
+    return _actions
+
+
 def _watcher_loop():
     """Background thread: polls open trades every `watcher_minutes`.
 
@@ -4170,6 +4557,30 @@ def _watcher_loop():
                                 save_log(_b._bsc_log)
             except Exception as e:
                 _append_error("watcher", str(e))
+
+            # ── Two-Tier Reconciliation ───────────────────────────────────
+            # Runs on a slower cadence than the watcher tick.
+            # Skip if trade_enabled is off (no live OKX positions to check).
+            if cfg.get("trade_enabled") and cfg.get("api_key"):
+                _t1_interval = int(cfg.get("reconcile_t1_minutes", 2) or 2) * 60
+                _t2_interval = int(cfg.get("reconcile_t2_minutes", 10) or 10) * 60
+                _now_ts      = int(time.time())
+
+                if _t1_interval > 0:
+                    _t1_last = getattr(_b, "_bsc_reconcile_t1_last", 0)
+                    if _now_ts - _t1_last >= _t1_interval:
+                        try:
+                            _reconcile_tier1(cfg)
+                        except Exception as _t1_e:
+                            _append_error("watcher", f"T1 reconcile outer: {_t1_e}")
+
+                if _t2_interval > 0:
+                    _t2_last = getattr(_b, "_bsc_reconcile_t2_last", 0)
+                    if _now_ts - _t2_last >= _t2_interval:
+                        try:
+                            _reconcile_tier2(cfg)
+                        except Exception as _t2_e:
+                            _append_error("watcher", f"T2 reconcile outer: {_t2_e}")
 
             elapsed = time.time() - t0
             _b._bsc_watcher_last_ts  = int(time.time())
@@ -4271,6 +4682,28 @@ def _bg_loop():
                             _execute_dca_fill(_dsig, cfg)
                     with _log_lock:
                         save_log(_b._bsc_log)
+
+            # ── Two-Tier Reconciliation (bg_loop path — only when watcher inactive) ──
+            # When the watcher is active it handles reconcile internally.
+            # Only runs here as fallback when watcher_minutes is 0 or >= loop_minutes.
+            if not _watcher_active and cfg.get("trade_enabled") and cfg.get("api_key"):
+                _t1_interval = int(cfg.get("reconcile_t1_minutes", 2) or 2) * 60
+                _t2_interval = int(cfg.get("reconcile_t2_minutes", 10) or 10) * 60
+                _now_ts      = int(time.time())
+                if _t1_interval > 0:
+                    _t1_last = getattr(_b, "_bsc_reconcile_t1_last", 0)
+                    if _now_ts - _t1_last >= _t1_interval:
+                        try:
+                            _reconcile_tier1(cfg)
+                        except Exception as _t1_e:
+                            _append_error("watcher", f"T1 reconcile (bg): {_t1_e}")
+                if _t2_interval > 0:
+                    _t2_last = getattr(_b, "_bsc_reconcile_t2_last", 0)
+                    if _now_ts - _t2_last >= _t2_interval:
+                        try:
+                            _reconcile_tier2(cfg)
+                        except Exception as _t2_e:
+                            _append_error("watcher", f"T2 reconcile (bg): {_t2_e}")
 
             # ── Circuit breaker: check AFTER updating signals so newly-closed
             # sl_hit trades are counted immediately ─────────────────────────
@@ -4860,7 +5293,8 @@ with st.sidebar:
 
     new_api_key = st.text_input(
         "API Key", value=_key_display,
-        key="cfg_api_key", disabled=not new_trade_enabled or _env_has["api_key"],
+        key="cfg_api_key", type="password",
+        disabled=not new_trade_enabled or _env_has["api_key"],
         placeholder=("Loaded from OKX_API_KEY env var" if _env_has["api_key"]
                      else "Your OKX API key"),
         help=(
@@ -5540,6 +5974,29 @@ with st.sidebar:
             "When ≥ 'Loop (min)', this setting is ignored and the main loop "
             "handles opens as before."
         ))
+    new_reconcile_t1_minutes = st.number_input(
+        "Tier-1 Sync Interval (min)", min_value=0, max_value=60, step=1,
+        value=int(_snap_cfg.get("reconcile_t1_minutes", 2) or 2),
+        key="cfg_reconcile_t1_minutes",
+        help=(
+            "How often the Tier-1 sync runs (every N minutes).\n\n"
+            "Tier-1 makes ONE API call (positions) and checks:\n"
+            "  • Bot=open but OKX has no position → mark closed_okx\n"
+            "  • Bot=sl_hit (within 15 min) but OKX still open → force-close\n"
+            "  • OKX has a position with no matching bot signal → log warning\n\n"
+            "Set to 0 to disable Tier-1 sync. Only runs when trade_enabled is ON."
+        ))
+    new_reconcile_t2_minutes = st.number_input(
+        "Tier-2 Sync Interval (min)", min_value=0, max_value=120, step=5,
+        value=int(_snap_cfg.get("reconcile_t2_minutes", 10) or 10),
+        key="cfg_reconcile_t2_minutes",
+        help=(
+            "How often the Tier-2 sync runs (every N minutes).\n\n"
+            "Tier-2 makes TWO API calls (algo orders + positions) and checks:\n"
+            "  • Bot=closed (within 30 min) but algo still active → cancel orphan\n"
+            "  • Bot=open + OKX has position + no active algo → re-place TP/OCO\n\n"
+            "Set to 0 to disable Tier-2 sync. Only runs when trade_enabled is ON."
+        ))
     # ── SL-specific cooldown (per-coin blackout after SL hit) ────────────────
     new_sl_cooldown_hours = st.number_input(
         "SL Cooldown (hrs)", min_value=1, max_value=720, step=1,
@@ -5744,7 +6201,9 @@ with st.sidebar:
             "max_open_trades":    max(1, int(new_max_open_trades)),
             "max_super_trades":   max(1, int(new_max_super_trades)),
             "sl_cooldown_hours":  max(1, int(new_sl_cooldown_hours)),
-            "watcher_minutes":    max(0, min(60, int(new_watcher_minutes))),
+            "watcher_minutes":         max(0, min(60,  int(new_watcher_minutes))),
+            "reconcile_t1_minutes":    max(0, min(60,  int(new_reconcile_t1_minutes))),
+            "reconcile_t2_minutes":    max(0, min(120, int(new_reconcile_t2_minutes))),
             "scan_hour_enabled":  bool(new_scan_hour_enabled),
             "scan_hour_start":    int(new_scan_hour_start),
             "scan_hour_end":      int(new_scan_hour_end),
@@ -5782,7 +6241,7 @@ with st.sidebar:
 # ─────────────────────────────────────────────────────────────────────────────
 # MAIN AREA
 # ─────────────────────────────────────────────────────────────────────────────
-_CODE_UPDATED = "27 Apr 2026  19:00 GST"
+_CODE_UPDATED = "28 Apr 2026  00:30 GST"
 st.title(f"S&R — Crypto Intelligent Portal   ·   🕐 {_CODE_UPDATED}")
 
 # ── Total Realized PnL computation ─────────────────────────────────────────────
@@ -5984,17 +6443,40 @@ if open_count > _max_open_cap:
 pre_out     = health.get("pre_filtered_out", 0)
 deep_sc     = health.get("deep_scanned",     0)
 
-m1,m2,m3,m4,m5c,m6,m7,m8,m8b,m9 = st.columns(10)
-m1.metric("Cycles",        health.get("total_cycles",0))
-m2.metric("Scan Time",     f"{health.get('last_scan_duration_s',0)}s")
-m3.metric("API Errors",    health.get("total_api_errors",0))
-m4.metric("Pre-filtered ⚡", pre_out, help="Coins removed by bulk ticker pre-filter (saves API calls)")
-m5c.metric("Deep Scanned", deep_sc, help="Coins that passed pre-filter and received full candle analysis")
-m6.metric("Open",          open_count,  help=f"Active open trades (max {_max_open_cap} allowed simultaneously — configurable in sidebar)")
+# ── Row 1: Scanner health ────────────────────────────────────────────────────
+m1, m2, m3, m4, m5c = st.columns(5)
+m1.metric("Cycles",          health.get("total_cycles", 0))
+m2.metric("Scan Time",       f"{health.get('last_scan_duration_s', 0)}s")
+m3.metric("API Errors",      health.get("total_api_errors", 0))
+m4.metric("Pre-filtered ⚡", pre_out,  help="Coins removed by bulk ticker pre-filter (saves API calls)")
+m5c.metric("Deep Scanned",   deep_sc,  help="Coins that passed pre-filter and received full candle analysis")
+
+# ── Row 2: Trade results ──────────────────────────────────────────────────────
+m6, m7, m8, m8b, m9, m_sync = st.columns(6)
+m6.metric("Open",          open_count,    help=f"Active open trades (max {_max_open_cap} allowed simultaneously — configurable in sidebar)")
 m7.metric("TP Hit ✅",     tp_count)
-m8.metric("SL Hit ❌",     sl_count,   help="Regular SL hits (non-DCA trades, or DCA disabled)")
-m8b.metric("DCA-SL ❌",    dca_sl_count, help="Ladder-exhausted SL hits — DCA trade closed at final SL (blended avg × (1 − sl_distance_pct)) after max DCAs were consumed")
-m9.metric("⏳ Queued",     queue_count, help=f"Signals detected while the {_max_open_cap}-trade limit was reached — no order placed, coin rescanned each cycle")
+m8.metric("SL Hit ❌",     sl_count,      help="Regular SL hits (non-DCA trades, or DCA disabled)")
+m8b.metric("DCA-SL ❌",    dca_sl_count,  help="Ladder-exhausted SL hits — DCA trade closed at final SL (blended avg × (1 − sl_distance_pct)) after max DCAs were consumed")
+m9.metric("⏳ Queued",     queue_count,   help=f"Signals detected while the {_max_open_cap}-trade limit was reached — no order placed, coin rescanned each cycle")
+_sync_runs    = (getattr(_b, "_bsc_reconcile_t1_runs",    0) +
+                 getattr(_b, "_bsc_reconcile_t2_runs",    0))
+_sync_actions = (getattr(_b, "_bsc_reconcile_t1_actions", 0) +
+                 getattr(_b, "_bsc_reconcile_t2_actions", 0))
+with m_sync:
+    st.markdown(
+        f"""<div style="background:#0d1117;border:1px solid #21262d;border-radius:8px;
+                        padding:12px 16px 10px 16px;min-height:88px;"
+             title="T1+T2 sync checks run since startup. Corrections made: {_sync_actions}">
+            <p style="margin:0 0 4px 0;font-size:0.72rem;font-weight:600;
+                      color:#4da6ff;letter-spacing:.05em;line-height:1.2;">
+                🔄 SYNC CHECKS</p>
+            <p style="margin:0;font-size:1.9rem;font-weight:700;
+                      color:#4da6ff;line-height:1.1;">{_sync_runs}</p>
+            <p style="margin:4px 0 0 0;font-size:0.72rem;color:#4da6ff;opacity:.7;">
+                {_sync_actions} fix(es) &nbsp;&middot;&nbsp; since startup</p>
+        </div>""",
+        unsafe_allow_html=True,
+    )
 
 if getattr(_b, "_bsc_last_error", ""):
     st.warning(f"⚠️ {_b._bsc_last_error}")
@@ -8601,8 +9083,7 @@ def _build_diagnostics_text() -> str:
 
     # ── Runtime state ────────────────────────────────────────────────────────
     _hdr("RUNTIME STATE")
-    try:
-        _kv("scanner_running",        _scanner_running.is_set())
+    try:        _kv("scanner_running",        _scanner_running.is_set())
     except Exception:
         _kv("scanner_running",        "<unavailable>")
     _kv("bsc_sl_paused",              getattr(_b, "_bsc_sl_paused", False))
@@ -8688,63 +9169,194 @@ def _build_diagnostics_text() -> str:
     except Exception as _de:
         _push(f"  <error: {_de}>")
 
+    # ── Live OKX Positions (real-time API call) ───────────────────────────────
+    _hdr("LIVE OKX POSITIONS (from /api/v5/account/positions)")
+    try:
+        _has_creds = bool(
+            _snap_cfg.get("api_key") and
+            _snap_cfg.get("api_secret") and
+            _snap_cfg.get("api_passphrase")
+        )
+        if not _has_creds:
+            _push("  <skipped — API credentials not configured>")
+        else:
+            _pos_resp = _trade_get(
+                "/api/v5/account/positions",
+                {"instType": "SWAP"},
+                _snap_cfg,
+            )
+            if _pos_resp.get("code") != "0":
+                _push(f"  <OKX API error: code={_pos_resp.get('code')} "
+                      f"msg={_pos_resp.get('msg', '?')}>")
+            else:
+                _pos_data = [p for p in (_pos_resp.get("data") or [])
+                             if float(p.get("pos", 0) or 0) != 0]
+                if not _pos_data:
+                    _push("  (no open swap positions on OKX)")
+                else:
+                    _kv("total_open_positions", len(_pos_data))
+                    _push("")
+                    for _pi, _p in enumerate(_pos_data, 1):
+                        _inst      = _p.get("instId", "?")
+                        _pos_sz    = _p.get("pos", "?")
+                        _avg_px    = _p.get("avgPx", "?")
+                        _upnl      = _p.get("upl", "?")
+                        _upnl_r    = _p.get("uplRatio", "?")
+                        _margin    = _p.get("imr", "?") or _p.get("margin", "?")
+                        _lev       = _p.get("lever", "?")
+                        _liq_px    = _p.get("liqPx", "?")
+                        _mm_mode   = _p.get("mgnMode", "?")
+                        _pos_side  = _p.get("posSide", "net")
+                        _ctime     = _p.get("cTime", "")
+                        _utime     = _p.get("uTime", "")
+                        # Format timestamps
+                        try:
+                            _ct_fmt = (datetime.fromtimestamp(int(_ctime)/1000,
+                                       tz=timezone.utc)
+                                       .strftime("%m/%d %H:%M:%S") if _ctime else "—")
+                        except Exception:
+                            _ct_fmt = str(_ctime or "—")
+                        try:
+                            _ut_fmt = (datetime.fromtimestamp(int(_utime)/1000,
+                                       tz=timezone.utc)
+                                       .strftime("%m/%d %H:%M:%S") if _utime else "—")
+                        except Exception:
+                            _ut_fmt = str(_utime or "—")
+                        # Format uPnL with sign
+                        try:
+                            _upnl_f = float(_upnl or 0)
+                            _upnl_r_f = float(_upnl_r or 0)
+                            _upnl_str = f"{_upnl_f:+.4f} USDT ({_upnl_r_f*100:+.2f}%)"
+                        except Exception:
+                            _upnl_str = str(_upnl)
+                        _push(f"  [{_pi}] {_inst}")
+                        _push(f"        pos_sz      : {_pos_sz}  |  posSide: {_pos_side}")
+                        _push(f"        avg_px      : {_avg_px}")
+                        _push(f"        uPnL        : {_upnl_str}")
+                        _push(f"        margin      : {_margin} USDT  |  lev: {_lev}x  |  mode: {_mm_mode}")
+                        _push(f"        liq_px      : {_liq_px}")
+                        _push(f"        opened_at   : {_ct_fmt}  |  updated: {_ut_fmt}")
+
+                # ── Cross-reference with bot's open signals ────────────────────
+                _push("")
+                _push("  -- Cross-reference vs bot open signals " + "-" * 36)
+                _bot_open = {s.get("symbol", ""): s for s in _open_sigs}
+                _okx_inst_set = {p.get("instId", "") for p in _pos_data}
+                # Bot says open but OKX has no position
+                for _bsym, _bsig in _bot_open.items():
+                    _okx_inst = _bsig.get("symbol", "").replace("USDT", "-USDT-SWAP")
+                    if _bsig.get("order_id") and _okx_inst not in _okx_inst_set:
+                        _push(f"  WARNING MISMATCH -- bot=OPEN  okx=NO POSITION : {_bsym} "
+                              f"(order_id={_bsig.get('order_id','')})")
+                # OKX has position but bot doesn't track it
+                for _p in _pos_data:
+                    _inst = _p.get("instId", "")
+                    _bsym_chk = _inst.replace("-USDT-SWAP", "USDT")
+                    if _bsym_chk not in _bot_open:
+                        _push(f"  WARNING MISMATCH -- okx=OPEN  bot=NOT TRACKED : {_inst}")
+                if not any(True for _bsym, _bsig in _bot_open.items()
+                           if _bsig.get("order_id") and
+                           _bsig.get("symbol","").replace("USDT","-USDT-SWAP")
+                           not in _okx_inst_set) and \
+                   not any(True for _p in _pos_data
+                           if _p.get("instId","").replace("-USDT-SWAP","USDT")
+                           not in _bot_open):
+                    _push("  OK  All bot open signals match OKX positions")
+    except Exception as _pe:
+        _push(f"  <error fetching OKX positions: {_pe}>")
+
+    # ── Two-Tier Reconciliation Status ───────────────────────────────────────
+    _hdr("TWO-TIER SYNC STATUS")
+    try:
+        _t1_last    = getattr(_b, "_bsc_reconcile_t1_last", 0)
+        _t2_last    = getattr(_b, "_bsc_reconcile_t2_last", 0)
+        _t1_actions = getattr(_b, "_bsc_reconcile_t1_actions", 0)
+        _t2_actions = getattr(_b, "_bsc_reconcile_t2_actions", 0)
+        _t1_int     = int(_snap_cfg.get("reconcile_t1_minutes", 2) or 2)
+        _t2_int     = int(_snap_cfg.get("reconcile_t2_minutes", 10) or 10)
+        _kv("tier1_interval_minutes",       _t1_int if _t1_int > 0 else "disabled")
+        _kv("tier1_last_run",               _fmt_ts(_t1_last) if _t1_last else "-- (never run)")
+        if _t1_last:
+            _t1_age = int(time.time()) - _t1_last
+            _kv("tier1_last_run_ago_sec",   _t1_age)
+        _kv("tier1_total_actions_taken",    _t1_actions)
+        _push("")
+        _kv("tier2_interval_minutes",       _t2_int if _t2_int > 0 else "disabled")
+        _kv("tier2_last_run",               _fmt_ts(_t2_last) if _t2_last else "-- (never run)")
+        if _t2_last:
+            _t2_age = int(time.time()) - _t2_last
+            _kv("tier2_last_run_ago_sec",   _t2_age)
+        _kv("tier2_total_actions_taken",    _t2_actions)
+        _push("")
+        _has_creds_r = bool(
+            _snap_cfg.get("api_key") and
+            _snap_cfg.get("api_secret") and
+            _snap_cfg.get("api_passphrase")
+        )
+        _trade_en = bool(_snap_cfg.get("trade_enabled"))
+        _kv("sync_eligible",
+            "YES -- will run" if (_trade_en and _has_creds_r) else
+            "NO  -- requires trade_enabled=True and API credentials")
+    except Exception as _re:
+        _push(f"  <error: {_re}>")
+
     # ── Filter Funnel (last scan) ─────────────────────────────────────────────
-    _hdr("FILTER FUNNEL — LAST SCAN")
+    _hdr("FILTER FUNNEL -- LAST SCAN")
     try:
         _fc = getattr(_b, "_bsc_filter_counts", {}) or {}
         _fmap = [
             ("pre_filtered_out",  "Pre-filter eliminated"),
             ("checked",           "Deep-scanned"),
-            ("f_empty_data",      "F0  — Empty/bad data"),
-            ("f1_resistance",     "F1  — Resistance"),
-            ("f2_super_setup",    "F2  — Super setup passed"),
-            ("super_cap_demoted", "F2  — Super cap demoted"),
-            ("f3_pdz5m",          "F3  — PDZ 5m"),
-            ("f4_rsi5m",          "F4  — RSI 5m"),
-            ("f5_rsi1h",          "F5  — RSI 1h"),
-            ("f6_ema",            "F6  — EMA"),
-            ("f7_macd",           "F7  — MACD"),
-            ("f7b_macd5m",        "F7b — MACD 5m"),
-            ("f7c_macd15m",       "F7c — MACD 15m"),
-            ("f8_sar",            "F8  — SAR"),
-            ("f9_vol",            "F9  — Volume"),
-            ("f10_ema_cross",     "F10 — EMA Cross 15m"),
-            ("passed",            "✅ Passed all filters"),
-            ("super_setup",       "⭐ Super setup"),
+            ("f_empty_data",      "F0  -- Empty/bad data"),
+            ("f1_resistance",     "F1  -- Resistance"),
+            ("f2_super_setup",    "F2  -- Super setup passed"),
+            ("super_cap_demoted", "F2  -- Super cap demoted"),
+            ("f3_pdz5m",          "F3  -- PDZ 5m"),
+            ("f4_rsi5m",          "F4  -- RSI 5m"),
+            ("f5_rsi1h",          "F5  -- RSI 1h"),
+            ("f6_ema",            "F6  -- EMA"),
+            ("f7_macd",           "F7  -- MACD"),
+            ("f7b_macd5m",        "F7b -- MACD 5m"),
+            ("f7c_macd15m",       "F7c -- MACD 15m"),
+            ("f8_sar",            "F8  -- SAR"),
+            ("f9_vol",            "F9  -- Volume"),
+            ("f10_ema_cross",     "F10 -- EMA Cross 15m"),
+            ("passed",            "Passed all filters"),
+            ("super_setup",       "Super setup"),
         ]
         for _fk, _fl in _fmap:
             _fv = _fc.get(_fk, 0)
             if _fv:
                 _kv(_fl, _fv)
-        _kv("watchlist_size",   _fc.get("watchlist_size", "—"))
+        _kv("watchlist_size",   _fc.get("watchlist_size", "--"))
     except Exception as _fe:
         _push(f"  <error: {_fe}>")
 
     # ── Per-signal detail (all buckets) ──────────────────────────────────────
     def _sig_lines(sig: dict, idx: int):
         _push(f"  [{idx}] {sig.get('symbol','?')} | status={sig.get('status','?')} "
-              f"| entry={sig.get('entry','—')} | tp={sig.get('tp','—')} "
-              f"| sl={sig.get('sl','—')} | avg_entry={sig.get('avg_entry','—')} "
-              f"| original_entry={sig.get('original_entry','—')} "
-              f"| next_dca_px={sig.get('next_dca_px','—')} "
-              f"| final_sl_price={sig.get('final_sl_price','—')} "
-              f"| sl_distance_pct={sig.get('sl_distance_pct','—')} "
-              f"| fc_trigger_px={sig.get('fc_trigger_px','—')} "
+              f"| entry={sig.get('entry','--')} | tp={sig.get('tp','--')} "
+              f"| sl={sig.get('sl','--')} | avg_entry={sig.get('avg_entry','--')} "
+              f"| original_entry={sig.get('original_entry','--')} "
+              f"| next_dca_px={sig.get('next_dca_px','--')} "
+              f"| final_sl_price={sig.get('final_sl_price','--')} "
+              f"| sl_distance_pct={sig.get('sl_distance_pct','--')} "
+              f"| fc_trigger_px={sig.get('fc_trigger_px','--')} "
               f"| dca_count={sig.get('dca_count',0)}/{sig.get('dca_max',0)} "
-              f"| mode={sig.get('order_margin_mode','—')} "
-              f"| lev={sig.get('trade_lev','—')}x "
-              f"| usdt=${sig.get('trade_usdt','—')} "
-              f"| dca_cross_drop={sig.get('dca_cross_drop_pct','—')}% "
-              f"| dca_iso_dist={sig.get('dca_iso_distance_pct','—')}% "
+              f"| mode={sig.get('order_margin_mode','--')} "
+              f"| lev={sig.get('trade_lev','--')}x "
+              f"| usdt=${sig.get('trade_usdt','--')} "
+              f"| dca_cross_drop={sig.get('dca_cross_drop_pct','--')}% "
+              f"| dca_iso_dist={sig.get('dca_iso_distance_pct','--')}% "
               f"| ts={_fmt_ts(sig.get('timestamp',''))} "
               f"| close_ts={_fmt_ts(sig.get('close_time',''))} "
-              f"| close_px={sig.get('close_price','—')} "
-              f"| order_id={sig.get('order_id','—')} "
-              f"| algo_id={sig.get('algo_id','—')} "
-              f"| tp_algo_id={sig.get('tp_algo_id','—')} "
-              f"| demo={sig.get('demo_mode','—')} "
+              f"| close_px={sig.get('close_price','--')} "
+              f"| order_id={sig.get('order_id','--')} "
+              f"| algo_id={sig.get('algo_id','--')} "
+              f"| tp_algo_id={sig.get('tp_algo_id','--')} "
+              f"| demo={sig.get('demo_mode','--')} "
               f"| is_super={sig.get('is_super_setup',False)}")
-        # OKX Command log — one sub-line per entry
+        # OKX Command log -- one sub-line per entry
         _log_entries = sig.get("okx_log")
         if isinstance(_log_entries, list) and _log_entries:
             _push(f"    okx_log ({len(_log_entries)} entries):")
@@ -8771,26 +9383,26 @@ def _build_diagnostics_text() -> str:
                 # Full entry criteria
                 _crit = _s.get("criteria") or {}
                 if _crit:
-                    _push(f"    criteria  : rsi_5m={_crit.get('rsi_5m','—')} "
-                          f"rsi_1h={_crit.get('rsi_1h','—')} "
-                          f"ema_3m={_crit.get('ema_3m','—')} "
-                          f"ema_5m={_crit.get('ema_5m','—')} "
-                          f"ema_15m={_crit.get('ema_15m','—')} "
-                          f"macd_3m={_crit.get('macd_3m','—')} "
-                          f"macd_5m={_crit.get('macd_5m','—')} "
-                          f"macd_15m={_crit.get('macd_15m','—')} "
-                          f"sar_3m={_crit.get('sar_3m','—')} "
-                          f"sar_5m={_crit.get('sar_5m','—')} "
-                          f"sar_15m={_crit.get('sar_15m','—')} "
-                          f"vol_ratio={_crit.get('vol_ratio','—')} "
-                          f"pdz_5m={_crit.get('pdz_zone_5m','—')} "
-                          f"pdz_15m={_crit.get('pdz_zone_15m','—')} "
-                          f"pdz_1h={_crit.get('pdz_zone_1h','—')} "
-                          f"ema_cross_12={_crit.get('ema_cross_12_15m','—')} "
-                          f"ema_cross_21={_crit.get('ema_cross_21_15m','—')} "
-                          f"atr_15m={_crit.get('atr_15m','—')} "
-                          f"atr_ratio={_crit.get('atr_ratio','—')}")
-                # DCA ladder — use stored ladder or compute on-the-fly if missing
+                    _push(f"    criteria  : rsi_5m={_crit.get('rsi_5m','--')} "
+                          f"rsi_1h={_crit.get('rsi_1h','--')} "
+                          f"ema_3m={_crit.get('ema_3m','--')} "
+                          f"ema_5m={_crit.get('ema_5m','--')} "
+                          f"ema_15m={_crit.get('ema_15m','--')} "
+                          f"macd_3m={_crit.get('macd_3m','--')} "
+                          f"macd_5m={_crit.get('macd_5m','--')} "
+                          f"macd_15m={_crit.get('macd_15m','--')} "
+                          f"sar_3m={_crit.get('sar_3m','--')} "
+                          f"sar_5m={_crit.get('sar_5m','--')} "
+                          f"sar_15m={_crit.get('sar_15m','--')} "
+                          f"vol_ratio={_crit.get('vol_ratio','--')} "
+                          f"pdz_5m={_crit.get('pdz_zone_5m','--')} "
+                          f"pdz_15m={_crit.get('pdz_zone_15m','--')} "
+                          f"pdz_1h={_crit.get('pdz_zone_1h','--')} "
+                          f"ema_cross_12={_crit.get('ema_cross_12_15m','--')} "
+                          f"ema_cross_21={_crit.get('ema_cross_21_15m','--')} "
+                          f"atr_15m={_crit.get('atr_15m','--')} "
+                          f"atr_ratio={_crit.get('atr_ratio','--')}")
+                # DCA ladder -- use stored ladder or compute on-the-fly if missing
                 _ladder = _s.get("dca_ladder") or []
                 if not _ladder:
                     _diag_mode  = (_s.get("order_margin_mode") or "isolated").strip().lower()
@@ -8815,7 +9427,7 @@ def _build_diagnostics_text() -> str:
                 # DCA fills
                 _fills = _s.get("dca_fills") or []
                 if len(_fills) > 1:
-                    _push(f"    dca_fills : {len(_fills)-1} DCA(s) fired — "
+                    _push(f"    dca_fills : {len(_fills)-1} DCA(s) fired -- "
                           + " | ".join(f"DCA-{f.get('dca_idx',i)}@{f.get('price','?')} "
                                        f"usdt=${f.get('usdt','?')} "
                                        f"{'[paper]' if f.get('paper') else '[live]'}"
@@ -8855,18 +9467,18 @@ def _build_diagnostics_text() -> str:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Download button — calls the builder and streams the result
+# Download button -- calls the builder and streams the result
 # ─────────────────────────────────────────────────────────────────────────────
 try:
     _diag_text = _build_diagnostics_text()
 except Exception as _diag_exc:
     _diag_text = f"Error building diagnostics: {_diag_exc}"
 
-st.text_area("📋 Diagnostics Preview", _diag_text, height=300, key="debug_snap_area")
+st.text_area("Diagnostics Preview", _diag_text, height=300, key="debug_snap_area")
 
 _diag_filename = f"diagnostics_{dubai_now().strftime('%Y%m%d_%H%M%S')}.txt"
 st.download_button(
-    label="⬇️ Download Diagnostics",
+    label="Download Diagnostics",
     data=_diag_text.encode("utf-8"),
     file_name=_diag_filename,
     mime="text/plain",
