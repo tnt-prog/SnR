@@ -1372,6 +1372,9 @@ def place_okx_order(sig: dict, cfg: dict) -> dict:
         }
         if is_hedge:
             algo_body["posSide"] = "long"    # closing a long in hedge mode
+        else:
+            # Prevent oversell flipping LONG → SHORT in cross net mode.
+            algo_body["reduceOnly"] = "true"
         algo_resp = _trade_post("/api/v5/trade/order-algo", algo_body, cfg)
         ad        = (algo_resp.get("data") or [{}])[0]
         algo_id   = ad.get("algoId", "")
@@ -3095,6 +3098,9 @@ def _place_dca_oco_algo(sig: dict, cfg: dict, new_tp: float,
         }
         if is_hedge:
             algo_body["posSide"] = "long"
+        else:
+            # Prevent oversell flipping LONG → SHORT in cross net mode.
+            algo_body["reduceOnly"] = "true"
         algo_resp = _trade_post("/api/v5/trade/order-algo", algo_body, cfg)
         ad        = (algo_resp.get("data") or [{}])[0]
         if algo_resp.get("code") != "0" or (ad.get("sCode","0") != "0" and ad.get("sCode","")):
@@ -3134,6 +3140,10 @@ def _place_tp_only_order(sig: dict, cfg: dict,
         }
         if is_hedge:
             algo_body["posSide"] = "long"
+        else:
+            # Prevent oversell flipping LONG → SHORT in cross net mode.
+            # OKX caps execution at the actual position size when reduceOnly=true.
+            algo_body["reduceOnly"] = "true"
         resp = _trade_post("/api/v5/trade/order-algo", algo_body, cfg)
         ad   = (resp.get("data") or [{}])[0]
         if resp.get("code") != "0" or (ad.get("sCode", "0") not in ("0", "") and ad.get("sCode")):
@@ -7132,51 +7142,70 @@ def _style_pnl_cell(val) -> str:
 
 def _render_sig_table(sig_list: list, header: str, empty_msg: str,
                       auto_height: bool = False, is_open_table: bool = False,
-                      show_pnl: bool = False, scroll_height: int = None):
+                      show_pnl: bool = False, scroll_height: int = None,
+                      use_expander: bool = False, expander_open: bool = True,
+                      show_header: bool = True):
+    """Render a signal table.
+
+    Parameters
+    ----------
+    use_expander  : wrap the whole table in a collapsed st.expander whose label
+                    is the header string + row count.  The internal ### markdown
+                    heading is suppressed to avoid duplication with the expander
+                    label.  expander_open controls whether it starts expanded.
+    show_header   : when False, suppresses the ### markdown heading.  Useful
+                    when the caller wraps the table in its own st.expander and
+                    wants to avoid a redundant heading inside.
+    """
     rows = [_build_signal_row(s, is_open_table=is_open_table, show_pnl=show_pnl)
             for s in sig_list]
-    st.markdown(f"### {header} ({len(rows)})")
-    if rows:
-        # Wrap the rows in a pandas DataFrame so we can apply Styler to color
-        # the whole Alert cell orange+bold when it contains DCA text. Fall
-        # back to plain dict rendering if pandas styling fails for any
-        # reason — keeps the table visible even on a styling hiccup.
-        try:
-            import pandas as _pd
-            _df = _pd.DataFrame(rows)
-            _styled = _df.style
-            if "Alert" in _df.columns:
-                _styled = _styled.applymap(_style_alert_cell, subset=["Alert"])
-            if "PnL $" in _df.columns:
-                _styled = _styled.applymap(_style_pnl_cell, subset=["PnL $"])
-            _render_obj = _styled
-        except Exception:
-            _render_obj = rows
 
-        if scroll_height is not None:
-            # Fixed-height scrollable table — internal vertical scroll bar,
-            # the rest of the page stays still.
-            st.dataframe(_render_obj, use_container_width=True,
-                         hide_index=True,
-                         height=scroll_height,
-                         column_config=_SIG_COL_CFG)
-        elif auto_height:
-            # Expand so ALL rows are visible without internal scrolling.
-            # Each row ≈ 35 px, header ≈ 38 px, +10 px buffer. Streamlit's
-            # dataframe auto-expands individual cells that contain newlines
-            # (Trade History column) — we do NOT inflate the fixed per-row
-            # height globally, since that would add empty whitespace for
-            # rows whose Trade History is short.
-            st.dataframe(_render_obj, use_container_width=True,
-                         hide_index=True,
-                         height=len(rows) * 35 + 48,
-                         column_config=_SIG_COL_CFG)
+    def _draw_table_content():
+        # Heading is shown in non-expander mode (unless explicitly suppressed).
+        if show_header and not use_expander:
+            st.markdown(f"### {header} ({len(rows)})")
+        if rows:
+            # Wrap the rows in a pandas DataFrame so we can apply Styler to
+            # color the Alert cell orange+bold when it contains DCA text.
+            # Fall back to plain dict rendering if pandas styling fails.
+            try:
+                import pandas as _pd
+                _df = _pd.DataFrame(rows)
+                _styled = _df.style
+                if "Alert" in _df.columns:
+                    _styled = _styled.applymap(_style_alert_cell, subset=["Alert"])
+                if "PnL $" in _df.columns:
+                    _styled = _styled.applymap(_style_pnl_cell, subset=["PnL $"])
+                _render_obj = _styled
+            except Exception:
+                _render_obj = rows
+
+            if scroll_height is not None:
+                # Fixed-height scrollable table — internal vertical scroll bar,
+                # the rest of the page stays still.
+                st.dataframe(_render_obj, use_container_width=True,
+                             hide_index=True,
+                             height=scroll_height,
+                             column_config=_SIG_COL_CFG)
+            elif auto_height:
+                # Expand so ALL rows are visible without internal scrolling.
+                st.dataframe(_render_obj, use_container_width=True,
+                             hide_index=True,
+                             height=len(rows) * 35 + 48,
+                             column_config=_SIG_COL_CFG)
+            else:
+                st.dataframe(_render_obj, use_container_width=True,
+                             hide_index=True,
+                             column_config=_SIG_COL_CFG)
         else:
-            st.dataframe(_render_obj, use_container_width=True,
-                         hide_index=True,
-                         column_config=_SIG_COL_CFG)
+            st.info(empty_msg)
+
+    if use_expander:
+        # Expander label carries the count so it's visible while collapsed.
+        with st.expander(f"{header} ({len(rows)})", expanded=expander_open):
+            _draw_table_content()
     else:
-        st.info(empty_msg)
+        _draw_table_content()
 
 # ── Signal tables — auto-refresh fragment ──────────────────────────────────────
 # Wrapped in @st.fragment(run_every=30) so Streamlit re-renders ONLY this
@@ -7443,69 +7472,71 @@ def _signal_tables_fragment():
         _hist_ts_tp   = st.session_state.get("okx_hist_ts", "")
         _env_hist     = "🟡 Demo" if _snap_cfg.get("demo_mode", True) else "🔴 Live"
 
-        st.markdown(
-            f"**📋 OKX Fulfilled Orders**"
-            f"<span style='font-size:0.8em; color:gray; margin-left:12px;'>"
-            f"auto-fetched · {_hist_ts_tp} · {_env_hist}</span>",
-            unsafe_allow_html=True,
-        )
-
-        if _tp_hist is None:
-            st.warning("⚠️ Could not fetch OKX position history — check Error Log.")
-        elif not _tp_hist:
-            st.info("No fulfilled (TP-closed) positions found in the last 100 records.")
-        else:
-            # Build set of TP signal symbols for the Match column.
-            _tp_sig_syms = {s.get("symbol", "") for s in _tp_sigs}
-            _tp_close_map = {
-                "2": "Take Profit",
-                "4": "Partial TP",
-            }
-            _tp_rows = []
-            _tp_ghost_syms = []
+        # Filter to last 24 hours using the position uTime (ms epoch).
+        _24h_cutoff_ms = (time.time() - 86400) * 1000
+        _tp_hist_24h = []
+        if _tp_hist:
             for _ph in _tp_hist:
-                _inst_tp   = _ph.get("instId", "")
-                _sym_tp    = _inst_tp.replace("-USDT-SWAP", "USDT").replace("-", "")
-                _rpnl_tp   = float(_ph.get("realizedPnl", 0) or 0)
-                _close_ts_tp = ""
                 try:
-                    _close_ts_tp = datetime.fromtimestamp(
-                        int(_ph.get("uTime", 0)) / 1000,
-                        tz=dubai_now().tzinfo
-                    ).strftime("%d %b %Y  %H:%M GST")
+                    if int(_ph.get("uTime", 0)) >= _24h_cutoff_ms:
+                        _tp_hist_24h.append(_ph)
                 except Exception:
                     pass
-                _matched_tp = _sym_tp in _tp_sig_syms or _inst_tp in _tp_sig_syms
-                if not _matched_tp:
-                    _tp_ghost_syms.append(_inst_tp)
-                _tp_rows.append({
-                    "Symbol":       _inst_tp,
-                    "Direction":    _ph.get("direction", "").capitalize(),
-                    "Close Reason": _tp_close_map.get(_ph.get("type", ""), "TP"),
-                    "Contracts":    int(float(_ph.get("closeTotalPos", 0) or 0)),
-                    "Avg Entry":    float(_ph.get("openAvgPx",  0) or 0),
-                    "Close Price":  float(_ph.get("closeAvgPx", 0) or 0),
-                    "Realized PnL": round(_rpnl_tp, 4),
-                    "Close Time":   _close_ts_tp,
-                    "Match":        "✅" if _matched_tp else "⚠️ no signal",
-                })
 
-            st.dataframe(
-                _tp_rows,
-                use_container_width=True,
-                hide_index=True,
-                height=len(_tp_rows) * 35 + 48,
-                column_config={
-                    "Avg Entry":    st.column_config.NumberColumn(format="%.6f"),
-                    "Close Price":  st.column_config.NumberColumn(format="%.6f"),
-                    "Realized PnL": st.column_config.NumberColumn(
-                                        "Realized PnL $", format="%.4f"),
-                },
-            )
-            if _tp_ghost_syms:
-                st.caption(
-                    f"⚠️ {len(_tp_ghost_syms)} OKX fulfilled position(s) have no matching TP signal: "
-                    + ", ".join(_tp_ghost_syms)
+        _fulfilled_count = len(_tp_hist_24h) if _tp_hist else 0
+        _exp_label_tp = (
+            f"📋 OKX Fulfilled Orders — last 24 h ({_fulfilled_count})"
+            f"   ·   {_hist_ts_tp} · {_env_hist}"
+        )
+        with st.expander(_exp_label_tp, expanded=False):
+            if _tp_hist is None:
+                st.warning("⚠️ Could not fetch OKX position history — check Error Log.")
+            elif not _tp_hist_24h:
+                st.info("No fulfilled (TP-closed) positions in the last 24 hours.")
+            else:
+                # Build set of TP signal symbols for the Match column.
+                _tp_sig_syms = {s.get("symbol", "") for s in _tp_sigs}
+                _tp_close_map = {
+                    "2": "Take Profit",
+                    "4": "Partial TP",
+                }
+                _tp_rows = []
+                for _ph in _tp_hist_24h:
+                    _inst_tp     = _ph.get("instId", "")
+                    _sym_tp      = _inst_tp.replace("-USDT-SWAP", "USDT").replace("-", "")
+                    _rpnl_tp     = float(_ph.get("realizedPnl", 0) or 0)
+                    _close_ts_tp = ""
+                    try:
+                        _close_ts_tp = datetime.fromtimestamp(
+                            int(_ph.get("uTime", 0)) / 1000,
+                            tz=dubai_now().tzinfo
+                        ).strftime("%d %b %Y  %H:%M GST")
+                    except Exception:
+                        pass
+                    _matched_tp = _sym_tp in _tp_sig_syms or _inst_tp in _tp_sig_syms
+                    _tp_rows.append({
+                        "Symbol":       _inst_tp,
+                        "Direction":    _ph.get("direction", "").capitalize(),
+                        "Close Reason": _tp_close_map.get(_ph.get("type", ""), "TP"),
+                        "Contracts":    int(float(_ph.get("closeTotalPos", 0) or 0)),
+                        "Avg Entry":    float(_ph.get("openAvgPx",  0) or 0),
+                        "Close Price":  float(_ph.get("closeAvgPx", 0) or 0),
+                        "Realized PnL": round(_rpnl_tp, 4),
+                        "Close Time":   _close_ts_tp,
+                        "Match":        "✅" if _matched_tp else "⚠️ no signal",
+                    })
+
+                st.dataframe(
+                    _tp_rows,
+                    use_container_width=True,
+                    hide_index=True,
+                    height=len(_tp_rows) * 35 + 48,
+                    column_config={
+                        "Avg Entry":    st.column_config.NumberColumn(format="%.6f"),
+                        "Close Price":  st.column_config.NumberColumn(format="%.6f"),
+                        "Realized PnL": st.column_config.NumberColumn(
+                                            "Realized PnL $", format="%.4f"),
+                    },
                 )
 
     st.divider()
@@ -7602,18 +7633,21 @@ def _signal_tables_fragment():
 
     # ── Table 5: Queue Limit ────────────────────────────────────────────────────────
     # No PnL shown — queue_limit signals never opened a real trade.
-    _render_sig_table(_queue_sigs, "⏳ Queue Limit",    "No queued signals.")
-
-    if _queue_sigs:
-        if st.button("🗑️ Clear Queue Limit Records", key="clear_queue_limit"):
-            with _log_lock:
-                _b._bsc_log["signals"] = [
-                    s for s in _b._bsc_log["signals"]
-                    if s.get("status") != "queue_limit"
-                ]
-                save_log(_b._bsc_log)
-            st.success("✅ Queue Limit records cleared.")
-            st.rerun()
+    # Collapsed by default; clear button lives inside the same expander.
+    _ql_count = len(_queue_sigs)
+    with st.expander(f"⏳ Queue Limit ({_ql_count})", expanded=False):
+        _render_sig_table(_queue_sigs, "⏳ Queue Limit", "No queued signals.",
+                          show_header=False)
+        if _queue_sigs:
+            if st.button("🗑️ Clear Queue Limit Records", key="clear_queue_limit"):
+                with _log_lock:
+                    _b._bsc_log["signals"] = [
+                        s for s in _b._bsc_log["signals"]
+                        if s.get("status") != "queue_limit"
+                    ]
+                    save_log(_b._bsc_log)
+                st.success("✅ Queue Limit records cleared.")
+                st.rerun()
 
     # ── Table 6: Closed on OKX ─────────────────────────────────────────────────────
     # Positions that OKX closed (manually or otherwise) but weren't caught by the
