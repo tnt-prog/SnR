@@ -5284,7 +5284,8 @@ with st.sidebar:
 
     new_api_key = st.text_input(
         "API Key", value=_key_display,
-        key="cfg_api_key", disabled=not new_trade_enabled or _env_has["api_key"],
+        key="cfg_api_key", type="password",
+        disabled=not new_trade_enabled or _env_has["api_key"],
         placeholder=("Loaded from OKX_API_KEY env var" if _env_has["api_key"]
                      else "Your OKX API key"),
         help=(
