@@ -8626,7 +8626,17 @@ with st.expander("🤖 Manual Trade", expanded=False):
 # ── Charts ─────────────────────────────────────────────────────────────────────
 if signals:
     st.divider()
-    ch1, ch2 = st.columns(2)
+    # All three charts in one row: sector pie | outcomes bar | signals per day
+    from collections import Counter
+    _dc: Counter = Counter()
+    for s in signals:
+        try:
+            _d = to_dubai(datetime.fromisoformat(s["timestamp"].replace("Z","+00:00"))).strftime("%m/%d")
+            _dc[_d] += 1
+        except Exception:
+            pass
+    _has_per_day = len(signals) > 1 and bool(_dc)
+    ch1, ch2, ch3 = st.columns(3)
     sec_counts: dict = {}
     for s in signals:
         k = s.get("sector","Other"); sec_counts[k] = sec_counts.get(k,0)+1
@@ -8647,37 +8657,28 @@ if signals:
                      plot_bgcolor="rgba(0,0,0,0)", font=dict(color="#e6edf3"),
                      yaxis=dict(gridcolor="#21262d"), margin=dict(t=40,b=10,l=10,r=10)),
                      use_container_width=True)
-
-    if len(signals) > 1:
-        from collections import Counter
-        dc: Counter = Counter()
-        for s in signals:
-            try:
-                d = to_dubai(datetime.fromisoformat(s["timestamp"].replace("Z","+00:00"))).strftime("%m/%d")
-                dc[d] += 1
-            except Exception: pass
-        if dc:
-            days = sorted(dc.keys())
-            st.plotly_chart(go.Figure(go.Bar(
-                x=days, y=[dc[d] for d in days],
-                width=0.35,
-                marker=dict(
-                    color="#58a6ff",
-                    opacity=0.85,
-                    line=dict(color="#79c0ff", width=1),
-                ),
-                text=[dc[d] for d in days], textposition="outside",
-                textfont=dict(color="#79c0ff", size=12),
-            )).update_layout(
-                title=dict(text="Signals Per Day (Dubai/GST)", font=dict(size=13, color="#8b949e")),
-                paper_bgcolor="rgba(0,0,0,0)",
-                plot_bgcolor="rgba(0,0,0,0)",
-                font=dict(color="#e6edf3"),
-                bargap=0.6,
-                yaxis=dict(gridcolor="#21262d", zeroline=False),
-                xaxis=dict(gridcolor="#21262d"),
-                margin=dict(t=40, b=10, l=10, r=10),
-            ), use_container_width=True)
+    if _has_per_day:
+        _days = sorted(_dc.keys())
+        ch3.plotly_chart(go.Figure(go.Bar(
+            x=_days, y=[_dc[_d] for _d in _days],
+            width=0.2,
+            marker=dict(
+                color="#3fb950",
+                opacity=0.9,
+                line=dict(color="#56d364", width=1),
+            ),
+            text=[_dc[_d] for _d in _days], textposition="outside",
+            textfont=dict(color="#56d364", size=11),
+        )).update_layout(
+            title=dict(text="Signals Per Day (Dubai/GST)", font=dict(size=13, color="#8b949e")),
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+            font=dict(color="#e6edf3"),
+            bargap=0.7,
+            yaxis=dict(gridcolor="#21262d", zeroline=False),
+            xaxis=dict(gridcolor="#21262d"),
+            margin=dict(t=40, b=10, l=10, r=10),
+        ), use_container_width=True)
 
 # ── Filter funnel ──────────────────────────────────────────────────────────────
 # Deep-copy under lock so background thread can't mutate lists mid-render
