@@ -855,6 +855,7 @@ def get_symbols(watchlist: list) -> tuple:
                 # ctMult=10 → effective 10 LIT per contract).
                 _eff = _cv * _cmul if _cv > 0 else 0.0
                 ct_vals[sym] = _eff
+                _b._bsc_symbol_cache.setdefault("ct_raw", {})[sym] = (_cv, _cmul, _eff)  # (ctVal, ctMult, effective)
                 # Store 0 on parse failure so _get_ct_val treats it as a cache
                 # miss and forces a re-fetch rather than silently using 1.0.
             except (TypeError, ValueError):
@@ -1335,6 +1336,47 @@ def place_okx_order(sig: dict, cfg: dict) -> dict:
             _append_error("trade",
                           f"Could not fetch fill price, using signal entry: {fill_exc}",
                           symbol=sym, endpoint="/api/v5/trade/order[GET]")
+
+        # ── Step 3b: Post-entry margin sanity check ─────────────────────────
+        # OKX sometimes reports ctMult=1 in its instruments API even when the
+        # actual position calculation uses ctMult=10 (or more). This causes the
+        # bot to place 10× too many contracts. We detect this by fetching the
+        # real position margin and comparing it to the intended USDT amount.
+        try:
+            time.sleep(1.0)  # let OKX settle the position
+            _pos_verify = _trade_get("/api/v5/account/positions",
+                                     {"instType": "SWAP", "instId": _to_okx(sym)},
+                                     cfg)
+            if _pos_verify.get("code") == "0":
+                _pv_list = [p for p in _pos_verify.get("data", [])
+                            if float(p.get("pos", 0) or 0) != 0]
+                if _pv_list:
+                    _pv        = _pv_list[0]
+                    _pv_margin = float(_pv.get("imr", 0) or _pv.get("margin", 0) or 0)
+                    _pv_notional = _pv_margin * lev if _pv_margin > 0 else 0
+                    _expected_margin = usdt
+                    if _pv_margin > 0 and _pv_margin > _expected_margin * 1.8:
+                        _ratio = _pv_margin / _expected_margin
+                        # Derive correct effective ctVal from actual notional
+                        _pv_sz = float(_pv.get("pos", contracts) or contracts)
+                        _corrected_ct_val = (_pv_notional / (_pv_sz * actual_entry)
+                                             if _pv_sz > 0 and actual_entry > 0 else ct_val)
+                        # Update cache with correct value to prevent repeat on DCA
+                        _b._bsc_symbol_cache.setdefault("ct_val", {})[sym] = _corrected_ct_val
+                        _append_error(
+                            "trade",
+                            (f"⚠️ MARGIN OVERSIZE for {sym}: actual margin "
+                             f"{_pv_margin:.2f} USDT is {_ratio:.1f}× expected "
+                             f"{_expected_margin:.2f} USDT. OKX ctVal API mismatch "
+                             f"— bot used ctVal={ct_val:.4f} but effective "
+                             f"ctVal={_corrected_ct_val:.4f}. Cache corrected. "
+                             f"Consider closing this position manually."),
+                            symbol=sym, endpoint="margin_sanity_check",
+                        )
+        except Exception as _mv_exc:
+            _append_error("trade",
+                          f"Margin sanity check failed for {sym}: {_mv_exc}",
+                          symbol=sym, endpoint="margin_sanity_check")
 
         # Recalculate TP and SL from the actual fill price.
         # Isolated mode: SL = liquidation price (entry × (1 − 1/leverage)).
@@ -3410,20 +3452,66 @@ def _execute_dca_fill(sig: dict, cfg: dict) -> bool:
                     _live_pos = [p for p in _pos_chk.get("data", [])
                                  if float(p.get("pos", 0) or 0) != 0]
                     if not _live_pos:
+                        # -- Consult positions-history to determine HOW the position closed --
+                        _ph_status     = None
+                        _ph_close_px   = None
+                        _ph_close_time = dubai_now().isoformat()
+                        try:
+                            _ph_resp = _trade_get(
+                                "/api/v5/account/positions-history",
+                                {"instType": "SWAP", "instId": _to_okx(sym), "limit": "10"},
+                                cfg,
+                            )
+                            if _ph_resp.get("code") == "0" and _ph_resp.get("data"):
+                                # Parse signal entry time as ms timestamp
+                                try:
+                                    _entry_ms = int(_parse_iso_safe(sig["timestamp"]).timestamp() * 1000)
+                                except Exception:
+                                    _entry_ms = 0
+                                _ph_type_map = {"2": "tp_hit", "4": "tp_hit",
+                                                "1": "sl_hit", "3": "sl_hit", "5": "sl_hit"}
+                                _ph_match = None
+                                for _ph_rec in _ph_resp["data"]:
+                                    try:
+                                        _ph_rec_ms = int(_ph_rec.get("uTime", 0) or 0)
+                                    except Exception:
+                                        _ph_rec_ms = 0
+                                    if _ph_rec_ms > _entry_ms:
+                                        if (_ph_match is None or
+                                                _ph_rec_ms > int(_ph_match.get("uTime", 0) or 0)):
+                                            _ph_match = _ph_rec
+                                if _ph_match is not None:
+                                    _ph_type     = str(_ph_match.get("type", ""))
+                                    _ph_status   = _ph_type_map.get(_ph_type, "closed_okx")
+                                    _ph_close_px = float(_ph_match.get("closeAvgPx", 0) or 0) or None
+                                    try:
+                                        _ph_close_time = to_dubai(datetime.fromtimestamp(
+                                            int(_ph_match.get("uTime", 0)) / 1000, tz=timezone.utc
+                                        )).isoformat()
+                                    except Exception:
+                                        pass
+                        except Exception as _ph_exc:
+                            _append_error("trade",
+                                          f"DCA pre-check positions-history lookup failed for {sym}: {_ph_exc}",
+                                          symbol=sym, endpoint="/api/v5/account/positions-history")
+                        # Fall back: if positions-history gave no match, treat as closed_okx
+                        _final_status   = _ph_status or "closed_okx"
+                        _final_close_px = (_ph_close_px or
+                                           float(sig.get("latest_price") or
+                                                 sig.get("avg_entry") or
+                                                 sig.get("entry") or 0))
                         _append_error(
                             "trade",
                             f"DCA aborted for {sym} — no open OKX position found "
                             f"(signal age {int(_age_secs)}s, past grace period). "
-                            f"Position may have been closed externally (manual "
-                            f"close or OCO hit). Marking signal as closed.",
+                            f"positions-history resolved as {_final_status} @ {_ph_close_px}. "
+                            f"Marking signal accordingly.",
                             symbol=sym,
-                            endpoint="/api/v5/account/positions",
+                            endpoint="/api/v5/account/positions-history",
                         )
-                        sig["status"]      = "sl_hit"
-                        sig["close_price"] = float(sig.get("latest_price") or
-                                                   sig.get("avg_entry") or
-                                                   sig.get("entry") or 0)
-                        sig["close_time"]  = dubai_now().isoformat()
+                        sig["status"]      = _final_status
+                        sig["close_price"] = _final_close_px
+                        sig["close_time"]  = _ph_close_time
                         sig.pop("_dca_pending", None)
                         return False
             except Exception as _pos_exc:
@@ -5974,6 +6062,25 @@ with st.sidebar:
             "When ≥ 'Loop (min)', this setting is ignored and the main loop "
             "handles opens as before."
         ))
+    # ── SL-specific cooldown (per-coin blackout after SL hit) ────────────────
+    new_sl_cooldown_hours = st.number_input(
+        "SL Cooldown (hrs)", min_value=1, max_value=720, step=1,
+        value=int(_snap_cfg.get("sl_cooldown_hours", 24)),
+        key="cfg_sl_cooldown_hours",
+        help=(
+            "After an SL hit, block the same coin from re-entry for N hours.\n\n"
+            "Default: 24 hours.\n\n"
+            "⚠️ Applies **universally** — even to Super Setups. A coin that "
+            "just lost on SL is blacklisted for this entire window regardless "
+            "of how good the new setup looks.\n\n"
+            "This is separate from the short TP cooldown (Cooldown (TP, min)) "
+            "and only triggers on SL closes, not TP closes."
+        ))
+    st.divider()
+    st.markdown(
+        '<span style="color:#4da6ff;font-weight:700;">🔄 Sync Checkup</span>',
+        unsafe_allow_html=True,
+    )
     new_reconcile_t1_minutes = st.number_input(
         "Tier-1 Sync Interval (min)", min_value=0, max_value=60, step=1,
         value=int(_snap_cfg.get("reconcile_t1_minutes", 2) or 2),
@@ -5997,21 +6104,8 @@ with st.sidebar:
             "  • Bot=open + OKX has position + no active algo → re-place TP/OCO\n\n"
             "Set to 0 to disable Tier-2 sync. Only runs when trade_enabled is ON."
         ))
-    # ── SL-specific cooldown (per-coin blackout after SL hit) ────────────────
-    new_sl_cooldown_hours = st.number_input(
-        "SL Cooldown (hrs)", min_value=1, max_value=720, step=1,
-        value=int(_snap_cfg.get("sl_cooldown_hours", 24)),
-        key="cfg_sl_cooldown_hours",
-        help=(
-            "After an SL hit, block the same coin from re-entry for N hours.\n\n"
-            "Default: 24 hours.\n\n"
-            "⚠️ Applies **universally** — even to Super Setups. A coin that "
-            "just lost on SL is blacklisted for this entire window regardless "
-            "of how good the new setup looks.\n\n"
-            "This is separate from the short TP cooldown (Cooldown (TP, min)) "
-            "and only triggers on SL closes, not TP closes."
-        ))
     st.divider()
+
 
     st.markdown("**📋 Watchlist** (one symbol per line)")
     wl_text = st.text_area("wl", value="\n".join(_snap_cfg["watchlist"]),
@@ -6134,11 +6228,18 @@ with st.sidebar:
         with getattr(_b, "_bsc_error_log_lock", threading.Lock()):
             if hasattr(_b, "_bsc_error_log"):
                 _b._bsc_error_log.clear()
+        _b._bsc_error_log_cleared_at = dubai_now().isoformat()
         # 4 — last trade debug panel + manual/test trade session results
         _b._bsc_last_trade_raw = {}
         _b._bsc_last_error     = ""
         for _ss_key in ("_mt_last_result", "_test_trade_result"):
             st.session_state.pop(_ss_key, None)
+        # 5 — sync check counters (so SYNC CHECKS widget resets to 0)
+        for _attr in ("_bsc_reconcile_t1_runs", "_bsc_reconcile_t1_actions",
+                      "_bsc_reconcile_t1_last",
+                      "_bsc_reconcile_t2_runs", "_bsc_reconcile_t2_actions",
+                      "_bsc_reconcile_t2_last"):
+            setattr(_b, _attr, 0)
         st.success("✅ Flushed"); st.rerun()
 
     cd1, cd2 = st.columns(2)
@@ -6241,7 +6342,7 @@ with st.sidebar:
 # ─────────────────────────────────────────────────────────────────────────────
 # MAIN AREA
 # ─────────────────────────────────────────────────────────────────────────────
-_CODE_UPDATED = "28 Apr 2026  00:30 GST"
+_CODE_UPDATED = "28 Apr 2026  12:45 GST"
 st.title(f"S&R — Crypto Intelligent Portal   ·   🕐 {_CODE_UPDATED}")
 
 # ── Total Realized PnL computation ─────────────────────────────────────────────
@@ -6445,17 +6546,53 @@ deep_sc     = health.get("deep_scanned",     0)
 
 # ── Row 1: Scanner health ────────────────────────────────────────────────────
 m1, m2, m3, m4, m5c = st.columns(5)
-m1.metric("Cycles",          health.get("total_cycles", 0))
-m2.metric("Scan Time",       f"{health.get('last_scan_duration_s', 0)}s")
-m3.metric("API Errors",      health.get("total_api_errors", 0))
+m1.metric("Cycles",          health.get("total_cycles", 0),          help="How many full watchlist scan cycles have completed since startup")
+m2.metric("Scan Time",       f"{health.get('last_scan_duration_s', 0)}s", help="Duration of the last completed scan cycle in seconds")
+m3.metric("API Errors",      health.get("total_api_errors", 0),      help="Cumulative OKX API errors logged since startup")
 m4.metric("Pre-filtered ⚡", pre_out,  help="Coins removed by bulk ticker pre-filter (saves API calls)")
 m5c.metric("Deep Scanned",   deep_sc,  help="Coins that passed pre-filter and received full candle analysis")
 
 # ── Row 2: Trade results ──────────────────────────────────────────────────────
 m6, m7, m8, m8b, m9, m_sync = st.columns(6)
-m6.metric("Open",          open_count,    help=f"Active open trades (max {_max_open_cap} allowed simultaneously — configurable in sidebar)")
-m7.metric("TP Hit ✅",     tp_count)
-m8.metric("SL Hit ❌",     sl_count,      help="Regular SL hits (non-DCA trades, or DCA disabled)")
+# ── Open — large green ──────────────────────────────────────────────────
+with m6:
+    st.markdown(
+        f"""<div style="background:#0d1117;border:1px solid #21262d;border-radius:8px;
+                        padding:12px 16px 10px 16px;min-height:88px;"
+             title="Active open trades (max {_max_open_cap} allowed simultaneously — configurable in sidebar)">
+            <p style="margin:0 0 4px 0;font-size:0.72rem;font-weight:600;
+                      color:#f0c040;letter-spacing:.05em;line-height:1.2;">OPEN</p>
+            <p style="margin:0;font-size:1.9rem;font-weight:700;
+                      color:#f0c040;line-height:1.1;">{open_count}</p>
+        </div>""",
+        unsafe_allow_html=True,
+    )
+# ── TP Hit — large blue ──────────────────────────────────────────────────
+with m7:
+    st.markdown(
+        f"""<div style="background:#0d1117;border:1px solid #21262d;border-radius:8px;
+                        padding:12px 16px 10px 16px;min-height:88px;"
+             title="Signals closed at Take-Profit price since startup">
+            <p style="margin:0 0 4px 0;font-size:0.72rem;font-weight:600;
+                      color:#3fb950;letter-spacing:.05em;line-height:1.2;">TP HIT ✅</p>
+            <p style="margin:0;font-size:1.9rem;font-weight:700;
+                      color:#3fb950;line-height:1.1;">{tp_count}</p>
+        </div>""",
+        unsafe_allow_html=True,
+    )
+# ── SL Hit — large red ───────────────────────────────────────────────────
+with m8:
+    st.markdown(
+        f"""<div style="background:#0d1117;border:1px solid #21262d;border-radius:8px;
+                        padding:12px 16px 10px 16px;min-height:88px;"
+             title="Regular SL hits (non-DCA trades, or DCA disabled)">
+            <p style="margin:0 0 4px 0;font-size:0.72rem;font-weight:600;
+                      color:#f85149;letter-spacing:.05em;line-height:1.2;">SL HIT ❌</p>
+            <p style="margin:0;font-size:1.9rem;font-weight:700;
+                      color:#f85149;line-height:1.1;">{sl_count}</p>
+        </div>""",
+        unsafe_allow_html=True,
+    )
 m8b.metric("DCA-SL ❌",    dca_sl_count,  help="Ladder-exhausted SL hits — DCA trade closed at final SL (blended avg × (1 − sl_distance_pct)) after max DCAs were consumed")
 m9.metric("⏳ Queued",     queue_count,   help=f"Signals detected while the {_max_open_cap}-trade limit was reached — no order placed, coin rescanned each cycle")
 _sync_runs    = (getattr(_b, "_bsc_reconcile_t1_runs",    0) +
@@ -8532,7 +8669,17 @@ with st.expander("🤖 Manual Trade", expanded=False):
 # ── Charts ─────────────────────────────────────────────────────────────────────
 if signals:
     st.divider()
-    ch1, ch2 = st.columns(2)
+    # All three charts in one row: sector pie | outcomes bar | signals per day
+    from collections import Counter
+    _dc: Counter = Counter()
+    for s in signals:
+        try:
+            _d = to_dubai(datetime.fromisoformat(s["timestamp"].replace("Z","+00:00"))).strftime("%m/%d")
+            _dc[_d] += 1
+        except Exception:
+            pass
+    _has_per_day = len(signals) > 1 and bool(_dc)
+    ch1, ch2, ch3 = st.columns(3)
     sec_counts: dict = {}
     for s in signals:
         k = s.get("sector","Other"); sec_counts[k] = sec_counts.get(k,0)+1
@@ -8553,24 +8700,28 @@ if signals:
                      plot_bgcolor="rgba(0,0,0,0)", font=dict(color="#e6edf3"),
                      yaxis=dict(gridcolor="#21262d"), margin=dict(t=40,b=10,l=10,r=10)),
                      use_container_width=True)
-
-    if len(signals) > 1:
-        from collections import Counter
-        dc: Counter = Counter()
-        for s in signals:
-            try:
-                d = to_dubai(datetime.fromisoformat(s["timestamp"].replace("Z","+00:00"))).strftime("%m/%d")
-                dc[d] += 1
-            except Exception: pass
-        if dc:
-            days = sorted(dc.keys())
-            st.plotly_chart(go.Figure(go.Bar(
-                x=days, y=[dc[d] for d in days],
-                marker_color="#d29922", text=[dc[d] for d in days], textposition="outside"
-            )).update_layout(title="Signals Per Day (Dubai/GST)", paper_bgcolor="rgba(0,0,0,0)",
-                             plot_bgcolor="rgba(0,0,0,0)", font=dict(color="#e6edf3"),
-                             yaxis=dict(gridcolor="#21262d"), margin=dict(t=40,b=10,l=10,r=10)),
-                             use_container_width=True)
+    if _has_per_day:
+        _days = sorted(_dc.keys())
+        ch3.plotly_chart(go.Figure(go.Bar(
+            x=_days, y=[_dc[_d] for _d in _days],
+            width=0.2,
+            marker=dict(
+                color="#3fb950",
+                opacity=0.9,
+                line=dict(color="#56d364", width=1),
+            ),
+            text=[_dc[_d] for _d in _days], textposition="outside",
+            textfont=dict(color="#56d364", size=11),
+        )).update_layout(
+            title=dict(text="Signals Per Day (Dubai/GST)", font=dict(size=13, color="#8b949e")),
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+            font=dict(color="#e6edf3"),
+            bargap=0.7,
+            yaxis=dict(gridcolor="#21262d", zeroline=False),
+            xaxis=dict(gridcolor="#21262d"),
+            margin=dict(t=40, b=10, l=10, r=10),
+        ), use_container_width=True)
 
 # ── Filter funnel ──────────────────────────────────────────────────────────────
 # Deep-copy under lock so background thread can't mutate lists mid-render
@@ -8946,7 +9097,12 @@ if (
 st.divider()
 
 with getattr(_b, "_bsc_error_log_lock", threading.Lock()):
-    _err_snap = list(getattr(_b, "_bsc_error_log", []))
+    _err_all  = list(getattr(_b, "_bsc_error_log", []))
+_err_cleared_at = getattr(_b, "_bsc_error_log_cleared_at", None)
+if _err_cleared_at:
+    _err_snap = [e for e in _err_all if e.get("ts", "") >= _err_cleared_at]
+else:
+    _err_snap = _err_all
 
 _TYPE_ICON  = {"scan": "🔴", "trade": "🟠", "loop": "🟣", "http": "🔵",
                "signal_update": "🟤", "io": "💾"}
@@ -8955,7 +9111,8 @@ _TYPE_LABEL = {"scan": "Scan/Candle", "trade": "Trade/Order",
                "signal_update": "Signal Update", "io": "File I/O"}
 
 _err_count = len(_err_snap)
-_err_label = f"⚠️ API Error Log — {_err_count} entr{'y' if _err_count == 1 else 'ies'}"
+_err_cleared_str = (f" · cleared {_err_cleared_at[11:16]}" if _err_cleared_at else "")
+_err_label = f"⚠️ API Error Log — {_err_count} entr{'y' if _err_count == 1 else 'ies'}{_err_cleared_str}"
 
 with st.expander(_err_label, expanded=(_err_count > 0)):
     if not _err_snap:
@@ -8977,6 +9134,7 @@ with st.expander(_err_label, expanded=(_err_count > 0)):
         if ecol2.button("🗑 Clear error log", key="clear_err_log"):
             with _b._bsc_error_log_lock:
                 _b._bsc_error_log.clear()
+            _b._bsc_error_log_cleared_at = dubai_now().isoformat()
             st.rerun()
 
         # ── Type filter ───────────────────────────────────────────────────
@@ -9266,6 +9424,27 @@ def _build_diagnostics_text() -> str:
         _push(f"  <error fetching OKX positions: {_pe}>")
 
     # ── Two-Tier Reconciliation Status ───────────────────────────────────────
+    # ── OKX ctVal / ctMult cache ─────────────────────────────────────────────
+    _hdr("OKX CONTRACT SIZE CACHE (ctVal × ctMult → effective)")
+    _ct_raw = _b._bsc_symbol_cache.get("ct_raw", {})
+    if _ct_raw:
+        _suspicious = {s: v for s, v in _ct_raw.items()
+                       if abs(v[1] - 1.0) > 0.01}  # ctMult ≠ 1
+        _push(f"  Total cached: {len(_ct_raw)} symbols")
+        _push(f"  Symbols with ctMult ≠ 1: {len(_suspicious)}")
+        if _suspicious:
+            _push("  --- Non-unity ctMult tokens ---")
+            for _s, (_cv, _cm, _ef) in sorted(_suspicious.items()):
+                _push(f"    {_s:<14} ctVal={_cv}  ctMult={_cm}  effective={_ef}")
+        _push("  --- Watchlist tokens ---")
+        _cfg_wl = (_b._bsc_log.get("config") or {}).get("watchlist", [])
+        for _s in sorted(_cfg_wl):
+            if _s in _ct_raw:
+                _cv, _cm, _ef = _ct_raw[_s]
+                _push(f"    {_s:<14} ctVal={_cv}  ctMult={_cm}  effective={_ef}")
+    else:
+        _push("  (cache not yet populated — run a scan first)")
+
     _hdr("TWO-TIER SYNC STATUS")
     try:
         _t1_last    = getattr(_b, "_bsc_reconcile_t1_last", 0)
