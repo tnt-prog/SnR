@@ -6020,6 +6020,25 @@ with st.sidebar:
             "When ≥ 'Loop (min)', this setting is ignored and the main loop "
             "handles opens as before."
         ))
+    # ── SL-specific cooldown (per-coin blackout after SL hit) ────────────────
+    new_sl_cooldown_hours = st.number_input(
+        "SL Cooldown (hrs)", min_value=1, max_value=720, step=1,
+        value=int(_snap_cfg.get("sl_cooldown_hours", 24)),
+        key="cfg_sl_cooldown_hours",
+        help=(
+            "After an SL hit, block the same coin from re-entry for N hours.\n\n"
+            "Default: 24 hours.\n\n"
+            "⚠️ Applies **universally** — even to Super Setups. A coin that "
+            "just lost on SL is blacklisted for this entire window regardless "
+            "of how good the new setup looks.\n\n"
+            "This is separate from the short TP cooldown (Cooldown (TP, min)) "
+            "and only triggers on SL closes, not TP closes."
+        ))
+    st.divider()
+    st.markdown(
+        '<span style="color:#4da6ff;font-weight:700;">🔄 Sync Checkup</span>',
+        unsafe_allow_html=True,
+    )
     new_reconcile_t1_minutes = st.number_input(
         "Tier-1 Sync Interval (min)", min_value=0, max_value=60, step=1,
         value=int(_snap_cfg.get("reconcile_t1_minutes", 2) or 2),
@@ -6043,21 +6062,8 @@ with st.sidebar:
             "  • Bot=open + OKX has position + no active algo → re-place TP/OCO\n\n"
             "Set to 0 to disable Tier-2 sync. Only runs when trade_enabled is ON."
         ))
-    # ── SL-specific cooldown (per-coin blackout after SL hit) ────────────────
-    new_sl_cooldown_hours = st.number_input(
-        "SL Cooldown (hrs)", min_value=1, max_value=720, step=1,
-        value=int(_snap_cfg.get("sl_cooldown_hours", 24)),
-        key="cfg_sl_cooldown_hours",
-        help=(
-            "After an SL hit, block the same coin from re-entry for N hours.\n\n"
-            "Default: 24 hours.\n\n"
-            "⚠️ Applies **universally** — even to Super Setups. A coin that "
-            "just lost on SL is blacklisted for this entire window regardless "
-            "of how good the new setup looks.\n\n"
-            "This is separate from the short TP cooldown (Cooldown (TP, min)) "
-            "and only triggers on SL closes, not TP closes."
-        ))
     st.divider()
+
 
     st.markdown("**📋 Watchlist** (one symbol per line)")
     wl_text = st.text_area("wl", value="\n".join(_snap_cfg["watchlist"]),
@@ -6497,17 +6503,53 @@ deep_sc     = health.get("deep_scanned",     0)
 
 # ── Row 1: Scanner health ────────────────────────────────────────────────────
 m1, m2, m3, m4, m5c = st.columns(5)
-m1.metric("Cycles",          health.get("total_cycles", 0))
-m2.metric("Scan Time",       f"{health.get('last_scan_duration_s', 0)}s")
-m3.metric("API Errors",      health.get("total_api_errors", 0))
+m1.metric("Cycles",          health.get("total_cycles", 0),          help="How many full watchlist scan cycles have completed since startup")
+m2.metric("Scan Time",       f"{health.get('last_scan_duration_s', 0)}s", help="Duration of the last completed scan cycle in seconds")
+m3.metric("API Errors",      health.get("total_api_errors", 0),      help="Cumulative OKX API errors logged since startup")
 m4.metric("Pre-filtered ⚡", pre_out,  help="Coins removed by bulk ticker pre-filter (saves API calls)")
 m5c.metric("Deep Scanned",   deep_sc,  help="Coins that passed pre-filter and received full candle analysis")
 
 # ── Row 2: Trade results ──────────────────────────────────────────────────────
 m6, m7, m8, m8b, m9, m_sync = st.columns(6)
-m6.metric("Open",          open_count,    help=f"Active open trades (max {_max_open_cap} allowed simultaneously — configurable in sidebar)")
-m7.metric("TP Hit ✅",     tp_count)
-m8.metric("SL Hit ❌",     sl_count,      help="Regular SL hits (non-DCA trades, or DCA disabled)")
+# ── Open — large green ──────────────────────────────────────────────────
+with m6:
+    st.markdown(
+        f"""<div style="background:#0d1117;border:1px solid #21262d;border-radius:8px;
+                        padding:12px 16px 10px 16px;min-height:88px;"
+             title="Active open trades (max {_max_open_cap} allowed simultaneously — configurable in sidebar)">
+            <p style="margin:0 0 4px 0;font-size:0.72rem;font-weight:600;
+                      color:#3fb950;letter-spacing:.05em;line-height:1.2;">OPEN</p>
+            <p style="margin:0;font-size:1.9rem;font-weight:700;
+                      color:#3fb950;line-height:1.1;">{open_count}</p>
+        </div>""",
+        unsafe_allow_html=True,
+    )
+# ── TP Hit — large blue ──────────────────────────────────────────────────
+with m7:
+    st.markdown(
+        f"""<div style="background:#0d1117;border:1px solid #21262d;border-radius:8px;
+                        padding:12px 16px 10px 16px;min-height:88px;"
+             title="Signals closed at Take-Profit price since startup">
+            <p style="margin:0 0 4px 0;font-size:0.72rem;font-weight:600;
+                      color:#4da6ff;letter-spacing:.05em;line-height:1.2;">TP HIT ✅</p>
+            <p style="margin:0;font-size:1.9rem;font-weight:700;
+                      color:#4da6ff;line-height:1.1;">{tp_count}</p>
+        </div>""",
+        unsafe_allow_html=True,
+    )
+# ── SL Hit — large red ───────────────────────────────────────────────────
+with m8:
+    st.markdown(
+        f"""<div style="background:#0d1117;border:1px solid #21262d;border-radius:8px;
+                        padding:12px 16px 10px 16px;min-height:88px;"
+             title="Regular SL hits (non-DCA trades, or DCA disabled)">
+            <p style="margin:0 0 4px 0;font-size:0.72rem;font-weight:600;
+                      color:#f85149;letter-spacing:.05em;line-height:1.2;">SL HIT ❌</p>
+            <p style="margin:0;font-size:1.9rem;font-weight:700;
+                      color:#f85149;line-height:1.1;">{sl_count}</p>
+        </div>""",
+        unsafe_allow_html=True,
+    )
 m8b.metric("DCA-SL ❌",    dca_sl_count,  help="Ladder-exhausted SL hits — DCA trade closed at final SL (blended avg × (1 − sl_distance_pct)) after max DCAs were consumed")
 m9.metric("⏳ Queued",     queue_count,   help=f"Signals detected while the {_max_open_cap}-trade limit was reached — no order placed, coin rescanned each cycle")
 _sync_runs    = (getattr(_b, "_bsc_reconcile_t1_runs",    0) +
