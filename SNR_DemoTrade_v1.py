@@ -9417,29 +9417,25 @@ def _build_diagnostics_text() -> str:
 
     # ── Two-Tier Reconciliation Status ───────────────────────────────────────
     # ── OKX ctVal / ctMult cache ─────────────────────────────────────────────
-    lines_d.append("")
-    lines_d.append("=" * 78)
-    lines_d.append("OKX CONTRACT SIZE CACHE (ctVal × ctMult → effective)")
-    lines_d.append("=" * 78)
+    _hdr("OKX CONTRACT SIZE CACHE (ctVal × ctMult → effective)")
     _ct_raw = _b._bsc_symbol_cache.get("ct_raw", {})
-    _ct_eff = _b._bsc_symbol_cache.get("ct_val", {})
     if _ct_raw:
         _suspicious = {s: v for s, v in _ct_raw.items()
                        if abs(v[1] - 1.0) > 0.01}  # ctMult ≠ 1
-        lines_d.append(f"  Total cached: {len(_ct_raw)} symbols")
-        lines_d.append(f"  Symbols with ctMult ≠ 1: {len(_suspicious)}")
+        _push(f"  Total cached: {len(_ct_raw)} symbols")
+        _push(f"  Symbols with ctMult ≠ 1: {len(_suspicious)}")
         if _suspicious:
-            lines_d.append("  --- Non-unity ctMult tokens ---")
+            _push("  --- Non-unity ctMult tokens ---")
             for _s, (_cv, _cm, _ef) in sorted(_suspicious.items()):
-                lines_d.append(f"    {_s:<14} ctVal={_cv}  ctMult={_cm}  effective={_ef}")
-        lines_d.append("  --- Watchlist tokens ---")
+                _push(f"    {_s:<14} ctVal={_cv}  ctMult={_cm}  effective={_ef}")
+        _push("  --- Watchlist tokens ---")
         _cfg_wl = (_b._bsc_log.get("config") or {}).get("watchlist", [])
         for _s in sorted(_cfg_wl):
             if _s in _ct_raw:
                 _cv, _cm, _ef = _ct_raw[_s]
-                lines_d.append(f"    {_s:<14} ctVal={_cv}  ctMult={_cm}  effective={_ef}")
+                _push(f"    {_s:<14} ctVal={_cv}  ctMult={_cm}  effective={_ef}")
     else:
-        lines_d.append("  (cache not yet populated — run a scan first)")
+        _push("  (cache not yet populated — run a scan first)")
 
     _hdr("TWO-TIER SYNC STATUS")
     try:
