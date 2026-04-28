@@ -8660,11 +8660,24 @@ if signals:
             days = sorted(dc.keys())
             st.plotly_chart(go.Figure(go.Bar(
                 x=days, y=[dc[d] for d in days],
-                marker_color="#d29922", text=[dc[d] for d in days], textposition="outside"
-            )).update_layout(title="Signals Per Day (Dubai/GST)", paper_bgcolor="rgba(0,0,0,0)",
-                             plot_bgcolor="rgba(0,0,0,0)", font=dict(color="#e6edf3"),
-                             yaxis=dict(gridcolor="#21262d"), margin=dict(t=40,b=10,l=10,r=10)),
-                             use_container_width=True)
+                width=0.35,
+                marker=dict(
+                    color="#58a6ff",
+                    opacity=0.85,
+                    line=dict(color="#79c0ff", width=1),
+                ),
+                text=[dc[d] for d in days], textposition="outside",
+                textfont=dict(color="#79c0ff", size=12),
+            )).update_layout(
+                title=dict(text="Signals Per Day (Dubai/GST)", font=dict(size=13, color="#8b949e")),
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(0,0,0,0)",
+                font=dict(color="#e6edf3"),
+                bargap=0.6,
+                yaxis=dict(gridcolor="#21262d", zeroline=False),
+                xaxis=dict(gridcolor="#21262d"),
+                margin=dict(t=40, b=10, l=10, r=10),
+            ), use_container_width=True)
 
 # ── Filter funnel ──────────────────────────────────────────────────────────────
 # Deep-copy under lock so background thread can't mutate lists mid-render
