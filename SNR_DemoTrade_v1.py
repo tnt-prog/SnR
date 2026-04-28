@@ -6228,6 +6228,7 @@ with st.sidebar:
         with getattr(_b, "_bsc_error_log_lock", threading.Lock()):
             if hasattr(_b, "_bsc_error_log"):
                 _b._bsc_error_log.clear()
+        _b._bsc_error_log_cleared_at = dubai_now().isoformat()
         # 4 — last trade debug panel + manual/test trade session results
         _b._bsc_last_trade_raw = {}
         _b._bsc_last_error     = ""
@@ -9096,7 +9097,12 @@ if (
 st.divider()
 
 with getattr(_b, "_bsc_error_log_lock", threading.Lock()):
-    _err_snap = list(getattr(_b, "_bsc_error_log", []))
+    _err_all  = list(getattr(_b, "_bsc_error_log", []))
+_err_cleared_at = getattr(_b, "_bsc_error_log_cleared_at", None)
+if _err_cleared_at:
+    _err_snap = [e for e in _err_all if e.get("ts", "") >= _err_cleared_at]
+else:
+    _err_snap = _err_all
 
 _TYPE_ICON  = {"scan": "🔴", "trade": "🟠", "loop": "🟣", "http": "🔵",
                "signal_update": "🟤", "io": "💾"}
@@ -9105,7 +9111,8 @@ _TYPE_LABEL = {"scan": "Scan/Candle", "trade": "Trade/Order",
                "signal_update": "Signal Update", "io": "File I/O"}
 
 _err_count = len(_err_snap)
-_err_label = f"⚠️ API Error Log — {_err_count} entr{'y' if _err_count == 1 else 'ies'}"
+_err_cleared_str = (f" · cleared {_err_cleared_at[11:16]}" if _err_cleared_at else "")
+_err_label = f"⚠️ API Error Log — {_err_count} entr{'y' if _err_count == 1 else 'ies'}{_err_cleared_str}"
 
 with st.expander(_err_label, expanded=(_err_count > 0)):
     if not _err_snap:
@@ -9127,6 +9134,7 @@ with st.expander(_err_label, expanded=(_err_count > 0)):
         if ecol2.button("🗑 Clear error log", key="clear_err_log"):
             with _b._bsc_error_log_lock:
                 _b._bsc_error_log.clear()
+            _b._bsc_error_log_cleared_at = dubai_now().isoformat()
             st.rerun()
 
         # ── Type filter ───────────────────────────────────────────────────
