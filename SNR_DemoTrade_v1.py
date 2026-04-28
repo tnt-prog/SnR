@@ -855,6 +855,7 @@ def get_symbols(watchlist: list) -> tuple:
                 # ctMult=10 → effective 10 LIT per contract).
                 _eff = _cv * _cmul if _cv > 0 else 0.0
                 ct_vals[sym] = _eff
+                _b._bsc_symbol_cache.setdefault("ct_raw", {})[sym] = (_cv, _cmul, _eff)  # (ctVal, ctMult, effective)
                 # Store 0 on parse failure so _get_ct_val treats it as a cache
                 # miss and forces a re-fetch rather than silently using 1.0.
             except (TypeError, ValueError):
@@ -1335,6 +1336,47 @@ def place_okx_order(sig: dict, cfg: dict) -> dict:
             _append_error("trade",
                           f"Could not fetch fill price, using signal entry: {fill_exc}",
                           symbol=sym, endpoint="/api/v5/trade/order[GET]")
+
+        # ── Step 3b: Post-entry margin sanity check ─────────────────────────
+        # OKX sometimes reports ctMult=1 in its instruments API even when the
+        # actual position calculation uses ctMult=10 (or more). This causes the
+        # bot to place 10× too many contracts. We detect this by fetching the
+        # real position margin and comparing it to the intended USDT amount.
+        try:
+            time.sleep(1.0)  # let OKX settle the position
+            _pos_verify = _trade_get("/api/v5/account/positions",
+                                     {"instType": "SWAP", "instId": _to_okx(sym)},
+                                     cfg)
+            if _pos_verify.get("code") == "0":
+                _pv_list = [p for p in _pos_verify.get("data", [])
+                            if float(p.get("pos", 0) or 0) != 0]
+                if _pv_list:
+                    _pv        = _pv_list[0]
+                    _pv_margin = float(_pv.get("imr", 0) or _pv.get("margin", 0) or 0)
+                    _pv_notional = _pv_margin * lev if _pv_margin > 0 else 0
+                    _expected_margin = usdt
+                    if _pv_margin > 0 and _pv_margin > _expected_margin * 1.8:
+                        _ratio = _pv_margin / _expected_margin
+                        # Derive correct effective ctVal from actual notional
+                        _pv_sz = float(_pv.get("pos", contracts) or contracts)
+                        _corrected_ct_val = (_pv_notional / (_pv_sz * actual_entry)
+                                             if _pv_sz > 0 and actual_entry > 0 else ct_val)
+                        # Update cache with correct value to prevent repeat on DCA
+                        _b._bsc_symbol_cache.setdefault("ct_val", {})[sym] = _corrected_ct_val
+                        _append_error(
+                            "trade",
+                            (f"⚠️ MARGIN OVERSIZE for {sym}: actual margin "
+                             f"{_pv_margin:.2f} USDT is {_ratio:.1f}× expected "
+                             f"{_expected_margin:.2f} USDT. OKX ctVal API mismatch "
+                             f"— bot used ctVal={ct_val:.4f} but effective "
+                             f"ctVal={_corrected_ct_val:.4f}. Cache corrected. "
+                             f"Consider closing this position manually."),
+                            symbol=sym, endpoint="margin_sanity_check",
+                        )
+        except Exception as _mv_exc:
+            _append_error("trade",
+                          f"Margin sanity check failed for {sym}: {_mv_exc}",
+                          symbol=sym, endpoint="margin_sanity_check")
 
         # Recalculate TP and SL from the actual fill price.
         # Isolated mode: SL = liquidation price (entry × (1 − 1/leverage)).
@@ -9374,6 +9416,31 @@ def _build_diagnostics_text() -> str:
         _push(f"  <error fetching OKX positions: {_pe}>")
 
     # ── Two-Tier Reconciliation Status ───────────────────────────────────────
+    # ── OKX ctVal / ctMult cache ─────────────────────────────────────────────
+    lines_d.append("")
+    lines_d.append("=" * 78)
+    lines_d.append("OKX CONTRACT SIZE CACHE (ctVal × ctMult → effective)")
+    lines_d.append("=" * 78)
+    _ct_raw = _b._bsc_symbol_cache.get("ct_raw", {})
+    _ct_eff = _b._bsc_symbol_cache.get("ct_val", {})
+    if _ct_raw:
+        _suspicious = {s: v for s, v in _ct_raw.items()
+                       if abs(v[1] - 1.0) > 0.01}  # ctMult ≠ 1
+        lines_d.append(f"  Total cached: {len(_ct_raw)} symbols")
+        lines_d.append(f"  Symbols with ctMult ≠ 1: {len(_suspicious)}")
+        if _suspicious:
+            lines_d.append("  --- Non-unity ctMult tokens ---")
+            for _s, (_cv, _cm, _ef) in sorted(_suspicious.items()):
+                lines_d.append(f"    {_s:<14} ctVal={_cv}  ctMult={_cm}  effective={_ef}")
+        lines_d.append("  --- Watchlist tokens ---")
+        _cfg_wl = (_b._bsc_log.get("config") or {}).get("watchlist", [])
+        for _s in sorted(_cfg_wl):
+            if _s in _ct_raw:
+                _cv, _cm, _ef = _ct_raw[_s]
+                lines_d.append(f"    {_s:<14} ctVal={_cv}  ctMult={_cm}  effective={_ef}")
+    else:
+        lines_d.append("  (cache not yet populated — run a scan first)")
+
     _hdr("TWO-TIER SYNC STATUS")
     try:
         _t1_last    = getattr(_b, "_bsc_reconcile_t1_last", 0)
