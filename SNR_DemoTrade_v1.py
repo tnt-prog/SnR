@@ -6185,6 +6185,12 @@ with st.sidebar:
         _b._bsc_last_error     = ""
         for _ss_key in ("_mt_last_result", "_test_trade_result"):
             st.session_state.pop(_ss_key, None)
+        # 5 — sync check counters (so SYNC CHECKS widget resets to 0)
+        for _attr in ("_bsc_reconcile_t1_runs", "_bsc_reconcile_t1_actions",
+                      "_bsc_reconcile_t1_last",
+                      "_bsc_reconcile_t2_runs", "_bsc_reconcile_t2_actions",
+                      "_bsc_reconcile_t2_last"):
+            setattr(_b, _attr, 0)
         st.success("✅ Flushed"); st.rerun()
 
     cd1, cd2 = st.columns(2)
