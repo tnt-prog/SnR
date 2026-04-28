@@ -3410,20 +3410,66 @@ def _execute_dca_fill(sig: dict, cfg: dict) -> bool:
                     _live_pos = [p for p in _pos_chk.get("data", [])
                                  if float(p.get("pos", 0) or 0) != 0]
                     if not _live_pos:
+                        # -- Consult positions-history to determine HOW the position closed --
+                        _ph_status     = None
+                        _ph_close_px   = None
+                        _ph_close_time = dubai_now().isoformat()
+                        try:
+                            _ph_resp = _trade_get(
+                                "/api/v5/account/positions-history",
+                                {"instType": "SWAP", "instId": _to_okx(sym), "limit": "10"},
+                                cfg,
+                            )
+                            if _ph_resp.get("code") == "0" and _ph_resp.get("data"):
+                                # Parse signal entry time as ms timestamp
+                                try:
+                                    _entry_ms = int(_parse_iso_safe(sig["timestamp"]).timestamp() * 1000)
+                                except Exception:
+                                    _entry_ms = 0
+                                _ph_type_map = {"2": "tp_hit", "4": "tp_hit",
+                                                "1": "sl_hit", "3": "sl_hit", "5": "sl_hit"}
+                                _ph_match = None
+                                for _ph_rec in _ph_resp["data"]:
+                                    try:
+                                        _ph_rec_ms = int(_ph_rec.get("uTime", 0) or 0)
+                                    except Exception:
+                                        _ph_rec_ms = 0
+                                    if _ph_rec_ms > _entry_ms:
+                                        if (_ph_match is None or
+                                                _ph_rec_ms > int(_ph_match.get("uTime", 0) or 0)):
+                                            _ph_match = _ph_rec
+                                if _ph_match is not None:
+                                    _ph_type     = str(_ph_match.get("type", ""))
+                                    _ph_status   = _ph_type_map.get(_ph_type, "closed_okx")
+                                    _ph_close_px = float(_ph_match.get("closeAvgPx", 0) or 0) or None
+                                    try:
+                                        _ph_close_time = to_dubai(datetime.fromtimestamp(
+                                            int(_ph_match.get("uTime", 0)) / 1000, tz=timezone.utc
+                                        )).isoformat()
+                                    except Exception:
+                                        pass
+                        except Exception as _ph_exc:
+                            _append_error("trade",
+                                          f"DCA pre-check positions-history lookup failed for {sym}: {_ph_exc}",
+                                          symbol=sym, endpoint="/api/v5/account/positions-history")
+                        # Fall back: if positions-history gave no match, treat as closed_okx
+                        _final_status   = _ph_status or "closed_okx"
+                        _final_close_px = (_ph_close_px or
+                                           float(sig.get("latest_price") or
+                                                 sig.get("avg_entry") or
+                                                 sig.get("entry") or 0))
                         _append_error(
                             "trade",
                             f"DCA aborted for {sym} — no open OKX position found "
                             f"(signal age {int(_age_secs)}s, past grace period). "
-                            f"Position may have been closed externally (manual "
-                            f"close or OCO hit). Marking signal as closed.",
+                            f"positions-history resolved as {_final_status} @ {_ph_close_px}. "
+                            f"Marking signal accordingly.",
                             symbol=sym,
-                            endpoint="/api/v5/account/positions",
+                            endpoint="/api/v5/account/positions-history",
                         )
-                        sig["status"]      = "sl_hit"
-                        sig["close_price"] = float(sig.get("latest_price") or
-                                                   sig.get("avg_entry") or
-                                                   sig.get("entry") or 0)
-                        sig["close_time"]  = dubai_now().isoformat()
+                        sig["status"]      = _final_status
+                        sig["close_price"] = _final_close_px
+                        sig["close_time"]  = _ph_close_time
                         sig.pop("_dca_pending", None)
                         return False
             except Exception as _pos_exc:
@@ -6241,7 +6287,7 @@ with st.sidebar:
 # ─────────────────────────────────────────────────────────────────────────────
 # MAIN AREA
 # ─────────────────────────────────────────────────────────────────────────────
-_CODE_UPDATED = "28 Apr 2026  00:30 GST"
+_CODE_UPDATED = "28 Apr 2026  12:45 GST"
 st.title(f"S&R — Crypto Intelligent Portal   ·   🕐 {_CODE_UPDATED}")
 
 # ── Total Realized PnL computation ─────────────────────────────────────────────
