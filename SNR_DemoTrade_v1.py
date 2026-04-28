@@ -6518,9 +6518,9 @@ with m6:
                         padding:12px 16px 10px 16px;min-height:88px;"
              title="Active open trades (max {_max_open_cap} allowed simultaneously — configurable in sidebar)">
             <p style="margin:0 0 4px 0;font-size:0.72rem;font-weight:600;
-                      color:#3fb950;letter-spacing:.05em;line-height:1.2;">OPEN</p>
+                      color:#f0c040;letter-spacing:.05em;line-height:1.2;">OPEN</p>
             <p style="margin:0;font-size:1.9rem;font-weight:700;
-                      color:#3fb950;line-height:1.1;">{open_count}</p>
+                      color:#f0c040;line-height:1.1;">{open_count}</p>
         </div>""",
         unsafe_allow_html=True,
     )
@@ -6531,9 +6531,9 @@ with m7:
                         padding:12px 16px 10px 16px;min-height:88px;"
              title="Signals closed at Take-Profit price since startup">
             <p style="margin:0 0 4px 0;font-size:0.72rem;font-weight:600;
-                      color:#4da6ff;letter-spacing:.05em;line-height:1.2;">TP HIT ✅</p>
+                      color:#3fb950;letter-spacing:.05em;line-height:1.2;">TP HIT ✅</p>
             <p style="margin:0;font-size:1.9rem;font-weight:700;
-                      color:#4da6ff;line-height:1.1;">{tp_count}</p>
+                      color:#3fb950;line-height:1.1;">{tp_count}</p>
         </div>""",
         unsafe_allow_html=True,
     )
