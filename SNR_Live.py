@@ -934,7 +934,12 @@ def _trade_post(path: str, body: dict, cfg: dict) -> dict:
 
 def _trade_get(path: str, params: dict, cfg: dict) -> dict:
     """Authenticated GET to an OKX private endpoint."""
-    qs  = ("?" + "&".join(f"{k}={v}" for k, v in params.items())) if params else ""
+    # IMPORTANT: use urllib.parse.urlencode so that special characters (e.g. the
+    # comma in "conditional,oco") are percent-encoded the same way requests will
+    # encode them when building the actual URL.  A mismatch between the signed
+    # query string and the transmitted URL causes OKX to return 401.
+    from urllib.parse import urlencode
+    qs  = ("?" + urlencode(params)) if params else ""
     ts  = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
     sign = _okx_sign(ts, "GET", path + qs, "", cfg["api_secret"])
     headers = {
