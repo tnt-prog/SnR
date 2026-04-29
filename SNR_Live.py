@@ -74,8 +74,11 @@ _SYMBOL_CACHE_TTL = 6 * 3600   # refresh OKX instrument list every 6 hours
 # ─────────────────────────────────────────────────────────────────────────────
 # Bulk pre-filter thresholds  (A)
 # ─────────────────────────────────────────────────────────────────────────────
-PRE_FILTER_MIN_VOL_USDT  =  100_000   # minimum 24 h USDT volume
-PRE_FILTER_LOW_BUFFER    =    1.005   # price must be ≥ 0.5 % above 24 h low
+PRE_FILTER_MIN_VOL_USDT      =  1_000_000  # minimum 24 h USDT volume (raised from 100K)
+PRE_FILTER_LOW_BUFFER        =      1.005  # price must be ≥ 0.5 % above 24 h low
+PRE_FILTER_MIN_CHANGE_PCT    =        0.5  # 24 h change must be ≥ +0.5 % (coin moving up)
+PRE_FILTER_HIGH_BUFFER       =       0.92  # price must be ≥ 92 % of 24 h high (near peak)
+PRE_FILTER_MAX_SPREAD_PCT    =       0.20  # bid-ask spread must be ≤ 0.20 % (liquid book)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Dubai Timezone (UTC+4, no DST)
@@ -1690,6 +1693,9 @@ def get_bulk_tickers() -> dict:
                 "high24h":   float(t.get("high24h",   0) or 0),
                 "low24h":    float(t.get("low24h",    0) or 0),
                 "volCcy24h": float(t.get("volCcy24h", 0) or 0),
+                "sodUtc0":   float(t.get("sodUtc0",   0) or 0),
+                "askPx":     float(t.get("askPx",     0) or 0),
+                "bidPx":     float(t.get("bidPx",     0) or 0),
             }
         except Exception:
             pass
@@ -1699,9 +1705,12 @@ def pre_filter_by_ticker(symbols: list, tickers: dict) -> list:
     """
     Zero extra API calls — uses data already in the bulk ticker snapshot.
 
-    Keeps a coin only when:
-      1. 24 h USDT volume ≥ PRE_FILTER_MIN_VOL_USDT  (liquid market)
-      2. Last price ≥ 24 h low × PRE_FILTER_LOW_BUFFER (off the lows)
+    Keeps a coin only when ALL of the following pass:
+      1. 24 h USDT volume ≥ PRE_FILTER_MIN_VOL_USDT   (liquid market)
+      2. Last price ≥ 24 h low  × PRE_FILTER_LOW_BUFFER  (off the lows)
+      3. 24 h change ≥ PRE_FILTER_MIN_CHANGE_PCT %        (trending up)
+      4. Last price ≥ 24 h high × PRE_FILTER_HIGH_BUFFER  (near peak)
+      5. Bid-ask spread ≤ PRE_FILTER_MAX_SPREAD_PCT %      (liquid book)
     """
     kept = []
     for sym in symbols:
@@ -1709,14 +1718,36 @@ def pre_filter_by_ticker(symbols: list, tickers: dict) -> list:
         if not t:
             continue
         last     = t["last"]
+        open24h  = t["open24h"]
+        high24h  = t["high24h"]
         low24h   = t["low24h"]
         vol_usdt = t["volCcy24h"]
+        ask_px   = t["askPx"]
+        bid_px   = t["bidPx"]
 
+        # 1. Volume
         if vol_usdt < PRE_FILTER_MIN_VOL_USDT:
             continue
 
+        # 2. Not hugging 24 h low
         if low24h > 0 and last < low24h * PRE_FILTER_LOW_BUFFER:
             continue
+
+        # 3. 24 h momentum — coin must be net-up over the last 24 hours
+        if open24h > 0:
+            change_24h_pct = (last - open24h) / open24h * 100
+            if change_24h_pct < PRE_FILTER_MIN_CHANGE_PCT:
+                continue
+
+        # 4. Still near 24 h high — not deep in a pullback
+        if high24h > 0 and last < high24h * PRE_FILTER_HIGH_BUFFER:
+            continue
+
+        # 5. Spread guard — thin books produce bad fills at leverage
+        if ask_px > 0 and bid_px > 0:
+            spread_pct = (ask_px - bid_px) / bid_px * 100
+            if spread_pct > PRE_FILTER_MAX_SPREAD_PCT:
+                continue
 
         kept.append(sym)
     return kept
@@ -5755,7 +5786,7 @@ with st.sidebar:
             "Disabling forces a full deep-scan of every coin (much slower)."
         ))
     if new_use_pre_filter:
-        st.caption("✅ Vol ≥ 100k USDT · Price ≥ 24h Low × 1.005")
+        st.caption("✅ Vol ≥ 1M USDT · 24h chg ≥ +0.5% · Price within 8% of 24h High · Spread ≤ 0.20%")
     st.divider()
 
     # ── F2: PDZ 15m ────────────────────────────────────────────────────────────
