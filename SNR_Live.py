@@ -1976,23 +1976,23 @@ def _reset_filter_counts():
         "checked":          0,
         # ── elimination counters (new F-order) ────────────────────────────────
         "f2_pdz15m":        0,   # F2 — PDZ 15m
-        "f5_pdz5m":         0,   # F5 — PDZ 5m
+        "f3_pdz5m":         0,   # F3 — PDZ 5m
         "f4_rsi5m":         0,   # F4 — 5m RSI
-        "f3_rsi1h":         0,   # F3 — 1h RSI
-        "f6_atr":           0,   # F6 — ATR(14) 15m TP-reachability
-        "f7_ema_3m":        0,   # F7 — EMA 3m
-        "f7_ema_5m":        0,   # F7 — EMA 5m
-        "f7_ema_15m":       0,   # F7 — EMA 15m
-        # F9 MACD — per timeframe
-        "f9_macd_3m":       0,
-        "f9_macd_5m":       0,
-        "f9_macd_15m":      0,
-        # F10 SAR — per timeframe
-        "f10_sar_3m":       0,
-        "f10_sar_5m":       0,
-        "f10_sar_15m":      0,
-        "f11_vol":          0,   # F11 — Vol Spike
-        "f8_ema_cross":     0,   # F8 — 15m EMA crossover (fast > slow)
+        "f5_rsi1h":         0,   # F5 — 1h RSI
+        "f5b_atr":          0,   # F5b — ATR(14) 15m TP-reachability
+        "f6_ema_3m":        0,   # F6 — EMA 3m
+        "f6_ema_5m":        0,   # F6 — EMA 5m
+        "f6_ema_15m":       0,   # F6 — EMA 15m
+        # F7 MACD — per timeframe
+        "f7_macd_3m":       0,
+        "f7_macd_5m":       0,
+        "f7_macd_15m":      0,
+        # F8 SAR — per timeframe
+        "f8_sar_3m":        0,
+        "f8_sar_5m":        0,
+        "f8_sar_15m":       0,
+        "f9_vol":           0,   # F9 — Vol Spike
+        "f10_ema_cross":    0,   # F10 — 15m EMA crossover (fast > slow)
         "f_empty_data":     0,   # Stage 2 candle fetch returned empty for a timeframe
         "passed":           0,
         "super_setup":      0,   # subset of passed — 15m+1h Discount instant buys
@@ -2004,21 +2004,21 @@ def _reset_filter_counts():
         "pre_filter_passed_syms": [],
         "checked_syms":           [],
         "f2_elim_syms":           [],
-        "f5_elim_syms":           [],
-        "f4_elim_syms":           [],
         "f3_elim_syms":           [],
-        "f6_elim_syms":           [],
-        "f7_ema_3m_elim_syms":    [],
-        "f7_ema_5m_elim_syms":    [],
-        "f7_ema_15m_elim_syms":   [],
-        "f9_macd_3m_elim_syms":   [],
-        "f9_macd_5m_elim_syms":   [],
-        "f9_macd_15m_elim_syms":  [],
-        "f10_sar_3m_elim_syms":   [],
-        "f10_sar_5m_elim_syms":   [],
-        "f10_sar_15m_elim_syms":  [],
-        "f11_elim_syms":          [],
-        "f8_elim_syms":           [],
+        "f4_elim_syms":           [],
+        "f5_elim_syms":           [],
+        "f5b_elim_syms":          [],
+        "f6_ema_3m_elim_syms":    [],
+        "f6_ema_5m_elim_syms":    [],
+        "f6_ema_15m_elim_syms":   [],
+        "f7_macd_3m_elim_syms":   [],
+        "f7_macd_5m_elim_syms":   [],
+        "f7_macd_15m_elim_syms":  [],
+        "f8_sar_3m_elim_syms":    [],
+        "f8_sar_5m_elim_syms":    [],
+        "f8_sar_15m_elim_syms":   [],
+        "f9_elim_syms":           [],
+        "f10_elim_syms":          [],
         "f_empty_data_syms":      [],
         "passed_syms":            [],
         "super_setup_syms":       [],
@@ -2199,22 +2199,12 @@ def process(sym, cfg: dict, super_counter: dict = None, super_lock=None):
             # else: super cap exhausted — demote and fall through to F3-F10
             _record_elim("super_cap_demoted", "super_cap_demoted_syms", sym)
 
-        # ── F3: 1h RSI ─────────────────────────────────────────────────────────
-        # Highest-TF trend gate — data already in m1h_quick from Stage 1.
-        # Runs before any 5m entry analysis at zero extra API cost.
-        closes_1h = [c["close"] for c in m1h_quick]
-        rsi1h = (calc_rsi_series(closes_1h) or [0])[-1]
-        if cfg.get("use_rsi_1h", True) and \
-                not (cfg["rsi_1h_min"] <= rsi1h <= cfg["rsi_1h_max"]):
-            _record_elim("f3_rsi1h", "f3_elim_syms", sym)
-            return None
-
-        # ── F5: PDZ 5m ────────────────────────────────────────────────────────
+        # ── F3: PDZ 5m ────────────────────────────────────────────────────────
         pdz_zone_5m = "—"
         if cfg.get("use_pdz_5m", True):
             pdz_pass_5m, pdz_zone_5m = calc_pdz_zone(m5_quick, entry_q, float(cfg.get("tp_pct", 1.2)) / 100.0)
             if not pdz_pass_5m:
-                _record_elim("f5_pdz5m", "f5_elim_syms", sym)
+                _record_elim("f3_pdz5m", "f3_elim_syms", sym)
                 return None
 
         # ── F4: Quick 5m RSI (still early — before full fetch) ────────────────
@@ -2255,12 +2245,17 @@ def process(sym, cfg: dict, super_counter: dict = None, super_lock=None):
         closes_5m  = [c["close"] for c in m5]
         closes_15m = [c["close"] for c in m15]
         closes_3m  = [c["close"] for c in m3_candles]
-        # closes_1h already defined in F3 block above
+        closes_1h  = [c["close"] for c in m1h_candles]
         entry      = _pround(m5[-1]["close"])
 
-        # ── (1h RSI applied earlier as F3 — no duplicate check here)
+        # ── F5: 1h RSI ────────────────────────────────────────────────────────
+        rsi1h = (calc_rsi_series(closes_1h) or [0])[-1]
+        if cfg.get("use_rsi_1h", True) and \
+                not (cfg["rsi_1h_min"] <= rsi1h <= cfg["rsi_1h_max"]):
+            _record_elim("f5_rsi1h", "f5_elim_syms", sym)
+            return None
 
-        # ── F6: ATR(14) 15m — TP reachability filter ────────────────────────
+        # ── F5b: ATR(14) 15m — TP reachability filter ───────────────────────
         # ATR is ALWAYS computed and stored in criteria so that the Difficulty
         # column in the Open Signals table works regardless of whether the
         # filter toggle is on or off.
@@ -2281,47 +2276,31 @@ def process(sym, cfg: dict, super_counter: dict = None, super_lock=None):
             _atr_thresh = {"Strict": 1.5, "Normal": 2.0, "Relaxed": 3.0}.get(
                               cfg.get("atr_mode", "Normal"), 2.0)
             if atr_ratio_val > _atr_thresh:
-                _record_elim("f6_atr", "f6_elim_syms", sym)
+                _record_elim("f5b_atr", "f5b_elim_syms", sym)
                 return None
 
-        # ── F7: EMA (per-timeframe tracking) ────────────────────────────────
+        # ── F6: EMA (per-timeframe tracking) ────────────────────────────────
         ema_3m_val = ema_5m_val = ema_15m_val = None
         if cfg.get("use_ema_3m"):
             ema = calc_ema(closes_3m, max(2, int(cfg.get("ema_period_3m", 12))))
             if not ema or entry < ema[-1]:
-                _record_elim("f7_ema_3m", "f7_ema_3m_elim_syms", sym)
+                _record_elim("f6_ema_3m", "f6_ema_3m_elim_syms", sym)
                 return None
             ema_3m_val = _pround(ema[-1])
         if cfg.get("use_ema_5m"):
             ema = calc_ema(closes_5m, max(2, int(cfg.get("ema_period_5m", 12))))
             if not ema or entry < ema[-1]:
-                _record_elim("f7_ema_5m", "f7_ema_5m_elim_syms", sym)
+                _record_elim("f6_ema_5m", "f6_ema_5m_elim_syms", sym)
                 return None
             ema_5m_val = _pround(ema[-1])
         if cfg.get("use_ema_15m"):
             ema = calc_ema(closes_15m, max(2, int(cfg.get("ema_period_15m", 12))))
             if not ema or entry < ema[-1]:
-                _record_elim("f7_ema_15m", "f7_ema_15m_elim_syms", sym)
+                _record_elim("f6_ema_15m", "f6_ema_15m_elim_syms", sym)
                 return None
             ema_15m_val = _pround(ema[-1])
 
-        # ── F8: 15m EMA Crossover (fast > slow) ──────────────────────────────
-        # Uses 15m candles already fetched in Stage 1 (m15/closes_15m).
-        # Trend direction confirmed before price vs EMA (F7).
-        ema_cross_12_15m_val = ema_cross_21_15m_val = None
-        if cfg.get("use_ema_cross_15m", True):
-            _fast_p = max(2, int(cfg.get("ema_cross_fast_15m", 12)))
-            _slow_p = max(_fast_p + 1, int(cfg.get("ema_cross_slow_15m", 21)))
-            ema_fast_15m = calc_ema(closes_15m, _fast_p)
-            ema_slow_15m = calc_ema(closes_15m, _slow_p)
-            if not ema_fast_15m or not ema_slow_15m or \
-                    ema_fast_15m[-1] <= ema_slow_15m[-1]:
-                _record_elim("f8_ema_cross", "f8_elim_syms", sym)
-                return None
-            ema_cross_12_15m_val = _pround(ema_fast_15m[-1])
-            ema_cross_21_15m_val = _pround(ema_slow_15m[-1])
-
-        # ── F9: MACD dark-green — per-timeframe independent checks ──────────
+        # ── F7: MACD dark-green — per-timeframe independent checks ──────────
         # Each enabled timeframe is checked in order (3m → 5m → 15m).
         # The first failure increments that timeframe's own counter and eliminates
         # the coin — giving the funnel an accurate per-timeframe breakdown.
@@ -2337,24 +2316,24 @@ def process(sym, cfg: dict, super_counter: dict = None, super_lock=None):
             if _ml3 is not None:
                 macd_3m_val = round(_ml3, 8)
             if not _ok_3m:
-                _record_elim("f9_macd_3m", "f9_macd_3m_elim_syms", sym)
+                _record_elim("f7_macd_3m", "f7_macd_3m_elim_syms", sym)
                 return None
         if _macd_5m_on:
             _ok_5m, _ml5 = macd_bullish_and_value(closes_5m)
             if _ml5 is not None:
                 macd_5m_val = round(_ml5, 8)
             if not _ok_5m:
-                _record_elim("f9_macd_5m", "f9_macd_5m_elim_syms", sym)
+                _record_elim("f7_macd_5m", "f7_macd_5m_elim_syms", sym)
                 return None
         if _macd_15m_on:
             _ok_15m, _ml15 = macd_bullish_and_value(closes_15m)
             if _ml15 is not None:
                 macd_15m_val = round(_ml15, 8)
             if not _ok_15m:
-                _record_elim("f9_macd_15m", "f9_macd_15m_elim_syms", sym)
+                _record_elim("f7_macd_15m", "f7_macd_15m_elim_syms", sym)
                 return None
 
-        # ── F10: Parabolic SAR — per-timeframe independent checks ─────────────
+        # ── F8: Parabolic SAR — per-timeframe independent checks ─────────────
         # Each enabled timeframe checked in order (3m → 5m → 15m).
         # First failure increments that timeframe's counter and eliminates the coin.
         sar_3m_val = sar_5m_val = sar_15m_val = None
@@ -2364,23 +2343,23 @@ def process(sym, cfg: dict, super_counter: dict = None, super_lock=None):
         if _sar_3m_on:
             sar_3m = calc_parabolic_sar(m3_candles)
             if not (sar_3m and sar_3m[-1][1]):
-                _record_elim("f10_sar_3m", "f10_sar_3m_elim_syms", sym)
+                _record_elim("f8_sar_3m", "f8_sar_3m_elim_syms", sym)
                 return None
             sar_3m_val = _pround(sar_3m[-1][0])
         if _sar_5m_on:
             sar_5m = calc_parabolic_sar(m5)
             if not (sar_5m and sar_5m[-1][1]):
-                _record_elim("f10_sar_5m", "f10_sar_5m_elim_syms", sym)
+                _record_elim("f8_sar_5m", "f8_sar_5m_elim_syms", sym)
                 return None
             sar_5m_val = _pround(sar_5m[-1][0])
         if _sar_15m_on:
             sar_15m = calc_parabolic_sar(m15)
             if not (sar_15m and sar_15m[-1][1]):
-                _record_elim("f10_sar_15m", "f10_sar_15m_elim_syms", sym)
+                _record_elim("f8_sar_15m", "f8_sar_15m_elim_syms", sym)
                 return None
             sar_15m_val = _pround(sar_15m[-1][0])
 
-        # ── F11: Volume Spike ─────────────────────────────────────────────────
+        # ── F9: Volume Spike ──────────────────────────────────────────────────
         vol_ratio = None
         if cfg.get("use_vol_spike"):
             lookback = max(2, int(cfg.get("vol_spike_lookback", 20)))
@@ -2390,11 +2369,25 @@ def process(sym, cfg: dict, super_counter: dict = None, super_lock=None):
                 window   = vols_15m[-(lookback+1):-1]
                 avg_vol  = sum(window) / len(window)
                 if avg_vol <= 0 or vols_15m[-1] < mult * avg_vol:
-                    _record_elim("f11_vol", "f11_elim_syms", sym)
+                    _record_elim("f9_vol", "f9_elim_syms", sym)
                     return None
                 vol_ratio = round(vols_15m[-1] / avg_vol, 2) if avg_vol > 0 else None
 
-
+        # ── F10: 15m EMA Crossover (fast > slow) ─────────────────────────────
+        # Uses 15m candles already fetched in Stage 1 (m15/closes_15m).
+        # Coin passes only when EMA(fast) is strictly greater than EMA(slow).
+        ema_cross_12_15m_val = ema_cross_21_15m_val = None
+        if cfg.get("use_ema_cross_15m", True):
+            _fast_p = max(2, int(cfg.get("ema_cross_fast_15m", 12)))
+            _slow_p = max(_fast_p + 1, int(cfg.get("ema_cross_slow_15m", 21)))
+            ema_fast_15m = calc_ema(closes_15m, _fast_p)
+            ema_slow_15m = calc_ema(closes_15m, _slow_p)
+            if not ema_fast_15m or not ema_slow_15m or \
+                    ema_fast_15m[-1] <= ema_slow_15m[-1]:
+                _record_elim("f10_ema_cross", "f10_elim_syms", sym)
+                return None
+            ema_cross_12_15m_val = _pround(ema_fast_15m[-1])
+            ema_cross_21_15m_val = _pround(ema_slow_15m[-1])
 
         # ── All filters passed ────────────────────────────────────────────────
         tp      = _pround(entry * (1 + cfg["tp_pct"] / 100))
@@ -5319,25 +5312,488 @@ with st.sidebar:
     else:
         st.success("✅ **Circuit Breaker: OK**  —  No consecutive SL pause", icon=None)
     st.divider()
-    # ── F3: 1h RSI ─────────────────────────────────────────────────────────────
-    st.markdown("**📈 F3 — 1h RSI**")
-    new_use_rsi_1h = st.checkbox(
-        "Enable F3 — 1h RSI",
-        value=bool(_snap_cfg.get("use_rsi_1h", True)), key="cfg_use_rsi_1h",
+
+    # ── Auto-Trading ───────────────────────────────────────────────────────────
+    st.markdown("**🤖 Auto-Trading**")
+    new_trade_enabled = st.checkbox(
+        "Enable Auto-Trading",
+        value=bool(_snap_cfg.get("trade_enabled", False)), key="cfg_trade_enabled",
+        help="Automatically place a market LONG order on OKX when a signal fires.")
+
+    new_demo_mode = st.radio(
+        "Environment", ["Demo", "Live"],
+        index=0 if _snap_cfg.get("demo_mode", True) else 1,
+        horizontal=True, key="cfg_demo_mode",
+        help="Demo uses x-simulated-trading header. Live places real orders.",
+        disabled=not new_trade_enabled)
+    if new_trade_enabled and new_demo_mode == "Live":
+        st.warning("⚠️ LIVE mode — real funds at risk!")
+
+    # ── Credential source indicator ────────────────────────────────────────
+    # Env vars (OKX_API_KEY / OKX_API_SECRET / OKX_API_PASSPHRASE) take
+    # precedence over plaintext fields. Show the user which source is active
+    # so they know whether their secrets are sitting in scanner_config.json.
+    import os as _os_env
+    _env_has = {
+        "api_key":        bool(_os_env.environ.get("OKX_API_KEY", "").strip()),
+        "api_secret":     bool(_os_env.environ.get("OKX_API_SECRET", "").strip()),
+        "api_passphrase": bool(_os_env.environ.get("OKX_API_PASSPHRASE", "").strip()),
+    }
+    _any_env = any(_env_has.values())
+    _all_env = all(_env_has.values())
+    _has_plaintext = any(
+        str(_snap_cfg.get(k, "")).strip() for k in ("api_key", "api_secret", "api_passphrase")
+    )
+    if _all_env:
+        st.success(
+            "🔐 All 3 credentials loaded from environment variables "
+            "(`OKX_API_KEY`, `OKX_API_SECRET`, `OKX_API_PASSPHRASE`). "
+            "No secrets are persisted to disk.",
+            icon=None,
+        )
+    elif _any_env:
+        _missing = [k for k, v in _env_has.items() if not v]
+        st.info(
+            "🔑 Partial env-var credentials detected. Missing: "
+            f"`{', '.join(_missing)}`. Set all three env vars or fill the "
+            "text fields below.",
+            icon=None,
+        )
+    elif _has_plaintext:
+        st.warning(
+            "⚠️ API credentials are stored in **plaintext** in "
+            "`scanner_config.json`. Consider exporting `OKX_API_KEY`, "
+            "`OKX_API_SECRET`, and `OKX_API_PASSPHRASE` as environment "
+            "variables instead — they override the file and are never "
+            "written back to disk.",
+            icon=None,
+        )
+
+    # When env vars provide a credential, hide the saved value from the input
+    # and show a neutral placeholder instead of letting the user overwrite
+    # the empty-string placeholder with an actual key on save.
+    _key_display  = ("(from env)" if _env_has["api_key"]
+                     else _snap_cfg.get("api_key", ""))
+    _sec_display  = ("" if _env_has["api_secret"]
+                     else _snap_cfg.get("api_secret", ""))
+    _pass_display = ("" if _env_has["api_passphrase"]
+                     else _snap_cfg.get("api_passphrase", ""))
+
+    new_api_key = st.text_input(
+        "API Key", value=_key_display,
+        key="cfg_api_key", type="password",
+        disabled=not new_trade_enabled or _env_has["api_key"],
+        placeholder=("Loaded from OKX_API_KEY env var" if _env_has["api_key"]
+                     else "Your OKX API key"),
         help=(
-            "F3 — 1-Hour RSI Filter\n\n"
-            "RSI(14) on the 1h timeframe must fall within the Min–Max band.\n\n"
-            "Min: ensures real hourly momentum exists (coin is not dead).\n"
-            "Max: avoids entries when the coin is already overbought on the higher timeframe."
+            "OKX API key used to place and manage orders.\n\n"
+            "Env-var override: `OKX_API_KEY` (preferred — not written to disk)."
         ))
-    c3, c4 = st.columns(2)
-    new_rsi1h_min = c3.number_input("1h min", min_value=0, max_value=100, step=1,
-                                     value=int(_snap_cfg["rsi_1h_min"]), key="cfg_rsi1h_min",
-                                     disabled=not new_use_rsi_1h)
-    new_rsi1h_max = c4.number_input("1h max", min_value=0, max_value=100, step=1,
-                                     value=int(_snap_cfg["rsi_1h_max"]), key="cfg_rsi1h_max",
-                                     disabled=not new_use_rsi_1h)
+    new_api_secret = st.text_input(
+        "API Secret", value=_sec_display,
+        key="cfg_api_secret", type="password",
+        disabled=not new_trade_enabled or _env_has["api_secret"],
+        placeholder=("Loaded from OKX_API_SECRET env var" if _env_has["api_secret"]
+                     else "Your OKX API secret"),
+        help=(
+            "OKX API secret used to sign requests.\n\n"
+            "Env-var override: `OKX_API_SECRET` (preferred — not written to disk)."
+        ))
+    new_api_passphrase = st.text_input(
+        "API Passphrase", value=_pass_display,
+        key="cfg_api_passphrase", type="password",
+        disabled=not new_trade_enabled or _env_has["api_passphrase"],
+        placeholder=("Loaded from OKX_API_PASSPHRASE env var" if _env_has["api_passphrase"]
+                     else "Your OKX API passphrase"),
+        help=(
+            "OKX API passphrase (set when the key was created).\n\n"
+            "Env-var override: `OKX_API_PASSPHRASE` (preferred — not written to disk)."
+        ))
+
+    # ── Size / Leverage / Margin Mode ────────────────────────────────────────
+    # These fields are EDITABLE even when Auto-Trading is OFF, because they
+    # drive display-only calculations too:
+    #   • Est Liquidity column    — uses leverage + margin mode
+    #   • PnL $ column        — uses size × leverage as notional
+    #   • Super / normal SL   — uses leverage to derive isolated SL (1 / lev)
+    # The user needs to be able to tune these to preview what a live trade
+    # would look like without having to enable live trading first.
+    ta1, ta2 = st.columns(2)
+    new_trade_usdt = ta1.number_input(
+        "Size (USDT)", min_value=1.0, max_value=100000.0, step=1.0,
+        value=float(_snap_cfg.get("trade_usdt_amount", 10.0)),
+        key="cfg_trade_usdt",
+        help=(
+            "Collateral per trade in USDT (before leverage).\n\n"
+            "Used by:\n"
+            "  • Live order size (when Auto-Trading is enabled)\n"
+            "  • PnL $ column — notional = Size × Leverage\n"
+            "  • Notional preview below\n\n"
+            "Editable whether or not Auto-Trading is enabled."
+        ))
+    new_trade_lev = ta2.number_input(
+        "Leverage ×", min_value=1, max_value=125, step=1,
+        value=int(_snap_cfg.get("trade_leverage", 10)),
+        key="cfg_trade_lev",
+        help=(
+            "Leverage applied (capped by OKX max for each coin).\n\n"
+            "Used by:\n"
+            "  • Live order leverage (when Auto-Trading is enabled)\n"
+            "  • Est Liquidity column — isolated liq ≈ entry × (1 − 1/lev)\n"
+            "  • PnL $ column — notional = Size × Leverage\n"
+            "  • Isolated SL level — SL = entry × (1 − 1/lev)\n\n"
+            "Editable whether or not Auto-Trading is enabled."
+        ))
+    new_margin_mode = st.selectbox(
+        "Margin Mode", ["isolated", "cross"],
+        index=0 if _snap_cfg.get("trade_margin_mode", "isolated") == "isolated" else 1,
+        key="cfg_margin_mode",
+        help=(
+            "Margin mode for futures positions.\n\n"
+            "  • isolated — each position uses its own collateral; SL is "
+            "pinned at the liquidation price (1/leverage below entry). "
+            "Est Liquidity column shows the per-trade liq price.\n"
+            "  • cross    — positions share account equity as collateral; SL "
+            "uses the configured SL %. Est Liquidity column shows '—'.\n\n"
+            "Editable whether or not Auto-Trading is enabled — affects display "
+            "columns (Est Liquidity) and SL placement logic."
+        ))
+
+    # ── Max DCA per Trade ─────────────────────────────────────────────────────
+    # Dropdown (0-6). Doubling ladder; each add placed as a real market order.
+    # Trigger math differs for isolated vs cross — see DEFAULT_CONFIG docstring.
+    _dca_opts = [0, 1, 2, 3, 4, 5, 6]
+    _cur_dca  = int(_snap_cfg.get("trade_max_dca", 1))
+    if _cur_dca not in _dca_opts:
+        _cur_dca = 1
+    new_trade_max_dca = st.selectbox(
+        "Max DCA per Trade", _dca_opts,
+        index=_dca_opts.index(_cur_dca),
+        key="cfg_trade_max_dca",
+        help=(
+            "How many automated DCA (Dollar-Cost Averaging) adds are allowed "
+            "per trade.\n\n"
+            "  • 0 — DCA OFF. Legacy behavior: sidebar TP/SL apply as usual.\n"
+            "  • 1-6 — Allow up to N DCA adds. Each DCA doubles the previous "
+            "add's margin (base → base → 2× → 4× → 8× …).\n\n"
+            "Trigger:\n"
+            "  • Isolated — DCA fires at 70% of the distance from blended "
+            "average to current liquidation price.\n"
+            "  • Cross — DCA fires at −7% below the current blended average.\n\n"
+            "After N DCAs are consumed, the final SL sits at −3% below the "
+            "blended average. Such closures route to the dedicated DCA SL Hit "
+            "table. When DCA > 0 the sidebar SL % is IGNORED; only TP or the "
+            "final −3% rule can close the position.\n\n"
+            "Editable whether or not Auto-Trading is enabled."
+        ))
+
+    # ── DCA trigger drop percentages ─────────────────────────────────────────
+    # Two fields, shown based on margin mode. Both are snapshotted onto the
+    # signal at entry time so sidebar changes don't retroactively alter
+    # already-open trades.
+    if new_margin_mode == "isolated":
+        # Fixed dropdown — % distance FROM liquidation price toward entry.
+        # 10% = DCA fires close to liquidation (aggressive); 95% = fires
+        # very close to entry (conservative).
+        _iso_options = list(range(10, 100, 5))  # 10, 15, …, 95
+        _cur_iso_pct = float(_snap_cfg.get("dca_iso_distance_pct", 70.0) or 70.0)
+        # Snap the saved value to the nearest dropdown option so the widget
+        # can always render (free-input legacy values get normalized).
+        _cur_iso_int = int(round(_cur_iso_pct / 5.0) * 5)
+        _cur_iso_int = max(10, min(95, _cur_iso_int))
+        try:
+            _cur_iso_idx = _iso_options.index(_cur_iso_int)
+        except ValueError:
+            _cur_iso_idx = _iso_options.index(70)
+        new_dca_iso_distance_pct = float(st.selectbox(
+            "DCA Trigger — Isolated (% distance from liquidation)",
+            options=_iso_options,
+            index=_cur_iso_idx,
+            format_func=lambda v: f"{v}%",
+            key="cfg_dca_iso_distance_pct",
+            help=(
+                "Only applies when Max DCA > 0 AND Margin Mode = Isolated.\n\n"
+                "Meaning: DCA fires at the chosen % DISTANCE ABOVE the "
+                "liquidation price (toward entry). Lower % = closer to "
+                "liquidation (aggressive — you sit deep in the hole before "
+                "averaging). Higher % = closer to entry (conservative — "
+                "average down quickly on small drawdowns).\n\n"
+                "Formula:\n"
+                "  dca_drop %  = (1 / leverage) × (1 − chosen_pct / 100)\n"
+                "  DCA price   = entry × (1 − dca_drop %)\n\n"
+                "Example — Entry $100, 10× leverage → liquidation ≈ $90:\n"
+                "  • 10% → DCA fires at $91   (10% above liq, toward entry)\n"
+                "  • 50% → DCA fires at $95   (midpoint)\n"
+                "  • 70% → DCA fires at $97   (70% above liq, toward entry)\n"
+                "  • 95% → DCA fires at $99.50 (very close to entry)\n\n"
+                "The chosen value is snapshotted onto each signal at entry "
+                "time, so changing it later does not retroactively move the "
+                "trigger on already-open trades."
+            )))
+        new_dca_cross_drop_pct = float(_snap_cfg.get("dca_cross_drop_pct", 7.0) or 7.0)
+    else:
+        _cur_cross_pct = float(_snap_cfg.get("dca_cross_drop_pct", 7.0) or 7.0)
+        _cur_cross_pct = max(0.1, min(50.0, _cur_cross_pct))
+        new_dca_cross_drop_pct = st.number_input(
+            "DCA Trigger — Cross (% fixed drop below avg)",
+            min_value=0.1, max_value=50.0,
+            value=float(_cur_cross_pct), step=0.5,
+            key="cfg_dca_cross_drop_pct",
+            help=(
+                "Only applies when Max DCA > 0 AND Margin Mode = Cross.\n\n"
+                "DCA fires at a fixed percentage drop below the current "
+                "blended average entry. Default 7%.\n\n"
+                "Example: avg entry $100, drop % = 7 → DCA triggers at $93. "
+                "After the fill, the next DCA uses the new (lower) blended "
+                "avg × (1 - drop%) as its trigger.\n\n"
+                "Higher values = wait for a deeper drawdown before adding."
+            ))
+        new_dca_iso_distance_pct = float(_snap_cfg.get("dca_iso_distance_pct", 70.0) or 70.0)
+
+    # ── Fixed dollar TP/SL after DCA ──────────────────────────────────────────
+    _cur_dca_tp_usd = float(_snap_cfg.get("dca_tp_usd", 0.50) or 0.50)
+    new_dca_tp_usd = st.number_input(
+        "DCA TP — Fixed $ profit target",
+        min_value=0.10, max_value=50.0,
+        value=float(max(0.10, min(50.0, _cur_dca_tp_usd))), step=0.10,
+        key="cfg_dca_tp_usd",
+        help=(
+            "After any DCA fill (DCA-1 through max ladder), the TP is set to "
+            "close the position at exactly this dollar profit.\n\n"
+            "Formula: TP price = blended avg + (this value ÷ total coins held)\n\n"
+            "Example: avg $0.0504, $400 notional (7,936 coins) →\n"
+            "  TP = avg + ($0.50 ÷ 7,936) ≈ avg + $0.000063 per coin.\n\n"
+            "Applies to BOTH paper and live modes. Default: $0.50."
+        ))
+    _cur_dca_sl_usd = float(_snap_cfg.get("dca_sl_usd", 5.00) or 5.00)
+    new_dca_sl_usd = st.number_input(
+        "DCA SL — Fixed $ loss limit",
+        min_value=0.50, max_value=500.0,
+        value=float(max(0.50, min(500.0, _cur_dca_sl_usd))), step=0.50,
+        key="cfg_dca_sl_usd",
+        help=(
+            "After any DCA fill, the SL is set to close the position at this "
+            "maximum dollar loss from the blended average. Fully replaces the "
+            "percentage-based SL for DCA trades.\n\n"
+            "Formula: SL price = blended avg − (this value ÷ total coins held)\n\n"
+            "Example: avg $0.0504, $400 notional (7,936 coins) →\n"
+            "  SL = avg − ($5.00 ÷ 7,936) ≈ avg − $0.000630 per coin.\n\n"
+            "Priority: SL hit takes precedence over the next DCA trigger — the "
+            "bot will NOT add more margin into a position whose loss has already "
+            "reached this limit.\n\n"
+            "Applies to BOTH paper and live modes. Default: $5.00."
+        ))
+
+    # Notional preview — always shown (even when Auto-Trading is off) so the
+    # user can see the effective trade size driven by Size × Leverage.
+    notional_usdt = new_trade_usdt * new_trade_lev
+    _liq_pct_cap  = round(100 / new_trade_lev, 2) if new_trade_lev > 0 else 0
+    _sl_caption   = (f"SL @ liq ~{_liq_pct_cap:.1f}% below entry"
+                     if new_margin_mode == "isolated"
+                     else f"SL -${notional_usdt * _snap_cfg.get('sl_pct',3.0)/100:.2f}")
+    _preview_prefix = "📐" if new_trade_enabled else "📐 *(preview)*"
+    st.caption(f"{_preview_prefix} Notional per trade: ~${notional_usdt:,.0f} USDT   "
+               f"| TP +${notional_usdt * _snap_cfg.get('tp_pct',1.5)/100:.2f}   "
+               f"| {_sl_caption}")
+    if new_trade_enabled:
+        st.caption("🔒 Credentials stored in scanner_config.json. "
+                   "Use a trade-only API key — never withdrawal permissions.")
+
+    # ── Connection test ────────────────────────────────────────────────────────
+    _conn = getattr(_b, "_bsc_api_conn_status",
+                    {"status": "untested", "message": "", "tested_at": None,
+                     "demo_mode": None, "uid": ""})
+    _has_creds = bool(_snap_cfg.get("api_key") and _snap_cfg.get("api_secret")
+                      and _snap_cfg.get("api_passphrase"))
+    if st.button("🔌 Test Connection", use_container_width=True,
+                 disabled=not _has_creds,
+                 help="Verify your API credentials against OKX right now."):
+        with st.spinner("Testing…"):
+            _result = test_api_connection(dict(_snap_cfg))
+        _b._bsc_api_conn_status = {
+            "status":    _result["status"],
+            "message":   _result["message"],
+            "tested_at": dubai_now().isoformat(),
+            "demo_mode": _snap_cfg.get("demo_mode", True),
+            "uid":       _result.get("uid", ""),
+            "pos_mode":  _result.get("pos_mode", "net_mode"),
+            "acct_lv":   _result.get("acct_lv", "2"),
+        }
+        st.rerun()
+
+    # Show last test result
+    _conn_now = getattr(_b, "_bsc_api_conn_status",
+                        {"status": "untested", "message": "", "tested_at": None})
+    _conn_status = _conn_now.get("status", "untested")
+    if _conn_status == "ok":
+        st.success(f"🟢 {_conn_now['message']}")
+        if _conn_now.get("uid"):
+            st.caption(f"UID: {_conn_now['uid']}  ·  tested {fmt_dubai(_conn_now['tested_at'])}")
+    elif _conn_status == "error":
+        st.error(f"🔴 {_conn_now['message']}")
+        st.caption(f"Last tested: {fmt_dubai(_conn_now['tested_at'])}")
+    else:
+        if _has_creds:
+            st.caption("⚫ Not tested yet — click Test Connection")
+        else:
+            st.caption("⚫ Enter API credentials above to enable")
+
+    # Show detected position mode (critical for order placement)
+    if _conn_status == "ok":
+        _pm = _conn_now.get("pos_mode", "net_mode")
+        if _pm == "long_short_mode":
+            st.info("📐 Position mode: **Hedge (Long/Short)** — `posSide: long` added to orders automatically.")
+        else:
+            st.info("📐 Position mode: **Net** — standard order placement.")
+
+    # ── Test Trade button (places + cancels a minimal BTCUSDT order) ──────────
+    _conn_ok = _conn_status == "ok" and _snap_cfg.get("trade_enabled", False)
+    if st.button("🧪 Test Trade (BTC · 1 contract)", use_container_width=True,
+                 disabled=not _conn_ok,
+                 help="Places a 1-contract market buy on BTCUSDT, then immediately cancels it. "
+                      "Use this to confirm order placement works before signals fire."):
+        with st.spinner("Placing test order…"):
+            _tc = dict(_snap_cfg)
+            _cs = getattr(_b, "_bsc_api_conn_status", {})
+            _is_h = _cs.get("pos_mode", "net_mode") == "long_short_mode"
+            _mode = _tc.get("trade_margin_mode", "isolated")
+
+            # Set leverage
+            try:
+                _set_leverage_okx("BTCUSDT", _tc)
+            except Exception:
+                pass
+
+            _tbody: dict = {
+                "instId":  "BTC-USDT-SWAP",
+                "tdMode":  _mode,
+                "side":    "buy",
+                "ordType": "market",
+                "sz":      "1",
+            }
+            if _is_h:
+                _tbody["posSide"] = "long"
+
+            _tresp = _trade_post("/api/v5/trade/order", _tbody, _tc)
+            _b._bsc_last_trade_raw = {
+                "endpoint":  "/api/v5/trade/order",
+                "body_sent": _tbody,
+                "response":  _tresp,
+                "is_hedge":  _is_h,
+            }
+
+            # Immediately cancel if placed
+            _td0    = (_tresp.get("data") or [{}])[0]
+            _tordid = _td0.get("ordId", "")
+            if _tresp.get("code") == "0" and _tordid:
+                try:
+                    _trade_post("/api/v5/trade/cancel-order",
+                                {"instId": "BTC-USDT-SWAP", "ordId": _tordid}, _tc)
+                except Exception:
+                    pass
+                st.session_state["_test_trade_result"] = ("ok", f"✅ Test order placed & cancelled · ordId: {_tordid}")
+            else:
+                _terr = _okx_err(_tresp)
+                _append_error("trade", f"Test trade failed: {_terr} | body={json.dumps(_tbody)} | resp={json.dumps(_tresp)[:300]}", endpoint="/api/v5/trade/order")
+                st.session_state["_test_trade_result"] = ("err", f"❌ {_terr}")
+
+    _ttr = st.session_state.get("_test_trade_result")
+    if _ttr:
+        if _ttr[0] == "ok":
+            st.success(_ttr[1])
+        else:
+            st.error(_ttr[1])
+
+    # ── Raw response debug expander ───────────────────────────────────────────
+    _raw = getattr(_b, "_bsc_last_trade_raw", {})
+    if _raw:
+        with st.expander("🔬 Last order raw response (debug)"):
+            st.caption("Body sent to OKX:")
+            st.json(_raw.get("body_sent", {}))
+            st.caption("OKX response:")
+            st.json(_raw.get("response", {}))
+            st.caption(f"is_hedge={_raw.get('is_hedge')}  "
+                       f"contracts={_raw.get('contracts','?')}  "
+                       f"ct_val={_raw.get('ct_val','?')}")
     st.divider()
+
+    st.markdown("**📊 Trade Settings**")
+    c1, c2 = st.columns(2)
+    new_tp = c1.number_input("TP %", min_value=0.1, max_value=20.0, step=0.1, value=float(_snap_cfg["tp_pct"]),    key="cfg_tp")
+    _isolated_active = _snap_cfg.get("trade_margin_mode", "isolated") == "isolated"
+    new_sl = c2.number_input(
+        "SL % (Cross only)", min_value=0.1, max_value=20.0, step=0.1,
+        value=float(_snap_cfg["sl_pct"]), key="cfg_sl",
+        disabled=_isolated_active,
+        help=(
+            "Applies only to CROSS margin trades.\n\n"
+            "• Cross mode → SL = entry × (1 − SL%/100). "
+            "After each DCA, SL = blended_avg × (1 − SL%/100), "
+            "so the stop moves down with the new average.\n\n"
+            "• Isolated mode → SL is pinned to the liquidation price "
+            "(entry × (1 − 1/leverage)). This field is ignored. "
+            "After each DCA, SL = blended_avg × (1 − 1/leverage), "
+            "which equals the NEW liquidation of the averaged position.\n\n"
+            "Final DCA rule (both modes): once the ladder is fully "
+            "consumed, SL continues using the same formula as all earlier "
+            "DCAs (blended_avg × (1 − sl_distance_pct)) and a breach "
+            "routes the trade into the DCA SL Hit table."
+        )
+    )
+    st.divider()
+
+    # ── F1: Bulk Pre-filter ────────────────────────────────────────────────────
+    st.markdown("**⚡ F1 — Bulk Pre-filter**")
+    new_use_pre_filter = st.checkbox(
+        "Enable F1 — Bulk Pre-filter",
+        value=bool(_snap_cfg.get("use_pre_filter", True)), key="cfg_use_pre_filter",
+        help=(
+            "F1 — Bulk Pre-filter\n\n"
+            "One API call screens the entire watchlist before any candle fetching.\n"
+            "✅ Keeps: 24h Vol ≥ 100,000 USDT  ·  Price ≥ 24h Low × 1.005\n"
+            "❌ Drops: Low-volume coins · Coins hugging the 24h low\n\n"
+            "Disabling forces a full deep-scan of every coin (much slower)."
+        ))
+    if new_use_pre_filter:
+        st.caption("✅ Vol ≥ 100k USDT · Price ≥ 24h Low × 1.005")
+    st.divider()
+
+    # ── F2: PDZ 15m ────────────────────────────────────────────────────────────
+    st.markdown("**🎯 F2 — PDZ Zones** (15m)")
+    new_use_pdz_15m = st.checkbox(
+        "Enable F2 — PDZ Filter (15m)",
+        value=bool(_snap_cfg.get("use_pdz_15m", True)), key="cfg_use_pdz_15m",
+        help=(
+            "F2 — Premium / Discount / Equilibrium Zone Filter (15m)\n\n"
+            "Same DZSAFM zone logic as F3, applied to last 50 × 15m candles.\n\n"
+            "Passing both F3 (5m) and F2 (15m) confirms the coin is in a\n"
+            "favourable Smart Money zone on both timeframes simultaneously.\n\n"
+            "✅ Qualifies: Discount zone · Band A/B with ≥1.5% room to next zone\n"
+            "❌ Rejected:  Equilibrium (indecision) · Premium (no upward room)"
+        ))
+    if new_use_pdz_15m:
+        st.caption("✅ Discount · BandA(≥1.5%↓Premium) · BandB(≥1.5%↓Equilibrium) | ❌ Premium · Equilibrium")
+    st.divider()
+
+    # ── F3: PDZ 5m ─────────────────────────────────────────────────────────────
+    st.markdown("**🎯 F3 — PDZ Zones** (5m)")
+    new_use_pdz_5m = st.checkbox(
+        "Enable F3 — PDZ Filter (5m)",
+        value=bool(_snap_cfg.get("use_pdz_5m", True)), key="cfg_use_pdz_5m",
+        help=(
+            "F3 — Premium / Discount / Equilibrium Zone Filter (5m)\n\n"
+            "DZSAFM Smart Money zones on last 50 × 5m candles.\n"
+            "Zones from swing High (H) and Low (L):\n"
+            "  Premium bottom = 0.95×H + 0.05×L\n"
+            "  Equilibrium    = middle band around midpoint\n"
+            "  Discount top   = 0.05×H + 0.95×L\n\n"
+            "✅ Qualifies: Discount zone · Band A/B with ≥1.5% room to next zone\n"
+            "❌ Rejected:  Equilibrium (indecision) · Premium (no upward room)"
+        ))
+    if new_use_pdz_5m:
+        st.caption("✅ Discount · BandA(≥1.5%↓Premium) · BandB(≥1.5%↓Equilibrium) | ❌ Premium · Equilibrium")
+    st.divider()
+
     # ── F4: 5m RSI ─────────────────────────────────────────────────────────────
     st.markdown("**📈 F4 — 5m RSI**")
     new_use_rsi_5m = st.checkbox(
@@ -5353,28 +5809,31 @@ with st.sidebar:
                                     value=int(_snap_cfg["rsi_5m_min"]), key="cfg_rsi5",
                                     disabled=not new_use_rsi_5m)
     st.divider()
-    # ── F5: PDZ 5m ─────────────────────────────────────────────────────────────
-    st.markdown("**🎯 F5 — PDZ Zones** (5m)")
-    new_use_pdz_5m = st.checkbox(
-        "Enable F5 — PDZ Filter (5m)",
-        value=bool(_snap_cfg.get("use_pdz_5m", True)), key="cfg_use_pdz_5m",
+
+    # ── F5: 1h RSI ─────────────────────────────────────────────────────────────
+    st.markdown("**📈 F5 — 1h RSI**")
+    new_use_rsi_1h = st.checkbox(
+        "Enable F5 — 1h RSI",
+        value=bool(_snap_cfg.get("use_rsi_1h", True)), key="cfg_use_rsi_1h",
         help=(
-            "F5 — Premium / Discount / Equilibrium Zone Filter (5m)\n\n"
-            "DZSAFM Smart Money zones on last 50 × 5m candles.\n"
-            "Zones from swing High (H) and Low (L):\n"
-            "  Premium bottom = 0.95×H + 0.05×L\n"
-            "  Equilibrium    = middle band around midpoint\n"
-            "  Discount top   = 0.05×H + 0.95×L\n\n"
-            "✅ Qualifies: Discount zone · Band A/B with ≥1.5% room to next zone\n"
-            "❌ Rejected:  Equilibrium (indecision) · Premium (no upward room)"
+            "F5 — 1-Hour RSI Filter\n\n"
+            "RSI(14) on the 1h timeframe must fall within the Min–Max band.\n\n"
+            "Min: ensures real hourly momentum exists (coin is not dead).\n"
+            "Max: avoids entries when the coin is already overbought on the higher timeframe."
         ))
-    if new_use_pdz_5m:
-        st.caption("✅ Discount · BandA(≥1.5%↓Premium) · BandB(≥1.5%↓Equilibrium) | ❌ Premium · Equilibrium")
+    c3, c4 = st.columns(2)
+    new_rsi1h_min = c3.number_input("1h min", min_value=0, max_value=100, step=1,
+                                     value=int(_snap_cfg["rsi_1h_min"]), key="cfg_rsi1h_min",
+                                     disabled=not new_use_rsi_1h)
+    new_rsi1h_max = c4.number_input("1h max", min_value=0, max_value=100, step=1,
+                                     value=int(_snap_cfg["rsi_1h_max"]), key="cfg_rsi1h_max",
+                                     disabled=not new_use_rsi_1h)
     st.divider()
-    # ── F6: ATR(14) 15m TP-Reachability Filter ────────────────────────────────
-    st.markdown("**📐 F6 — ATR Filter** (15m TP reachability)",
+
+    # ── F5b: ATR(14) 15m TP-Reachability Filter ────────────────────────────────
+    st.markdown("**📐 F5b — ATR Filter** (15m TP reachability)",
                 help=(
-                    "F6 — ATR(14) TP-Reachability Filter\n\n"
+                    "F5b — ATR(14) TP-Reachability Filter\n\n"
                     "Rejects coins whose TP target is too far relative to the current "
                     "Average True Range (ATR) on the 15m timeframe.\n\n"
                     "Formula: ratio = TP% / ATR%\n\n"
@@ -5386,7 +5845,7 @@ with st.sidebar:
                     "ATR is computed on 15m candles (already fetched) — no extra API call."
                 ))
     new_use_atr_filter = st.checkbox(
-        "Enable F6 — ATR Filter",
+        "Enable F5b — ATR Filter",
         value=bool(_snap_cfg.get("use_atr_filter", False)), key="cfg_use_atr_filter")
     new_atr_mode = st.selectbox(
         "ATR Mode",
@@ -5401,10 +5860,11 @@ with st.sidebar:
     else:
         st.caption("⚫ ATR filter disabled")
     st.divider()
-    # ── F7: EMA Selection ──────────────────────────────────────────────────────
-    st.markdown("**📉 F7 — EMA Selection** (price must be above EMA)",
+
+    # ── F6: EMA Selection ──────────────────────────────────────────────────────
+    st.markdown("**📉 F6 — EMA Selection** (price must be above EMA)",
                 help=(
-                    "F7 — EMA Selection Filter\n\n"
+                    "F6 — EMA Selection Filter\n\n"
                     "Entry price must be ABOVE the chosen EMA on each enabled timeframe.\n"
                     "Being above the EMA confirms the short-term trend is bullish.\n\n"
                     "Each timeframe (3m, 5m, 15m) is independently toggleable.\n"
@@ -5429,13 +5889,77 @@ with st.sidebar:
                                           key="cfg_ema_period_15m", disabled=not new_use_ema_15m,
                                           label_visibility="collapsed")
     st.divider()
-    # ── F8: 15m EMA Crossover ───────────────────────────────────────────────
-    st.markdown("**📉 F8 — 15m EMA Crossover** (fast > slow)")
+
+    # ── F7: MACD ───────────────────────────────────────────────────────────────
+    _macd_help = (
+        "F7 — MACD Dark Green Histogram Filter\n\n"
+        "Each timeframe is checked independently. Enable only the timeframes you want.\n\n"
+        "For each enabled timeframe ALL of the following must be true:\n"
+        "  • MACD line > 0\n"
+        "  • Signal line > 0\n"
+        "  • Histogram > 0 AND increasing (dark green — not fading)\n"
+        "  • Bullish crossover within the last 12 candles"
+    )
+    st.markdown("**📊 F7 — MACD** (dark 🟢 histogram — per timeframe)", help=_macd_help)
+    fm1, fm2, fm3 = st.columns(3)
+    new_use_macd_3m  = fm1.checkbox("3m MACD",  value=bool(_snap_cfg.get("use_macd_3m",  True)), key="cfg_use_macd_3m")
+    new_use_macd_5m  = fm2.checkbox("5m MACD",  value=bool(_snap_cfg.get("use_macd_5m",  True)), key="cfg_use_macd_5m")
+    new_use_macd_15m = fm3.checkbox("15m MACD", value=bool(_snap_cfg.get("use_macd_15m", True)), key="cfg_use_macd_15m")
+    _macd_on_tfs = [tf for tf, on in [("3m", new_use_macd_3m), ("5m", new_use_macd_5m), ("15m", new_use_macd_15m)] if on]
+    if _macd_on_tfs:
+        st.caption(f"✅ Checking MACD on: {' · '.join(_macd_on_tfs)}  |  MACD>0 · Signal>0 · Histogram 🟢↑ · Crossover ≤12")
+    else:
+        st.caption("⚫ MACD filter disabled (all timeframes off)")
+    st.divider()
+
+    # ── F8: Parabolic SAR ──────────────────────────────────────────────────────
+    _sar_help = (
+        "F8 — Parabolic SAR Filter\n\n"
+        "Each timeframe is checked independently. Enable only the timeframes you want.\n\n"
+        "For each enabled timeframe:\n"
+        "  SAR must be positioned BELOW current price (bullish mode).\n"
+        "  SAR above price = bearish trend → coin rejected on that timeframe."
+    )
+    st.markdown("**🪂 F8 — Parabolic SAR** (per timeframe)", help=_sar_help)
+    fs1, fs2, fs3 = st.columns(3)
+    new_use_sar_3m  = fs1.checkbox("3m SAR",  value=bool(_snap_cfg.get("use_sar_3m",  True)), key="cfg_use_sar_3m")
+    new_use_sar_5m  = fs2.checkbox("5m SAR",  value=bool(_snap_cfg.get("use_sar_5m",  True)), key="cfg_use_sar_5m")
+    new_use_sar_15m = fs3.checkbox("15m SAR", value=bool(_snap_cfg.get("use_sar_15m", True)), key="cfg_use_sar_15m")
+    _sar_on_tfs = [tf for tf, on in [("3m", new_use_sar_3m), ("5m", new_use_sar_5m), ("15m", new_use_sar_15m)] if on]
+    if _sar_on_tfs:
+        st.caption(f"✅ Checking SAR on: {' · '.join(_sar_on_tfs)}  |  SAR must be below price (bullish)")
+    else:
+        st.caption("⚫ SAR filter disabled (all timeframes off)")
+    st.divider()
+
+    # ── F9: Volume Spike ───────────────────────────────────────────────────────
+    st.markdown("**📦 F9 — Volume Spike** (15m)")
+    new_use_vol_spike = st.checkbox(
+        "Enable F9 — Volume Spike",
+        value=bool(_snap_cfg.get("use_vol_spike",False)), key="cfg_use_vol_spike",
+        help=(
+            "F9 — Volume Spike Filter (disabled by default)\n\n"
+            "Most recent 15m candle volume must be ≥ Mult × average of prior Lookback candles.\n\n"
+            "Confirms strong buying pressure behind the move.\n"
+            "Mult: spike multiplier (e.g. 2.0 = must be 2× average).\n"
+            "Lookback: number of prior candles used to compute the average."
+        ))
+    vx1, vx2 = st.columns(2)
+    new_vol_mult     = vx1.number_input("Mult (X×)", min_value=1.0, max_value=20.0, step=0.5,
+                                         value=float(_snap_cfg.get("vol_spike_mult",2.0)), key="cfg_vol_mult",
+                                         disabled=not new_use_vol_spike)
+    new_vol_lookback = vx2.number_input("Lookback (N)", min_value=2, max_value=100, step=1,
+                                         value=int(_snap_cfg.get("vol_spike_lookback",20)), key="cfg_vol_lookback",
+                                         disabled=not new_use_vol_spike)
+    st.divider()
+
+    # ── F10: 15m EMA Crossover ───────────────────────────────────────────────
+    st.markdown("**📉 F10 — 15m EMA Crossover** (fast > slow)")
     new_use_ema_cross_15m = st.checkbox(
-        "Enable F8 — 15m EMA Crossover",
+        "Enable F10 — 15m EMA Crossover",
         value=bool(_snap_cfg.get("use_ema_cross_15m", True)), key="cfg_use_ema_cross_15m",
         help=(
-            "F8 — 15m EMA Crossover Filter\n\n"
+            "F10 — 15m EMA Crossover Filter\n\n"
             "On the 15m timeframe, the FAST EMA must be ABOVE the SLOW EMA.\n"
             "This confirms short-to-medium term bullish alignment before entry.\n\n"
             "Default: fast=12, slow=21 (both configurable below).\n"
@@ -5452,66 +5976,6 @@ with st.sidebar:
         key="cfg_ema_cross_slow_15m", disabled=not new_use_ema_cross_15m)
     if new_use_ema_cross_15m:
         st.caption(f"✅ EMA{new_ema_cross_fast_15m} > EMA{new_ema_cross_slow_15m} on 15m required")
-    st.divider()
-    # ── F9: MACD ───────────────────────────────────────────────────────────────
-    _macd_help = (
-        "F9 — MACD Dark Green Histogram Filter\n\n"
-        "Each timeframe is checked independently. Enable only the timeframes you want.\n\n"
-        "For each enabled timeframe ALL of the following must be true:\n"
-        "  • MACD line > 0\n"
-        "  • Signal line > 0\n"
-        "  • Histogram > 0 AND increasing (dark green — not fading)\n"
-        "  • Bullish crossover within the last 12 candles"
-    )
-    st.markdown("**📊 F9 — MACD** (dark 🟢 histogram — per timeframe)", help=_macd_help)
-    fm1, fm2, fm3 = st.columns(3)
-    new_use_macd_3m  = fm1.checkbox("3m MACD",  value=bool(_snap_cfg.get("use_macd_3m",  True)), key="cfg_use_macd_3m")
-    new_use_macd_5m  = fm2.checkbox("5m MACD",  value=bool(_snap_cfg.get("use_macd_5m",  True)), key="cfg_use_macd_5m")
-    new_use_macd_15m = fm3.checkbox("15m MACD", value=bool(_snap_cfg.get("use_macd_15m", True)), key="cfg_use_macd_15m")
-    _macd_on_tfs = [tf for tf, on in [("3m", new_use_macd_3m), ("5m", new_use_macd_5m), ("15m", new_use_macd_15m)] if on]
-    if _macd_on_tfs:
-        st.caption(f"✅ Checking MACD on: {' · '.join(_macd_on_tfs)}  |  MACD>0 · Signal>0 · Histogram 🟢↑ · Crossover ≤12")
-    else:
-        st.caption("⚫ MACD filter disabled (all timeframes off)")
-    st.divider()
-    # ── F10: Parabolic SAR ──────────────────────────────────────────────────────
-    _sar_help = (
-        "F10 — Parabolic SAR Filter\n\n"
-        "Each timeframe is checked independently. Enable only the timeframes you want.\n\n"
-        "For each enabled timeframe:\n"
-        "  SAR must be positioned BELOW current price (bullish mode).\n"
-        "  SAR above price = bearish trend → coin rejected on that timeframe."
-    )
-    st.markdown("**🪂 F10 — Parabolic SAR** (per timeframe)", help=_sar_help)
-    fs1, fs2, fs3 = st.columns(3)
-    new_use_sar_3m  = fs1.checkbox("3m SAR",  value=bool(_snap_cfg.get("use_sar_3m",  True)), key="cfg_use_sar_3m")
-    new_use_sar_5m  = fs2.checkbox("5m SAR",  value=bool(_snap_cfg.get("use_sar_5m",  True)), key="cfg_use_sar_5m")
-    new_use_sar_15m = fs3.checkbox("15m SAR", value=bool(_snap_cfg.get("use_sar_15m", True)), key="cfg_use_sar_15m")
-    _sar_on_tfs = [tf for tf, on in [("3m", new_use_sar_3m), ("5m", new_use_sar_5m), ("15m", new_use_sar_15m)] if on]
-    if _sar_on_tfs:
-        st.caption(f"✅ Checking SAR on: {' · '.join(_sar_on_tfs)}  |  SAR must be below price (bullish)")
-    else:
-        st.caption("⚫ SAR filter disabled (all timeframes off)")
-    st.divider()
-    # ── F11: Volume Spike ───────────────────────────────────────────────────────
-    st.markdown("**📦 F11 — Volume Spike** (15m)")
-    new_use_vol_spike = st.checkbox(
-        "Enable F11 — Volume Spike",
-        value=bool(_snap_cfg.get("use_vol_spike",False)), key="cfg_use_vol_spike",
-        help=(
-            "F11 — Volume Spike Filter (disabled by default)\n\n"
-            "Most recent 15m candle volume must be ≥ Mult × average of prior Lookback candles.\n\n"
-            "Confirms strong buying pressure behind the move.\n"
-            "Mult: spike multiplier (e.g. 2.0 = must be 2× average).\n"
-            "Lookback: number of prior candles used to compute the average."
-        ))
-    vx1, vx2 = st.columns(2)
-    new_vol_mult     = vx1.number_input("Mult (X×)", min_value=1.0, max_value=20.0, step=0.5,
-                                         value=float(_snap_cfg.get("vol_spike_mult",2.0)), key="cfg_vol_mult",
-                                         disabled=not new_use_vol_spike)
-    new_vol_lookback = vx2.number_input("Lookback (N)", min_value=2, max_value=100, step=1,
-                                         value=int(_snap_cfg.get("vol_spike_lookback",20)), key="cfg_vol_lookback",
-                                         disabled=not new_use_vol_spike)
     st.divider()
 
     # ── Queue Size (max concurrent open trades) ──────────────────────────────
@@ -8273,26 +8737,25 @@ if (
         after_pre = total - pre_out_n
         checked   = fc.get("checked", after_pre)
         after_f2  = checked   - fc.get("f2_pdz15m", 0)
-        after_f3  = after_f2  - fc.get("f3_rsi1h",  0)
+        after_f3  = after_f2  - fc.get("f3_pdz5m",  0)
         after_f4  = after_f3  - fc.get("f4_rsi5m",  0)
-        after_f5  = after_f4  - fc.get("f5_pdz5m",  0)
-        after_f6  = after_f5  - fc.get("f6_atr",    0)
-        after_f7_ema_3m  = after_f6         - fc.get("f7_ema_3m",  0)
-        after_f7_ema_5m  = after_f7_ema_3m  - fc.get("f7_ema_5m",  0)
-        after_f7_ema_15m = after_f7_ema_5m  - fc.get("f7_ema_15m", 0)
-        after_f7         = after_f7_ema_15m  # final EMA stage output
-        # F8 EMA Cross
-        after_f8  = after_f7  - fc.get("f8_ema_cross", 0)
-        # F9 MACD — per timeframe running totals
-        after_f9_macd_3m  = after_f8          - fc.get("f9_macd_3m",  0)
-        after_f9_macd_5m  = after_f9_macd_3m  - fc.get("f9_macd_5m",  0)
-        after_f9_macd_15m = after_f9_macd_5m  - fc.get("f9_macd_15m", 0)
-        # F10 SAR — per timeframe running totals
-        after_f10_sar_3m  = after_f9_macd_15m - fc.get("f10_sar_3m",  0)
-        after_f10_sar_5m  = after_f10_sar_3m  - fc.get("f10_sar_5m",  0)
-        after_f10_sar_15m = after_f10_sar_5m  - fc.get("f10_sar_15m", 0)
-        after_f11          = after_f10_sar_15m - fc.get("f11_vol",      0)
-        after_empty        = after_f11         - fc.get("f_empty_data", 0)
+        after_f5  = after_f4  - fc.get("f5_rsi1h",  0)
+        after_f5b = after_f5  - fc.get("f5b_atr",   0)
+        after_f6_ema_3m  = after_f5b        - fc.get("f6_ema_3m",  0)
+        after_f6_ema_5m  = after_f6_ema_3m  - fc.get("f6_ema_5m",  0)
+        after_f6_ema_15m = after_f6_ema_5m  - fc.get("f6_ema_15m", 0)
+        after_f6         = after_f6_ema_15m  # final EMA stage output
+        # F7 MACD — per timeframe running totals
+        after_f7_macd_3m  = after_f6  - fc.get("f7_macd_3m",  0)
+        after_f7_macd_5m  = after_f7_macd_3m  - fc.get("f7_macd_5m",  0)
+        after_f7_macd_15m = after_f7_macd_5m  - fc.get("f7_macd_15m", 0)
+        # F8 SAR — per timeframe running totals
+        after_f8_sar_3m   = after_f7_macd_15m - fc.get("f8_sar_3m",  0)
+        after_f8_sar_5m   = after_f8_sar_3m   - fc.get("f8_sar_5m",  0)
+        after_f8_sar_15m  = after_f8_sar_5m   - fc.get("f8_sar_15m", 0)
+        after_f9           = after_f8_sar_15m  - fc.get("f9_vol",       0)
+        after_f10          = after_f9          - fc.get("f10_ema_cross", 0)
+        after_empty        = after_f10         - fc.get("f_empty_data", 0)
 
         # Use the config that was ACTIVE during the last scan for labels
         sc = fc.get("scan_cfg") or _snap_cfg
@@ -8303,23 +8766,23 @@ if (
 
         pre_lbl    = "⚡ After Bulk Pre-filter" if sc.get("use_pre_filter", True) else "⚡ Pre-filter (disabled)"
         pdz15m_lbl = "F2 — PDZ Zones (15m)" if sc.get("use_pdz_15m", True) else "F2 — PDZ 15m (off)"
-        f3_lbl     = (f"F3 — 1h RSI {sc.get('rsi_1h_min',30)}\u2013{sc.get('rsi_1h_max',95)}"
-                      if sc.get("use_rsi_1h", True) else "F3 — 1h RSI (off)")
+        pdz5m_lbl  = "F3 — PDZ Zones (5m)"  if sc.get("use_pdz_5m",  True) else "F3 — PDZ 5m (off)"
         f4_lbl     = f"F4 — 5m RSI \u2265{sc.get('rsi_5m_min',30)}" if sc.get("use_rsi_5m", True) else "F4 — 5m RSI (off)"
-        pdz5m_lbl  = "F5 — PDZ Zones (5m)"  if sc.get("use_pdz_5m",  True) else "F5 — PDZ 5m (off)"
+        f5_lbl     = (f"F5 — 1h RSI {sc.get('rsi_1h_min',30)}\u2013{sc.get('rsi_1h_max',95)}"
+                      if sc.get("use_rsi_1h", True) else "F5 — 1h RSI (off)")
         _atr_mode_lbl = sc.get("atr_mode", "Normal")
         _atr_thresh_lbl = {"Strict": "≤1.5×", "Normal": "≤2.0×", "Relaxed": "≤3.0×"}.get(_atr_mode_lbl, "≤2.0×")
-        f6_lbl     = (f"F6 — ATR(14) 15m {_atr_mode_lbl} {_atr_thresh_lbl}"
-                      if sc.get("use_atr_filter", False) else "F6 — ATR (off)")
+        f5b_lbl    = (f"F5b — ATR(14) 15m {_atr_mode_lbl} {_atr_thresh_lbl}"
+                      if sc.get("use_atr_filter", False) else "F5b — ATR (off)")
         ema_parts = []
         if sc.get("use_ema_3m"):  ema_parts.append(f"3m EMA{sc.get('ema_period_3m',12)}")
         if sc.get("use_ema_5m"):  ema_parts.append(f"5m EMA{sc.get('ema_period_5m',12)}")
         if sc.get("use_ema_15m"): ema_parts.append(f"15m EMA{sc.get('ema_period_15m',12)}")
-        ema_lbl = ("F7 — EMA (" + (" · ".join(ema_parts)) + ")") if ema_parts else "F7 — EMA (off)"
-        vol_lbl = (f"F11 — Vol \u2265{sc.get('vol_spike_mult',2.0)}\xd7 / {sc.get('vol_spike_lookback',20)} 15m"
-                   if sc.get("use_vol_spike") else "F11 — Vol (off)")
-        ema_cross_lbl = (f"F8 — EMA{sc.get('ema_cross_fast_15m',12)}>EMA{sc.get('ema_cross_slow_15m',21)} 15m"
-                          if sc.get("use_ema_cross_15m", True) else "F8 — EMA Cross (off)")
+        ema_lbl = ("F6 — EMA (" + (" · ".join(ema_parts)) + ")") if ema_parts else "F6 — EMA (off)"
+        vol_lbl = (f"F9 — Vol \u2265{sc.get('vol_spike_mult',2.0)}\xd7 / {sc.get('vol_spike_lookback',20)} 15m"
+                   if sc.get("use_vol_spike") else "F9 — Vol (off)")
+        ema_cross_lbl = (f"F10 — EMA{sc.get('ema_cross_fast_15m',12)}>EMA{sc.get('ema_cross_slow_15m',21)} 15m"
+                          if sc.get("use_ema_cross_15m", True) else "F10 — EMA Cross (off)")
 
         # ── Table-style funnel (replaces Plotly chart) ─────────────────────
         def _funnel_table_html(rows, total_n):
@@ -8402,71 +8865,70 @@ if (
                          "on" if sc.get("use_pdz_15m", True) else "off",
                          checked, fc.get("f2_pdz15m", 0), after_f2, _pct(after_f2),
                          "Premium \xb7 Equil \xb7 BandA \xb7 BandB", ""))
-        _ft_rows.append((f3_lbl,
-                         "on" if sc.get("use_rsi_1h", True) else "off",
-                         after_f2, fc.get("f3_rsi1h", 0), after_f3, _pct(after_f3),
-                         "1h RSI range", ""))
+        _ft_rows.append((pdz5m_lbl,
+                         "on" if sc.get("use_pdz_5m", True) else "off",
+                         after_f2, fc.get("f3_pdz5m", 0), after_f3, _pct(after_f3),
+                         "Same logic on 5m candles", ""))
         _ft_rows.append((f4_lbl,
                          "on" if sc.get("use_rsi_5m", True) else "off",
                          after_f3, fc.get("f4_rsi5m", 0), after_f4, _pct(after_f4),
                          "5m RSI floor", ""))
-        _ft_rows.append((pdz5m_lbl,
-                         "on" if sc.get("use_pdz_5m", True) else "off",
-                         after_f4, fc.get("f5_pdz5m", 0), after_f5, _pct(after_f5),
-                         "Same logic on 5m candles", ""))
-        _ft_rows.append((f6_lbl,
+        _ft_rows.append((f5_lbl,
+                         "on" if sc.get("use_rsi_1h", True) else "off",
+                         after_f4, fc.get("f5_rsi1h", 0), after_f5, _pct(after_f5),
+                         "1h RSI range", ""))
+        _ft_rows.append((f5b_lbl,
                          "on" if sc.get("use_atr_filter", False) else "off",
-                         after_f5, fc.get("f6_atr", 0), after_f6, _pct(after_f6),
+                         after_f5, fc.get("f5b_atr", 0), after_f5b, _pct(after_f5b),
                          f"TP%/ATR% ratio {_atr_thresh_lbl}", ""))
-        # F7 EMA — per enabled timeframe
-        _ft_prev_ema = after_f6
+        # F6 EMA — per enabled timeframe
+        _ft_prev_ema = after_f5b
         for _ema_tf, _ema_key, _ema_pkey, _ema_dkey, _ema_aftn in [
-            ("3m",  "use_ema_3m",  "ema_period_3m",  "f7_ema_3m",  after_f7_ema_3m),
-            ("5m",  "use_ema_5m",  "ema_period_5m",  "f7_ema_5m",  after_f7_ema_5m),
-            ("15m", "use_ema_15m", "ema_period_15m", "f7_ema_15m", after_f7_ema_15m),
+            ("3m",  "use_ema_3m",  "ema_period_3m",  "f6_ema_3m",  after_f6_ema_3m),
+            ("5m",  "use_ema_5m",  "ema_period_5m",  "f6_ema_5m",  after_f6_ema_5m),
+            ("15m", "use_ema_15m", "ema_period_15m", "f6_ema_15m", after_f6_ema_15m),
         ]:
             if sc.get(_ema_key):
-                _ema_lbl = f"F7 \u2014 EMA{sc.get(_ema_pkey, 12)} {_ema_tf}"
+                _ema_lbl = f"F6 \u2014 EMA{sc.get(_ema_pkey, 12)} {_ema_tf}"
                 _ft_rows.append((_ema_lbl, "on",
                                  _ft_prev_ema, fc.get(_ema_dkey, 0), _ema_aftn, _pct(_ema_aftn),
                                  f"Price above EMA{sc.get(_ema_pkey, 12)} on {_ema_tf}", ""))
                 _ft_prev_ema = _ema_aftn
         if not ema_parts:
-            _ft_rows.append(("F7 \u2014 EMA (off)", "off",
+            _ft_rows.append(("F6 \u2014 EMA (off)", "off",
                              after_f5b, 0, after_f5b, _pct(after_f5b),
                              "All EMA timeframes disabled", ""))
-        # F8 EMA Cross
-        _ft_rows.append((ema_cross_lbl,
-                         "on" if sc.get("use_ema_cross_15m", True) else "off",
-                         after_f7, fc.get("f8_ema_cross", 0), after_f8, _pct(after_f8),
-                         "Fast EMA above slow EMA 15m", ""))
-        # F9 MACD — per enabled timeframe
-        _ft_prev = after_f8
+        # F7 MACD — per enabled timeframe
+        _ft_prev = after_f6
         for _tf, _key, _dkey, _aftn in [
-            ("3m",  "use_macd_3m",  "f9_macd_3m",  after_f9_macd_3m),
-            ("5m",  "use_macd_5m",  "f9_macd_5m",  after_f9_macd_5m),
-            ("15m", "use_macd_15m", "f9_macd_15m", after_f9_macd_15m),
+            ("3m",  "use_macd_3m",  "f7_macd_3m",  after_f7_macd_3m),
+            ("5m",  "use_macd_5m",  "f7_macd_5m",  after_f7_macd_5m),
+            ("15m", "use_macd_15m", "f7_macd_15m", after_f7_macd_15m),
         ]:
             if sc.get(_key, True):
-                _ft_rows.append((f"F9 \u2014 MACD {_tf}", "on",
+                _ft_rows.append((f"F7 \u2014 MACD {_tf}", "on",
                                  _ft_prev, fc.get(_dkey, 0), _aftn, _pct(_aftn),
                                  "MACD histogram bullish crossover", ""))
                 _ft_prev = _aftn
-        # F10 SAR — per enabled timeframe
+        # F8 SAR — per enabled timeframe
         for _tf, _key, _dkey, _aftn in [
-            ("3m",  "use_sar_3m",  "f10_sar_3m",  after_f10_sar_3m),
-            ("5m",  "use_sar_5m",  "f10_sar_5m",  after_f10_sar_5m),
-            ("15m", "use_sar_15m", "f10_sar_15m", after_f10_sar_15m),
+            ("3m",  "use_sar_3m",  "f8_sar_3m",  after_f8_sar_3m),
+            ("5m",  "use_sar_5m",  "f8_sar_5m",  after_f8_sar_5m),
+            ("15m", "use_sar_15m", "f8_sar_15m", after_f8_sar_15m),
         ]:
             if sc.get(_key, True):
-                _ft_rows.append((f"F10 \u2014 SAR {_tf}", "on",
+                _ft_rows.append((f"F8 \u2014 SAR {_tf}", "on",
                                  _ft_prev, fc.get(_dkey, 0), _aftn, _pct(_aftn),
                                  "Price above Parabolic SAR", ""))
                 _ft_prev = _aftn
         _ft_rows.append((vol_lbl,
                          "on" if sc.get("use_vol_spike") else "off",
-                         after_f10_sar_15m, fc.get("f11_vol", 0), after_f11, _pct(after_f11),
+                         after_f8_sar_15m, fc.get("f9_vol", 0), after_f9, _pct(after_f9),
                          "Volume spike check", ""))
+        _ft_rows.append((ema_cross_lbl,
+                         "on" if sc.get("use_ema_cross_15m", True) else "off",
+                         after_f9, fc.get("f10_ema_cross", 0), after_f10, _pct(after_f10),
+                         "Fast EMA above slow EMA 15m", ""))
         _ft_rows.append(("\u26a0\ufe0f Empty candle drop", "on",
                          after_f10, fc.get("f_empty_data", 0), after_empty, _pct(after_empty),
                          "Missing timeframe data", ""))
@@ -8496,45 +8958,43 @@ if (
         _f3e  = set(fc.get("f3_elim_syms",  []))
         _f4e  = set(fc.get("f4_elim_syms",  []))
         _f5e  = set(fc.get("f5_elim_syms",  []))
-        _f6e     = set(fc.get("f6_elim_syms", []))
-        _f7e_3m  = set(fc.get("f7_ema_3m_elim_syms",  []))
-        _f7e_5m  = set(fc.get("f7_ema_5m_elim_syms",  []))
-        _f7e_15m = set(fc.get("f7_ema_15m_elim_syms", []))
-        # F8 EMA Cross elimination set
-        _f8e     = set(fc.get("f8_elim_syms",     []))
-        # F9 MACD — per timeframe elimination sets
-        _f9e_3m  = set(fc.get("f9_macd_3m_elim_syms",  []))
-        _f9e_5m  = set(fc.get("f9_macd_5m_elim_syms",  []))
-        _f9e_15m = set(fc.get("f9_macd_15m_elim_syms", []))
-        # F10 SAR — per timeframe elimination sets
-        _f10e_3m  = set(fc.get("f10_sar_3m_elim_syms",  []))
-        _f10e_5m  = set(fc.get("f10_sar_5m_elim_syms",  []))
-        _f10e_15m = set(fc.get("f10_sar_15m_elim_syms", []))
-        _f11e    = set(fc.get("f11_elim_syms",      []))
+        _f5be = set(fc.get("f5b_elim_syms", []))
+        _f6e_3m  = set(fc.get("f6_ema_3m_elim_syms",  []))
+        _f6e_5m  = set(fc.get("f6_ema_5m_elim_syms",  []))
+        _f6e_15m = set(fc.get("f6_ema_15m_elim_syms", []))
+        # F7 MACD — per timeframe elimination sets
+        _f7e_3m  = set(fc.get("f7_macd_3m_elim_syms",  []))
+        _f7e_5m  = set(fc.get("f7_macd_5m_elim_syms",  []))
+        _f7e_15m = set(fc.get("f7_macd_15m_elim_syms", []))
+        # F8 SAR — per timeframe elimination sets
+        _f8e_3m  = set(fc.get("f8_sar_3m_elim_syms",  []))
+        _f8e_5m  = set(fc.get("f8_sar_5m_elim_syms",  []))
+        _f8e_15m = set(fc.get("f8_sar_15m_elim_syms", []))
+        _f9e    = set(fc.get("f9_elim_syms",      []))
+        _f10e   = set(fc.get("f10_elim_syms",     []))
         _fempty = set(fc.get("f_empty_data_syms", []))
 
         _after_f2        = _chk          - _f2e
         _after_f3        = _after_f2     - _f3e
         _after_f4        = _after_f3     - _f4e
         _after_f5        = _after_f4     - _f5e
-        _after_f6         = _after_f5    - (_f6e  if sc.get("use_atr_filter", False) else set())
-        _after_f7_ema_3m  = _after_f6        - (_f7e_3m  if sc.get("use_ema_3m")  else set())
-        _after_f7_ema_5m  = _after_f7_ema_3m - (_f7e_5m  if sc.get("use_ema_5m")  else set())
-        _after_f7_ema_15m = _after_f7_ema_5m - (_f7e_15m if sc.get("use_ema_15m") else set())
-        _after_f7         = _after_f7_ema_15m
-        # EMA Cross
-        _after_f8         = _after_f7    - (_f8e  if sc.get("use_ema_cross_15m", True) else set())
+        _after_f5b       = _after_f5    - (_f5be if sc.get("use_atr_filter", False) else set())
+        _after_f6_ema_3m  = _after_f5b       - (_f6e_3m  if sc.get("use_ema_3m")  else set())
+        _after_f6_ema_5m  = _after_f6_ema_3m - (_f6e_5m  if sc.get("use_ema_5m")  else set())
+        _after_f6_ema_15m = _after_f6_ema_5m - (_f6e_15m if sc.get("use_ema_15m") else set())
+        _after_f6         = _after_f6_ema_15m
         # MACD per timeframe — only subtract if that timeframe is enabled
-        _after_f9_macd_3m  = _after_f8          - (_f9e_3m  if sc.get("use_macd_3m",  True) else set())
-        _after_f9_macd_5m  = _after_f9_macd_3m  - (_f9e_5m  if sc.get("use_macd_5m",  True) else set())
-        _after_f9_macd_15m = _after_f9_macd_5m  - (_f9e_15m if sc.get("use_macd_15m", True) else set())
+        _after_f7_macd_3m  = _after_f6          - (_f7e_3m  if sc.get("use_macd_3m",  True) else set())
+        _after_f7_macd_5m  = _after_f7_macd_3m  - (_f7e_5m  if sc.get("use_macd_5m",  True) else set())
+        _after_f7_macd_15m = _after_f7_macd_5m  - (_f7e_15m if sc.get("use_macd_15m", True) else set())
         # SAR per timeframe
-        _after_f10_sar_3m  = _after_f9_macd_15m - (_f10e_3m  if sc.get("use_sar_3m",  True) else set())
-        _after_f10_sar_5m  = _after_f10_sar_3m  - (_f10e_5m  if sc.get("use_sar_5m",  True) else set())
-        _after_f10_sar_15m = _after_f10_sar_5m  - (_f10e_15m if sc.get("use_sar_15m", True) else set())
-        _after_f11         = _after_f10_sar_15m - _f11e
+        _after_f8_sar_3m   = _after_f7_macd_15m - (_f8e_3m  if sc.get("use_sar_3m",  True) else set())
+        _after_f8_sar_5m   = _after_f8_sar_3m   - (_f8e_5m  if sc.get("use_sar_5m",  True) else set())
+        _after_f8_sar_15m  = _after_f8_sar_5m   - (_f8e_15m if sc.get("use_sar_15m", True) else set())
+        _after_f9          = _after_f8_sar_15m  - _f9e
+        _after_f10         = _after_f9          - (_f10e if sc.get("use_ema_cross_15m", True) else set())
         _fempty_syms = {s.split("(")[0] for s in _fempty}
-        _after_empty = _after_f11 - _fempty_syms
+        _after_empty = _after_f10 - _fempty_syms
 
         _process_err_count = max(0, fc.get("errors", 0))
         _new_sig_s    = set(fc.get("new_signal_syms",         []))
@@ -8550,62 +9010,61 @@ if (
             ("⚡ After Bulk Pre-filter",  total,       len(_pre),      _coin_str(_pre)),
             ("🔬 Entered Deep Scan",      len(_pre),   len(_chk),      _coin_str(_chk)),
             (f"After {pdz15m_lbl}",       len(_chk),   len(_after_f2), _coin_str(_after_f2)),
-            (f"After {f3_lbl}",           len(_after_f2), len(_after_f3), _coin_str(_after_f3)),
+            (f"After {pdz5m_lbl}",        len(_after_f2), len(_after_f3), _coin_str(_after_f3)),
             (f"After {f4_lbl}",           len(_after_f3), len(_after_f4), _coin_str(_after_f4)),
-            (f"After {pdz5m_lbl}",        len(_after_f4), len(_after_f5), _coin_str(_after_f5)),
-            (f"After {f6_lbl}",           len(_after_f5), len(_after_f6), _coin_str(_after_f6)),
+            (f"After {f5_lbl}",           len(_after_f4), len(_after_f5), _coin_str(_after_f5)),
+            (f"After {f5b_lbl}",          len(_after_f5), len(_after_f5b), _coin_str(_after_f5b)),
         ]
-        # F7 EMA — one row per enabled timeframe
-        _sr_ema_prev = _after_f6
+        # F6 EMA — one row per enabled timeframe
+        _sr_ema_prev = _after_f5b
         for _ema_tf, _ema_key, _ema_pkey, _ema_after_set in [
-            ("3m",  "use_ema_3m",  "ema_period_3m",  _after_f7_ema_3m),
-            ("5m",  "use_ema_5m",  "ema_period_5m",  _after_f7_ema_5m),
-            ("15m", "use_ema_15m", "ema_period_15m", _after_f7_ema_15m),
+            ("3m",  "use_ema_3m",  "ema_period_3m",  _after_f6_ema_3m),
+            ("5m",  "use_ema_5m",  "ema_period_5m",  _after_f6_ema_5m),
+            ("15m", "use_ema_15m", "ema_period_15m", _after_f6_ema_15m),
         ]:
             if sc.get(_ema_key):
                 stage_rows.append((
-                    f"F7 — EMA{sc.get(_ema_pkey, 12)} {_ema_tf}",
+                    f"F6 — EMA{sc.get(_ema_pkey, 12)} {_ema_tf}",
                     len(_sr_ema_prev), len(_ema_after_set),
                     _coin_str(_ema_after_set),
                 ))
                 _sr_ema_prev = _ema_after_set
         if not ema_parts:
-            stage_rows.append(("F7 — EMA (off)", len(_after_f6), len(_after_f6), _coin_str(_after_f6)))
+            stage_rows.append(("F6 — EMA (off)", len(_after_f5b), len(_after_f5b), _coin_str(_after_f5b)))
         stage_rows += [
         ]
-        # F8 EMA Cross
-        stage_rows.append((f"After {ema_cross_lbl}", len(_after_f7), len(_after_f8), _coin_str(_after_f8)))
-        _sr_prev = _after_f8
-        # F9 MACD — one row per enabled timeframe
+        # F7 MACD — one row per enabled timeframe
+        _sr_prev = _after_f6
         for _tf, _key, _after_set in [
-            ("3m",  "use_macd_3m",  _after_f9_macd_3m),
-            ("5m",  "use_macd_5m",  _after_f9_macd_5m),
-            ("15m", "use_macd_15m", _after_f9_macd_15m),
+            ("3m",  "use_macd_3m",  _after_f7_macd_3m),
+            ("5m",  "use_macd_5m",  _after_f7_macd_5m),
+            ("15m", "use_macd_15m", _after_f7_macd_15m),
         ]:
             if sc.get(_key, True):
                 stage_rows.append((
-                    f"F9 — MACD \U0001f7e2\u2191 {_tf}",
+                    f"F7 — MACD \U0001f7e2\u2191 {_tf}",
                     len(_sr_prev), len(_after_set),
                     _coin_str(_after_set),
                 ))
                 _sr_prev = _after_set
-        # F10 SAR — one row per enabled timeframe
+        # F8 SAR — one row per enabled timeframe
         for _tf, _key, _after_set in [
-            ("3m",  "use_sar_3m",  _after_f10_sar_3m),
-            ("5m",  "use_sar_5m",  _after_f10_sar_5m),
-            ("15m", "use_sar_15m", _after_f10_sar_15m),
+            ("3m",  "use_sar_3m",  _after_f8_sar_3m),
+            ("5m",  "use_sar_5m",  _after_f8_sar_5m),
+            ("15m", "use_sar_15m", _after_f8_sar_15m),
         ]:
             if sc.get(_key, True):
                 stage_rows.append((
-                    f"F10 — SAR {_tf}",
+                    f"F8 — SAR {_tf}",
                     len(_sr_prev), len(_after_set),
                     _coin_str(_after_set),
                 ))
                 _sr_prev = _after_set
         # Fixed closing rows
         stage_rows += [
-            (f"After {vol_lbl}",               len(_sr_prev),         len(_after_f11),  _coin_str(_after_f11)),
-            ("⚠️ Dropped — Empty Candle Data", len(_after_f11),       len(_fempty),     ", ".join(sorted(_fempty)) if _fempty else "—"),
+            (f"After {vol_lbl}",               len(_sr_prev),         len(_after_f9),   _coin_str(_after_f9)),
+            (f"After {ema_cross_lbl}",         len(_after_f9),        len(_after_f10),  _coin_str(_after_f10)),
+            ("⚠️ Dropped — Empty Candle Data", len(_after_f10),       len(_fempty),     ", ".join(sorted(_fempty)) if _fempty else "—"),
             ("💥 Dropped — Process Error",     "—", _process_err_count, "See API Error Log below ↓"),
             ("✅ Returned Signal",             "—", len(_returned_syms),   _coin_str(_returned_syms)),
             ("⭐ Super cap demoted → F3-F10",  "—", len(_super_demoted_s), _coin_str(_super_demoted_s)),
@@ -9031,16 +9490,16 @@ def _build_diagnostics_text() -> str:
             ("f1_resistance",     "F1  -- Resistance"),
             ("f2_super_setup",    "F2  -- Super setup passed"),
             ("super_cap_demoted", "F2  -- Super cap demoted"),
-            ("f5_pdz5m",          "F3  -- PDZ 5m"),
+            ("f3_pdz5m",          "F3  -- PDZ 5m"),
             ("f4_rsi5m",          "F4  -- RSI 5m"),
-            ("f3_rsi1h",          "F5  -- RSI 1h"),
+            ("f5_rsi1h",          "F5  -- RSI 1h"),
             ("f6_ema",            "F6  -- EMA"),
             ("f7_macd",           "F7  -- MACD"),
             ("f7b_macd5m",        "F7b -- MACD 5m"),
             ("f7c_macd15m",       "F7c -- MACD 15m"),
             ("f8_sar",            "F8  -- SAR"),
-            ("f11_vol",            "F9  -- Volume"),
-            ("f8_ema_cross",     "F10 -- EMA Cross 15m"),
+            ("f9_vol",            "F9  -- Volume"),
+            ("f10_ema_cross",     "F10 -- EMA Cross 15m"),
             ("passed",            "Passed all filters"),
             ("super_setup",       "Super setup"),
         ]
