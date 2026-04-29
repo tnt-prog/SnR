@@ -2238,7 +2238,57 @@ def process(sym, cfg: dict, super_counter: dict = None, super_lock=None):
                 _record_elim("f3_pdz5m", "f3_elim_syms", sym)
                 return None
 
-        # ── F4: Quick 5m RSI (still early — before full fetch) ────────────────
+        # ── F10: 15m EMA Crossover (fast > slow) — uses Stage 1 data ──────────
+        # Stage 1 already fetched 15m, so this costs zero extra API calls.
+        # Cheap structural filter — eliminates coins without upward momentum
+        # before committing to Stage 2 (3m fetch).
+        ema_cross_12_15m_val = ema_cross_21_15m_val = None
+        closes_15m_q = [c["close"] for c in m15_quick]
+        if cfg.get("use_ema_cross_15m", True):
+            _fast_p = max(2, int(cfg.get("ema_cross_fast_15m", 12)))
+            _slow_p = max(_fast_p + 1, int(cfg.get("ema_cross_slow_15m", 21)))
+            ema_fast_15m = calc_ema(closes_15m_q, _fast_p)
+            ema_slow_15m = calc_ema(closes_15m_q, _slow_p)
+            if not ema_fast_15m or not ema_slow_15m or \
+                    ema_fast_15m[-1] <= ema_slow_15m[-1]:
+                _record_elim("f10_ema_cross", "f10_elim_syms", sym)
+                return None
+            ema_cross_12_15m_val = _pround(ema_fast_15m[-1])
+            ema_cross_21_15m_val = _pround(ema_slow_15m[-1])
+
+        # ── F5: 1h RSI — uses Stage 1 data ───────────────────────────────────
+        closes_1h_q = [c["close"] for c in m1h_quick]
+        rsi1h = (calc_rsi_series(closes_1h_q) or [0])[-1]
+        if cfg.get("use_rsi_1h", True) and \
+                not (cfg["rsi_1h_min"] <= rsi1h <= cfg["rsi_1h_max"]):
+            _record_elim("f5_rsi1h", "f5_elim_syms", sym)
+            return None
+
+        # ── F5b: ATR(14) 15m — TP reachability filter — uses Stage 1 data ──
+        # ATR is ALWAYS computed and stored in criteria so that the Difficulty
+        # column in the Open Signals table works regardless of whether the
+        # filter toggle is on or off.
+        # ratio = (TP distance %) / (ATR %)
+        # Strict: ratio ≤ 1.5  → TP within 1.5× ATR (very reachable)
+        # Normal: ratio ≤ 2.0  → TP within 2× ATR
+        # Relaxed: ratio ≤ 3.0 → TP within 3× ATR
+        atr_15m_val = None
+        atr_ratio_val = None
+        _atr_series = calc_atr(m15_quick, 14)
+        if _atr_series and entry_q > 0:
+            atr_15m_val   = _atr_series[-1]
+            _tp_dist_pct  = float(cfg.get("tp_pct", 1.5))  # TP% from config
+            _atr_pct      = (atr_15m_val / entry_q) * 100.0
+            atr_ratio_val = (_tp_dist_pct / _atr_pct) if _atr_pct > 0 else None
+        # Only REJECT the coin when the filter is explicitly enabled
+        if cfg.get("use_atr_filter", False) and atr_ratio_val is not None:
+            _atr_thresh = {"Strict": 1.5, "Normal": 2.0, "Relaxed": 3.0}.get(
+                              cfg.get("atr_mode", "Normal"), 2.0)
+            if atr_ratio_val > _atr_thresh:
+                _record_elim("f5b_atr", "f5b_elim_syms", sym)
+                return None
+
+        # ── F4: Quick 5m RSI (Stage 1 data — before full 3m fetch) ──────────
         rsi5_q = (calc_rsi_series(closes_5m_q) or [0])[-1]
         if cfg.get("use_rsi_5m", True) and rsi5_q < cfg["rsi_5m_min"]:
             _record_elim("f4_rsi5m", "f4_elim_syms", sym)
@@ -2251,12 +2301,14 @@ def process(sym, cfg: dict, super_counter: dict = None, super_lock=None):
         # data for F5 (1h RSI) — no re-fetch needed.
         #
         # Only 3m (EMA/MACD/SAR) is genuinely new at this stage.
-        # This cuts Stage 2 from 2 API calls per coin → 1 API call per coin.
+        # When none of the 3m toggles are on, skip the 3m fetch entirely —
+        # saves ~1 API call per coin.
         _need_3m_detail = (cfg.get("use_ema_3m") or cfg.get("use_macd_3m")
                            or cfg.get("use_sar_3m"))
-        candle_limit_3m = 80 if _need_3m_detail else 30
-
-        m3_candles = get_klines(sym, "3m", candle_limit_3m)[:-1]
+        if _need_3m_detail:
+            m3_candles = get_klines(sym, "3m", 80)[:-1]
+        else:
+            m3_candles = []
 
         # Reuse Stage 1 data for 5m / 15m / 1h — no re-fetch needed
         m5          = m5_quick
@@ -2265,8 +2317,10 @@ def process(sym, cfg: dict, super_counter: dict = None, super_lock=None):
 
         # ── Guard: check all required timeframes have data ────────────────────
         _missing_tf = [tf for tf, bars in (("5m", m5), ("15m", m15),
-                                            ("1h", m1h_candles), ("3m", m3_candles))
+                                            ("1h", m1h_candles))
                        if not bars]
+        if _need_3m_detail and not m3_candles:
+            _missing_tf.append("3m")
         if _missing_tf:
             _incr_filter("f_empty_data")
             _filter_counts["f_empty_data_syms"].append(
@@ -2274,80 +2328,27 @@ def process(sym, cfg: dict, super_counter: dict = None, super_lock=None):
             return None
 
         closes_5m  = [c["close"] for c in m5]
-        closes_15m = [c["close"] for c in m15]
-        closes_3m  = [c["close"] for c in m3_candles]
-        closes_1h  = [c["close"] for c in m1h_candles]
-        entry      = _pround(m5[-1]["close"])
+        closes_15m = closes_15m_q   # already computed above (Stage 1 data)
+        closes_3m  = [c["close"] for c in m3_candles] if m3_candles else []
+        closes_1h  = closes_1h_q    # already computed above (Stage 1 data)
+        entry      = entry_q
 
-        # ── F5: 1h RSI ────────────────────────────────────────────────────────
-        rsi1h = (calc_rsi_series(closes_1h) or [0])[-1]
-        if cfg.get("use_rsi_1h", True) and \
-                not (cfg["rsi_1h_min"] <= rsi1h <= cfg["rsi_1h_max"]):
-            _record_elim("f5_rsi1h", "f5_elim_syms", sym)
-            return None
-
-        # ── F5b: ATR(14) 15m — TP reachability filter ───────────────────────
-        # ATR is ALWAYS computed and stored in criteria so that the Difficulty
-        # column in the Open Signals table works regardless of whether the
-        # filter toggle is on or off.
-        # ratio = (TP distance %) / (ATR %)
-        # Strict: ratio ≤ 1.5  → TP within 1.5× ATR (very reachable)
-        # Normal: ratio ≤ 2.0  → TP within 2× ATR
-        # Relaxed: ratio ≤ 3.0 → TP within 3× ATR
-        atr_15m_val = None
-        atr_ratio_val = None
-        _atr_series = calc_atr(m15, 14)
-        if _atr_series and entry > 0:
-            atr_15m_val   = _atr_series[-1]
-            _tp_dist_pct  = float(cfg.get("tp_pct", 1.5))  # TP% from config
-            _atr_pct      = (atr_15m_val / entry) * 100.0
-            atr_ratio_val = (_tp_dist_pct / _atr_pct) if _atr_pct > 0 else None
-        # Only REJECT the coin when the filter is explicitly enabled
-        if cfg.get("use_atr_filter", False) and atr_ratio_val is not None:
-            _atr_thresh = {"Strict": 1.5, "Normal": 2.0, "Relaxed": 3.0}.get(
-                              cfg.get("atr_mode", "Normal"), 2.0)
-            if atr_ratio_val > _atr_thresh:
-                _record_elim("f5b_atr", "f5b_elim_syms", sym)
-                return None
-
-        # ── F6: EMA (per-timeframe tracking) ────────────────────────────────
-        ema_3m_val = ema_5m_val = ema_15m_val = None
-        if cfg.get("use_ema_3m"):
-            ema = calc_ema(closes_3m, max(2, int(cfg.get("ema_period_3m", 12))))
-            if not ema or entry < ema[-1]:
-                _record_elim("f6_ema_3m", "f6_ema_3m_elim_syms", sym)
-                return None
-            ema_3m_val = _pround(ema[-1])
-        if cfg.get("use_ema_5m"):
-            ema = calc_ema(closes_5m, max(2, int(cfg.get("ema_period_5m", 12))))
-            if not ema or entry < ema[-1]:
-                _record_elim("f6_ema_5m", "f6_ema_5m_elim_syms", sym)
-                return None
-            ema_5m_val = _pround(ema[-1])
-        if cfg.get("use_ema_15m"):
-            ema = calc_ema(closes_15m, max(2, int(cfg.get("ema_period_15m", 12))))
-            if not ema or entry < ema[-1]:
-                _record_elim("f6_ema_15m", "f6_ema_15m_elim_syms", sym)
-                return None
-            ema_15m_val = _pround(ema[-1])
-
-        # ── F7: MACD dark-green — per-timeframe independent checks ──────────
-        # Each enabled timeframe is checked in order (3m → 5m → 15m).
-        # The first failure increments that timeframe's own counter and eliminates
-        # the coin — giving the funnel an accurate per-timeframe breakdown.
-        # Uses macd_bullish_and_value so MACD is computed ONCE per timeframe
-        # — the line value for display comes back from the same call, avoiding
-        # a second calc_macd() pass that the old code did after each check.
+        # ── F7: MACD dark-green — 15m → 5m → 3m ─────────────────────────────
+        # Checks higher timeframe first (15m most reliable, 3m most noisy).
+        # Each enabled timeframe is checked in order; the first failure
+        # increments that timeframe's own counter and eliminates the coin —
+        # giving the funnel an accurate per-timeframe breakdown.
+        # Uses macd_bullish_and_value so MACD is computed ONCE per timeframe.
         macd_3m_val = macd_5m_val = macd_15m_val = None
         _macd_3m_on  = cfg.get("use_macd_3m",  True)
         _macd_5m_on  = cfg.get("use_macd_5m",  True)
         _macd_15m_on = cfg.get("use_macd_15m", True)
-        if _macd_3m_on:
-            _ok_3m, _ml3 = macd_bullish_and_value(closes_3m)
-            if _ml3 is not None:
-                macd_3m_val = round(_ml3, 8)
-            if not _ok_3m:
-                _record_elim("f7_macd_3m", "f7_macd_3m_elim_syms", sym)
+        if _macd_15m_on:
+            _ok_15m, _ml15 = macd_bullish_and_value(closes_15m)
+            if _ml15 is not None:
+                macd_15m_val = round(_ml15, 8)
+            if not _ok_15m:
+                _record_elim("f7_macd_15m", "f7_macd_15m_elim_syms", sym)
                 return None
         if _macd_5m_on:
             _ok_5m, _ml5 = macd_bullish_and_value(closes_5m)
@@ -2356,39 +2357,60 @@ def process(sym, cfg: dict, super_counter: dict = None, super_lock=None):
             if not _ok_5m:
                 _record_elim("f7_macd_5m", "f7_macd_5m_elim_syms", sym)
                 return None
-        if _macd_15m_on:
-            _ok_15m, _ml15 = macd_bullish_and_value(closes_15m)
-            if _ml15 is not None:
-                macd_15m_val = round(_ml15, 8)
-            if not _ok_15m:
-                _record_elim("f7_macd_15m", "f7_macd_15m_elim_syms", sym)
+        if _macd_3m_on:
+            _ok_3m, _ml3 = macd_bullish_and_value(closes_3m)
+            if _ml3 is not None:
+                macd_3m_val = round(_ml3, 8)
+            if not _ok_3m:
+                _record_elim("f7_macd_3m", "f7_macd_3m_elim_syms", sym)
                 return None
 
-        # ── F8: Parabolic SAR — per-timeframe independent checks ─────────────
-        # Each enabled timeframe checked in order (3m → 5m → 15m).
-        # First failure increments that timeframe's counter and eliminates the coin.
+        # ── F6: EMA (15m → 5m → 3m) ──────────────────────────────────────────
+        # Higher timeframe checked first — 15m trend is more reliable.
+        ema_3m_val = ema_5m_val = ema_15m_val = None
+        if cfg.get("use_ema_15m"):
+            ema = calc_ema(closes_15m, max(2, int(cfg.get("ema_period_15m", 12))))
+            if not ema or entry < ema[-1]:
+                _record_elim("f6_ema_15m", "f6_ema_15m_elim_syms", sym)
+                return None
+            ema_15m_val = _pround(ema[-1])
+        if cfg.get("use_ema_5m"):
+            ema = calc_ema(closes_5m, max(2, int(cfg.get("ema_period_5m", 12))))
+            if not ema or entry < ema[-1]:
+                _record_elim("f6_ema_5m", "f6_ema_5m_elim_syms", sym)
+                return None
+            ema_5m_val = _pround(ema[-1])
+        if cfg.get("use_ema_3m"):
+            ema = calc_ema(closes_3m, max(2, int(cfg.get("ema_period_3m", 12))))
+            if not ema or entry < ema[-1]:
+                _record_elim("f6_ema_3m", "f6_ema_3m_elim_syms", sym)
+                return None
+            ema_3m_val = _pround(ema[-1])
+
+        # ── F8: Parabolic SAR — 15m → 5m → 3m ───────────────────────────────
+        # Higher timeframe checked first.
         sar_3m_val = sar_5m_val = sar_15m_val = None
         _sar_3m_on  = cfg.get("use_sar_3m",  True)
         _sar_5m_on  = cfg.get("use_sar_5m",  True)
         _sar_15m_on = cfg.get("use_sar_15m", True)
-        if _sar_3m_on:
-            sar_3m = calc_parabolic_sar(m3_candles)
-            if not (sar_3m and sar_3m[-1][1]):
-                _record_elim("f8_sar_3m", "f8_sar_3m_elim_syms", sym)
-                return None
-            sar_3m_val = _pround(sar_3m[-1][0])
-        if _sar_5m_on:
-            sar_5m = calc_parabolic_sar(m5)
-            if not (sar_5m and sar_5m[-1][1]):
-                _record_elim("f8_sar_5m", "f8_sar_5m_elim_syms", sym)
-                return None
-            sar_5m_val = _pround(sar_5m[-1][0])
         if _sar_15m_on:
             sar_15m = calc_parabolic_sar(m15)
             if not (sar_15m and sar_15m[-1][1]):
                 _record_elim("f8_sar_15m", "f8_sar_15m_elim_syms", sym)
                 return None
             sar_15m_val = _pround(sar_15m[-1][0])
+        if _sar_5m_on:
+            sar_5m = calc_parabolic_sar(m5)
+            if not (sar_5m and sar_5m[-1][1]):
+                _record_elim("f8_sar_5m", "f8_sar_5m_elim_syms", sym)
+                return None
+            sar_5m_val = _pround(sar_5m[-1][0])
+        if _sar_3m_on:
+            sar_3m = calc_parabolic_sar(m3_candles)
+            if not (sar_3m and sar_3m[-1][1]):
+                _record_elim("f8_sar_3m", "f8_sar_3m_elim_syms", sym)
+                return None
+            sar_3m_val = _pround(sar_3m[-1][0])
 
         # ── F9: Volume Spike ──────────────────────────────────────────────────
         vol_ratio = None
@@ -2403,22 +2425,6 @@ def process(sym, cfg: dict, super_counter: dict = None, super_lock=None):
                     _record_elim("f9_vol", "f9_elim_syms", sym)
                     return None
                 vol_ratio = round(vols_15m[-1] / avg_vol, 2) if avg_vol > 0 else None
-
-        # ── F10: 15m EMA Crossover (fast > slow) ─────────────────────────────
-        # Uses 15m candles already fetched in Stage 1 (m15/closes_15m).
-        # Coin passes only when EMA(fast) is strictly greater than EMA(slow).
-        ema_cross_12_15m_val = ema_cross_21_15m_val = None
-        if cfg.get("use_ema_cross_15m", True):
-            _fast_p = max(2, int(cfg.get("ema_cross_fast_15m", 12)))
-            _slow_p = max(_fast_p + 1, int(cfg.get("ema_cross_slow_15m", 21)))
-            ema_fast_15m = calc_ema(closes_15m, _fast_p)
-            ema_slow_15m = calc_ema(closes_15m, _slow_p)
-            if not ema_fast_15m or not ema_slow_15m or \
-                    ema_fast_15m[-1] <= ema_slow_15m[-1]:
-                _record_elim("f10_ema_cross", "f10_elim_syms", sym)
-                return None
-            ema_cross_12_15m_val = _pround(ema_fast_15m[-1])
-            ema_cross_21_15m_val = _pround(ema_slow_15m[-1])
 
         # ── All filters passed ────────────────────────────────────────────────
         tp      = _pround(entry * (1 + cfg["tp_pct"] / 100))
@@ -9040,36 +9046,19 @@ if (
         stage_rows = [
             ("⚡ After Bulk Pre-filter",  total,       len(_pre),      _coin_str(_pre)),
             ("🔬 Entered Deep Scan",      len(_pre),   len(_chk),      _coin_str(_chk)),
-            (f"After {pdz15m_lbl}",       len(_chk),   len(_after_f2), _coin_str(_after_f2)),
-            (f"After {pdz5m_lbl}",        len(_after_f2), len(_after_f3), _coin_str(_after_f3)),
-            (f"After {f4_lbl}",           len(_after_f3), len(_after_f4), _coin_str(_after_f4)),
-            (f"After {f5_lbl}",           len(_after_f4), len(_after_f5), _coin_str(_after_f5)),
+            (f"After {pdz15m_lbl}",       len(_chk),      len(_after_f2),  _coin_str(_after_f2)),
+            (f"After {pdz5m_lbl}",        len(_after_f2), len(_after_f3),  _coin_str(_after_f3)),
+            (f"After {ema_cross_lbl}",    len(_after_f3), len(_after_f10), _coin_str(_after_f10)),
+            (f"After {f5_lbl}",           len(_after_f10),len(_after_f5),  _coin_str(_after_f5)),
             (f"After {f5b_lbl}",          len(_after_f5), len(_after_f5b), _coin_str(_after_f5b)),
+            (f"After {f4_lbl}",           len(_after_f5b),len(_after_f4),  _coin_str(_after_f4)),
         ]
-        # F6 EMA — one row per enabled timeframe
-        _sr_ema_prev = _after_f5b
-        for _ema_tf, _ema_key, _ema_pkey, _ema_after_set in [
-            ("3m",  "use_ema_3m",  "ema_period_3m",  _after_f6_ema_3m),
-            ("5m",  "use_ema_5m",  "ema_period_5m",  _after_f6_ema_5m),
-            ("15m", "use_ema_15m", "ema_period_15m", _after_f6_ema_15m),
-        ]:
-            if sc.get(_ema_key):
-                stage_rows.append((
-                    f"F6 — EMA{sc.get(_ema_pkey, 12)} {_ema_tf}",
-                    len(_sr_ema_prev), len(_ema_after_set),
-                    _coin_str(_ema_after_set),
-                ))
-                _sr_ema_prev = _ema_after_set
-        if not ema_parts:
-            stage_rows.append(("F6 — EMA (off)", len(_after_f5b), len(_after_f5b), _coin_str(_after_f5b)))
-        stage_rows += [
-        ]
-        # F7 MACD — one row per enabled timeframe
-        _sr_prev = _after_f6
+        # F7 MACD — 15m → 5m → 3m (before F6)
+        _sr_prev = _after_f4
         for _tf, _key, _after_set in [
-            ("3m",  "use_macd_3m",  _after_f7_macd_3m),
-            ("5m",  "use_macd_5m",  _after_f7_macd_5m),
             ("15m", "use_macd_15m", _after_f7_macd_15m),
+            ("5m",  "use_macd_5m",  _after_f7_macd_5m),
+            ("3m",  "use_macd_3m",  _after_f7_macd_3m),
         ]:
             if sc.get(_key, True):
                 stage_rows.append((
@@ -9078,11 +9067,26 @@ if (
                     _coin_str(_after_set),
                 ))
                 _sr_prev = _after_set
-        # F8 SAR — one row per enabled timeframe
+        # F6 EMA — 15m → 5m → 3m
+        for _ema_tf, _ema_key, _ema_pkey, _ema_after_set in [
+            ("15m", "use_ema_15m", "ema_period_15m", _after_f6_ema_15m),
+            ("5m",  "use_ema_5m",  "ema_period_5m",  _after_f6_ema_5m),
+            ("3m",  "use_ema_3m",  "ema_period_3m",  _after_f6_ema_3m),
+        ]:
+            if sc.get(_ema_key):
+                stage_rows.append((
+                    f"F6 — EMA{sc.get(_ema_pkey, 12)} {_ema_tf}",
+                    len(_sr_prev), len(_ema_after_set),
+                    _coin_str(_ema_after_set),
+                ))
+                _sr_prev = _ema_after_set
+        if not ema_parts:
+            stage_rows.append(("F6 — EMA (off)", len(_sr_prev), len(_sr_prev), _coin_str(_sr_prev)))
+        # F8 SAR — 15m → 5m → 3m
         for _tf, _key, _after_set in [
-            ("3m",  "use_sar_3m",  _after_f8_sar_3m),
-            ("5m",  "use_sar_5m",  _after_f8_sar_5m),
             ("15m", "use_sar_15m", _after_f8_sar_15m),
+            ("5m",  "use_sar_5m",  _after_f8_sar_5m),
+            ("3m",  "use_sar_3m",  _after_f8_sar_3m),
         ]:
             if sc.get(_key, True):
                 stage_rows.append((
@@ -9091,10 +9095,9 @@ if (
                     _coin_str(_after_set),
                 ))
                 _sr_prev = _after_set
-        # Fixed closing rows
+        # Fixed closing rows (F10 already in stage_rows above)
         stage_rows += [
-            (f"After {vol_lbl}",               len(_sr_prev),         len(_after_f9),   _coin_str(_after_f9)),
-            (f"After {ema_cross_lbl}",         len(_after_f9),        len(_after_f10),  _coin_str(_after_f10)),
+            (f"After {vol_lbl}",               len(_sr_prev),  len(_after_f9),   _coin_str(_after_f9)),
             ("⚠️ Dropped — Empty Candle Data", len(_after_f10),       len(_fempty),     ", ".join(sorted(_fempty)) if _fempty else "—"),
             ("💥 Dropped — Process Error",     "—", _process_err_count, "See API Error Log below ↓"),
             ("✅ Returned Signal",             "—", len(_returned_syms),   _coin_str(_returned_syms)),
