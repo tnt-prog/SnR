@@ -5087,6 +5087,451 @@ def _ensure_scanner():
         wt.start(); _b._bsc_watcher_thread = wt
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Market Condition Analyser — backend (on-demand, called from bottom of page)
+# ─────────────────────────────────────────────────────────────────────────────
+def _analyze_market_conditions(cfg: dict, symbols: list,
+                                progress_bar, status_text) -> dict:
+    """
+    Scan ALL watchlist coins live, compute every filter metric for each coin,
+    and return per-filter pass rates with recommendations.
+
+    Parameters
+    ----------
+    cfg          : current config snapshot
+    symbols      : list of symbol strings from the watchlist
+    progress_bar : st.progress widget — updated per coin
+    status_text  : st.empty widget — shows current symbol being processed
+
+    Returns
+    -------
+    dict with keys:
+        "recommendations" : {filter_key: {filter, current, current_pass_rate,
+                                           rec, rec_pass_rate, reason, icon}}
+        "total_coins"     : int
+        "valid_coins"     : int   (total minus errors)
+        "errors"          : int
+    """
+    import statistics as _stats
+
+    n = len(symbols)
+    if n == 0:
+        return {}
+
+    tp_pct = float(cfg.get("tp_pct", 1.5))
+
+    # Per-filter accumulators — pass/fail counts + raw value lists where useful
+    _d: dict = {
+        "f2_pdz15m":     {"pass": 0, "fail": 0, "zones": []},
+        "f3_pdz5m":      {"pass": 0, "fail": 0, "zones": []},
+        "f4_rsi5m":      {"pass": 0, "fail": 0, "values": []},
+        "f5_rsi1h":      {"pass": 0, "fail": 0, "values": []},
+        "f5b_atr":       {"pass": 0, "fail": 0, "values": []},
+        "f6_ema_3m":     {"pass": 0, "fail": 0},
+        "f6_ema_5m":     {"pass": 0, "fail": 0},
+        "f6_ema_15m":    {"pass": 0, "fail": 0},
+        "f7_macd_3m":    {"pass": 0, "fail": 0},
+        "f7_macd_5m":    {"pass": 0, "fail": 0},
+        "f7_macd_15m":   {"pass": 0, "fail": 0},
+        "f8_sar_3m":     {"pass": 0, "fail": 0},
+        "f8_sar_5m":     {"pass": 0, "fail": 0},
+        "f8_sar_15m":    {"pass": 0, "fail": 0},
+        "f9_vol":        {"pass": 0, "fail": 0, "values": []},
+        "f10_ema_cross": {"pass": 0, "fail": 0},
+    }
+    errors = 0
+
+    for i, sym in enumerate(symbols):
+        progress_bar.progress((i + 1) / n)
+        status_text.text(f"Analysing {sym}  [{i + 1} / {n}]")
+        try:
+            m15 = get_klines(sym, "15m", 55)[:-1]
+            m5  = get_klines(sym, "5m",  55)[:-1]
+            m1h = get_klines(sym, "1h",  55)[:-1]
+            m3  = get_klines(sym, "3m",  85)[:-1]
+
+            if not m5 or not m15 or not m1h or not m3:
+                errors += 1
+                continue
+
+            entry = float(m5[-1]["close"])
+            if entry <= 0:
+                errors += 1
+                continue
+
+            closes_5m  = [c["close"] for c in m5]
+            closes_15m = [c["close"] for c in m15]
+            closes_1h  = [c["close"] for c in m1h]
+            closes_3m  = [c["close"] for c in m3]
+
+            # ── F2: PDZ 15m ───────────────────────────────────────────────
+            _p15, _z15 = calc_pdz_zone(m15, entry, tp_pct / 100.0)
+            _d["f2_pdz15m"]["zones"].append(_z15)
+            _d["f2_pdz15m"]["pass" if _p15 else "fail"] += 1
+
+            # ── F3: PDZ 5m ────────────────────────────────────────────────
+            _p5, _z5 = calc_pdz_zone(m5, entry, tp_pct / 100.0)
+            _d["f3_pdz5m"]["zones"].append(_z5)
+            _d["f3_pdz5m"]["pass" if _p5 else "fail"] += 1
+
+            # ── F4: RSI 5m ────────────────────────────────────────────────
+            _rsi5 = (calc_rsi_series(closes_5m) or [None])[-1]
+            if _rsi5 is not None:
+                _d["f4_rsi5m"]["values"].append(_rsi5)
+                _d["f4_rsi5m"][
+                    "pass" if _rsi5 >= float(cfg.get("rsi_5m_min", 30)) else "fail"
+                ] += 1
+
+            # ── F5: RSI 1h ────────────────────────────────────────────────
+            _rsi1h = (calc_rsi_series(closes_1h) or [None])[-1]
+            if _rsi1h is not None:
+                _d["f5_rsi1h"]["values"].append(_rsi1h)
+                _rlo = float(cfg.get("rsi_1h_min", 30))
+                _rhi = float(cfg.get("rsi_1h_max", 95))
+                _d["f5_rsi1h"]["pass" if _rlo <= _rsi1h <= _rhi else "fail"] += 1
+
+            # ── F5b: ATR ratio 15m ────────────────────────────────────────
+            _atr_s = calc_atr(m15, 14)
+            if _atr_s and entry > 0:
+                _atr_pct = (_atr_s[-1] / entry) * 100.0
+                if _atr_pct > 0:
+                    _ratio = tp_pct / _atr_pct
+                    _d["f5b_atr"]["values"].append(_ratio)
+                    _thresh = {"Strict": 1.5, "Normal": 2.0, "Relaxed": 3.0}.get(
+                        cfg.get("atr_mode", "Normal"), 2.0)
+                    _d["f5b_atr"]["pass" if _ratio <= _thresh else "fail"] += 1
+
+            # ── F6: EMA per timeframe ─────────────────────────────────────
+            for _fk, _cl, _pk in [
+                ("f6_ema_3m",  closes_3m,  "ema_period_3m"),
+                ("f6_ema_5m",  closes_5m,  "ema_period_5m"),
+                ("f6_ema_15m", closes_15m, "ema_period_15m"),
+            ]:
+                _ema = calc_ema(_cl, max(2, int(cfg.get(_pk, 12))))
+                if _ema:
+                    _d[_fk]["pass" if entry > _ema[-1] else "fail"] += 1
+
+            # ── F7: MACD per timeframe ────────────────────────────────────
+            for _fk, _cl in [
+                ("f7_macd_3m",  closes_3m),
+                ("f7_macd_5m",  closes_5m),
+                ("f7_macd_15m", closes_15m),
+            ]:
+                _ok, _ = macd_bullish_and_value(_cl)
+                _d[_fk]["pass" if _ok else "fail"] += 1
+
+            # ── F8: Parabolic SAR per timeframe ───────────────────────────
+            for _fk, _bars in [
+                ("f8_sar_3m",  m3),
+                ("f8_sar_5m",  m5),
+                ("f8_sar_15m", m15),
+            ]:
+                _sar = calc_parabolic_sar(_bars)
+                _d[_fk]["pass" if (_sar and _sar[-1][1]) else "fail"] += 1
+
+            # ── F9: Volume spike 15m ──────────────────────────────────────
+            _lkb  = max(2, int(cfg.get("vol_spike_lookback", 20)))
+            _vols = [c["volume"] for c in m15]
+            if len(_vols) >= _lkb + 1:
+                _avg_v = sum(_vols[-(_lkb + 1):-1]) / _lkb
+                if _avg_v > 0:
+                    _vr = _vols[-1] / _avg_v
+                    _d["f9_vol"]["values"].append(_vr)
+                    _d["f9_vol"][
+                        "pass" if _vr >= float(cfg.get("vol_spike_mult", 2.0)) else "fail"
+                    ] += 1
+
+            # ── F10: EMA cross 15m ────────────────────────────────────────
+            _fp = max(2, int(cfg.get("ema_cross_fast_15m", 12)))
+            _sp = max(_fp + 1, int(cfg.get("ema_cross_slow_15m", 21)))
+            _ef = calc_ema(closes_15m, _fp)
+            _es = calc_ema(closes_15m, _sp)
+            if _ef and _es:
+                _d["f10_ema_cross"][
+                    "pass" if _ef[-1] > _es[-1] else "fail"
+                ] += 1
+
+        except Exception:
+            errors += 1
+            continue
+
+    # ── Recommendation engine ─────────────────────────────────────────────────
+    def _pr(key: str) -> float:
+        """Pass rate % for a filter key."""
+        p = _d[key]["pass"]
+        f = _d[key]["fail"]
+        t = p + f
+        return (p / t * 100) if t > 0 else 0.0
+
+    def _icon(rate: float) -> str:
+        return "🟢" if rate >= 35 else ("🟡" if rate >= 15 else "🔴")
+
+    def _bool_rec(rate: float, label_on: str) -> str:
+        if rate < 15:  return "Consider OFF"
+        if rate < 35:  return f"{label_on} (tight)"
+        if rate > 75:  return f"{label_on} (permissive)"
+        return f"{label_on} ✓"
+
+    recs: dict = {}
+    total_valid = n - errors
+
+    # ── PDZ filters ───────────────────────────────────────────────────────────
+    for _fk, _fl, _use_key, _tf_label in [
+        ("f2_pdz15m", "F2 — PDZ 15m", "use_pdz_15m", "15m"),
+        ("f3_pdz5m",  "F3 — PDZ 5m",  "use_pdz_5m",  "5m"),
+    ]:
+        _rate   = _pr(_fk)
+        _zones  = _d[_fk]["zones"]
+        _disc   = (_zones.count("Discount") / len(_zones) * 100) if _zones else 0
+        _prem   = (_zones.count("Premium")  / len(_zones) * 100) if _zones else 0
+        if _rate < 15:
+            _rec    = "Consider OFF"
+            _reason = (f"Only {_rate:.0f}% qualify — market is mostly Premium ({_prem:.0f}%) "
+                       f"/ Equilibrium, only {_disc:.0f}% in Discount zone")
+        elif _rate < 30:
+            _rec    = f"ON – tight ({_tf_label})"
+            _reason = (f"{_rate:.0f}% qualify — limited Discount zones ({_disc:.0f}%), "
+                       f"bullish pockets scarce right now")
+        else:
+            _rec    = "ON ✓"
+            _reason = (f"{_rate:.0f}% qualify — healthy zone distribution "
+                       f"({_disc:.0f}% Discount · {_prem:.0f}% Premium)")
+        recs[_fk] = {
+            "filter": _fl,
+            "current": "ON" if cfg.get(_use_key, True) else "OFF",
+            "current_pass_rate": _rate,
+            "rec": _rec,
+            "rec_pass_rate": _rate,
+            "reason": _reason,
+            "icon": _icon(_rate),
+        }
+
+    # ── F4: RSI 5m ────────────────────────────────────────────────────────────
+    _r4     = _pr("f4_rsi5m")
+    _v5     = _d["f4_rsi5m"]["values"]
+    _cur_r5 = int(cfg.get("rsi_5m_min", 30))
+    _med_r5 = round(_stats.median(_v5)) if _v5 else _cur_r5
+    # Find the RSI min where ~35% of coins pass (≥ threshold)
+    _best_r5 = _cur_r5
+    for _t in range(20, 60):
+        _pr_t = sum(1 for v in _v5 if v >= _t) / len(_v5) * 100 if _v5 else 0
+        if abs(_pr_t - 35) < abs(
+            (sum(1 for v in _v5 if v >= _best_r5) / len(_v5) * 100 if _v5 else 0) - 35
+        ):
+            _best_r5 = _t
+    _rec_pr4 = (sum(1 for v in _v5 if v >= _best_r5) / len(_v5) * 100) if _v5 else _r4
+    if _best_r5 == _cur_r5:
+        _rsn4 = f"Optimal — median 5m RSI is {_med_r5}, {_r4:.0f}% currently pass"
+    elif _best_r5 > _cur_r5:
+        _rsn4 = f"Market is strong (median 5m RSI {_med_r5}) — raise min from {_cur_r5} → {_best_r5} for better quality"
+    else:
+        _rsn4 = f"Market is weak (median 5m RSI {_med_r5}) — lower min from {_cur_r5} → {_best_r5} to get more candidates"
+    recs["f4_rsi5m"] = {
+        "filter": "F4 — RSI 5m min",
+        "current": f"≥{_cur_r5}",
+        "current_pass_rate": _r4,
+        "rec": f"≥{_best_r5}",
+        "rec_pass_rate": _rec_pr4,
+        "reason": _rsn4,
+        "icon": _icon(_r4),
+    }
+
+    # ── F5: RSI 1h range ──────────────────────────────────────────────────────
+    _r5      = _pr("f5_rsi1h")
+    _v1h     = _d["f5_rsi1h"]["values"]
+    _cur_lo  = int(cfg.get("rsi_1h_min", 30))
+    _cur_hi  = int(cfg.get("rsi_1h_max", 95))
+    _med_1h  = round(_stats.median(_v1h)) if _v1h else 50
+    if _v1h:
+        _sv = sorted(_v1h)
+        # Range that captures ~60% of coins — 20th to 80th percentile, clamped
+        _lo_idx = max(0, int(0.20 * len(_sv)))
+        _hi_idx = min(len(_sv) - 1, int(0.80 * len(_sv)))
+        _rec_lo = max(20, round(_sv[_lo_idx]))
+        _rec_hi = min(95, round(_sv[_hi_idx]))
+    else:
+        _rec_lo, _rec_hi = _cur_lo, _cur_hi
+    _rec_pr5 = (sum(1 for v in _v1h if _rec_lo <= v <= _rec_hi) / len(_v1h) * 100) if _v1h else _r5
+    _rsn5 = (f"Median 1h RSI {_med_1h} — recommend range {_rec_lo}–{_rec_hi} "
+             f"(~{_rec_pr5:.0f}% pass vs current {_r5:.0f}%)")
+    recs["f5_rsi1h"] = {
+        "filter": "F5 — RSI 1h range",
+        "current": f"{_cur_lo}–{_cur_hi}",
+        "current_pass_rate": _r5,
+        "rec": f"{_rec_lo}–{_rec_hi}",
+        "rec_pass_rate": _rec_pr5,
+        "reason": _rsn5,
+        "icon": _icon(_r5),
+    }
+
+    # ── F5b: ATR mode ─────────────────────────────────────────────────────────
+    _r5b     = _pr("f5b_atr")
+    _vatr    = _d["f5b_atr"]["values"]
+    _cur_atr = cfg.get("atr_mode", "Normal")
+    _med_atr = round(_stats.median(_vatr), 2) if _vatr else "?"
+    _atr_rates: dict = {}
+    for _mode, _thr in [("Strict", 1.5), ("Normal", 2.0), ("Relaxed", 3.0)]:
+        _atr_rates[_mode] = (
+            sum(1 for v in _vatr if v <= _thr) / len(_vatr) * 100 if _vatr else 0
+        )
+    # Pick mode closest to 50% pass rate
+    _best_atr = min(_atr_rates, key=lambda m: abs(_atr_rates[m] - 50))
+    _rec_pr5b = _atr_rates.get(_best_atr, _r5b)
+    if _best_atr == _cur_atr:
+        _rsn5b = f"Mode '{_cur_atr}' is optimal — median ATR ratio {_med_atr}, {_r5b:.0f}% pass"
+    else:
+        _rsn5b = (f"Median ATR ratio {_med_atr} — '{_best_atr}' mode gives "
+                  f"~{_rec_pr5b:.0f}% pass rate vs current {_r5b:.0f}%")
+    recs["f5b_atr"] = {
+        "filter": "F5b — ATR mode",
+        "current": _cur_atr,
+        "current_pass_rate": _r5b,
+        "rec": _best_atr,
+        "rec_pass_rate": _rec_pr5b,
+        "reason": _rsn5b,
+        "icon": _icon(_r5b),
+    }
+
+    # ── F6: EMA per timeframe ─────────────────────────────────────────────────
+    for _fk, _fl, _uk, _pk in [
+        ("f6_ema_3m",  "F6 — EMA 3m",  "use_ema_3m",  "ema_period_3m"),
+        ("f6_ema_5m",  "F6 — EMA 5m",  "use_ema_5m",  "ema_period_5m"),
+        ("f6_ema_15m", "F6 — EMA 15m", "use_ema_15m", "ema_period_15m"),
+    ]:
+        _rate = _pr(_fk)
+        _per  = int(cfg.get(_pk, 12))
+        if _rate < 20:
+            _rsn = f"Only {_rate:.0f}% above EMA{_per} — market structure mostly below this EMA"
+        elif _rate < 40:
+            _rsn = f"{_rate:.0f}% above EMA{_per} — strong filter, market below trend on this TF"
+        elif _rate > 75:
+            _rsn = f"{_rate:.0f}% above EMA{_per} — EMA barely filtering, market is in strong uptrend"
+        else:
+            _rsn = f"{_rate:.0f}% above EMA{_per} — well calibrated for current conditions"
+        recs[_fk] = {
+            "filter": _fl,
+            "current": "ON" if cfg.get(_uk, False) else "OFF",
+            "current_pass_rate": _rate,
+            "rec": _bool_rec(_rate, "ON"),
+            "rec_pass_rate": _rate,
+            "reason": _rsn,
+            "icon": _icon(_rate),
+        }
+
+    # ── F7: MACD per timeframe ────────────────────────────────────────────────
+    for _fk, _fl, _uk in [
+        ("f7_macd_3m",  "F7 — MACD 3m",  "use_macd_3m"),
+        ("f7_macd_5m",  "F7 — MACD 5m",  "use_macd_5m"),
+        ("f7_macd_15m", "F7 — MACD 15m", "use_macd_15m"),
+    ]:
+        _rate = _pr(_fk)
+        if _rate < 15:
+            _rsn = (f"Only {_rate:.0f}% bullish — market bearish on this TF, "
+                    "MACD eliminating most candidates")
+        elif _rate < 30:
+            _rsn = f"{_rate:.0f}% bullish — mostly bearish on this TF, strong selective filter"
+        elif _rate > 70:
+            _rsn = f"{_rate:.0f}% bullish — strong uptrend, MACD barely filtering"
+        else:
+            _rsn = f"{_rate:.0f}% bullish — healthy momentum distribution"
+        recs[_fk] = {
+            "filter": _fl,
+            "current": "ON" if cfg.get(_uk, True) else "OFF",
+            "current_pass_rate": _rate,
+            "rec": _bool_rec(_rate, "ON"),
+            "rec_pass_rate": _rate,
+            "reason": _rsn,
+            "icon": _icon(_rate),
+        }
+
+    # ── F8: SAR per timeframe ─────────────────────────────────────────────────
+    for _fk, _fl, _uk in [
+        ("f8_sar_3m",  "F8 — SAR 3m",  "use_sar_3m"),
+        ("f8_sar_5m",  "F8 — SAR 5m",  "use_sar_5m"),
+        ("f8_sar_15m", "F8 — SAR 15m", "use_sar_15m"),
+    ]:
+        _rate = _pr(_fk)
+        if _rate < 20:
+            _rsn = (f"Only {_rate:.0f}% above SAR — bearish structure on this TF, "
+                    "consider disabling to avoid over-filtering")
+        elif _rate < 35:
+            _rsn = f"{_rate:.0f}% above SAR — market mostly below this TF's SAR"
+        elif _rate > 75:
+            _rsn = f"{_rate:.0f}% above SAR — SAR barely filtering in current uptrend"
+        else:
+            _rsn = f"{_rate:.0f}% above SAR — good trend filter for current market"
+        recs[_fk] = {
+            "filter": _fl,
+            "current": "ON" if cfg.get(_uk, True) else "OFF",
+            "current_pass_rate": _rate,
+            "rec": _bool_rec(_rate, "ON"),
+            "rec_pass_rate": _rate,
+            "reason": _rsn,
+            "icon": _icon(_rate),
+        }
+
+    # ── F9: Volume spike ──────────────────────────────────────────────────────
+    _r9      = _pr("f9_vol")
+    _vvol    = _d["f9_vol"]["values"]
+    _cur_mlt = float(cfg.get("vol_spike_mult", 2.0))
+    _cur_lkb = int(cfg.get("vol_spike_lookback", 20))
+    _med_vol = round(_stats.median(_vvol), 2) if _vvol else "?"
+    # Find multiplier giving ~25% pass rate (vol spikes should be selective)
+    _best_mlt = _cur_mlt
+    for _tm in [1.5, 1.8, 2.0, 2.5, 3.0]:
+        _rt = sum(1 for v in _vvol if v >= _tm) / len(_vvol) * 100 if _vvol else 0
+        _rb = sum(1 for v in _vvol if v >= _best_mlt) / len(_vvol) * 100 if _vvol else 0
+        if abs(_rt - 25) < abs(_rb - 25):
+            _best_mlt = _tm
+    _rec_pr9 = (sum(1 for v in _vvol if v >= _best_mlt) / len(_vvol) * 100) if _vvol else _r9
+    if abs(_best_mlt - _cur_mlt) < 0.01:
+        _rsn9 = f"Current ≥{_cur_mlt}× is optimal — median vol ratio {_med_vol}×, {_r9:.0f}% spiking"
+    elif _best_mlt < _cur_mlt:
+        _rsn9 = (f"Median vol ratio {_med_vol}× — lower to ≥{_best_mlt}× "
+                 f"for more candidates (~{_rec_pr9:.0f}% pass)")
+    else:
+        _rsn9 = (f"Median vol ratio {_med_vol}× — raise to ≥{_best_mlt}× "
+                 f"for more selective spikes (~{_rec_pr9:.0f}% pass)")
+    recs["f9_vol"] = {
+        "filter": f"F9 — Vol ≥Nx / {_cur_lkb}",
+        "current": f"≥{_cur_mlt}×",
+        "current_pass_rate": _r9,
+        "rec": f"≥{_best_mlt}×",
+        "rec_pass_rate": _rec_pr9,
+        "reason": _rsn9,
+        "icon": _icon(_r9),
+    }
+
+    # ── F10: EMA cross 15m ────────────────────────────────────────────────────
+    _r10  = _pr("f10_ema_cross")
+    _fp10 = int(cfg.get("ema_cross_fast_15m", 12))
+    _sp10 = int(cfg.get("ema_cross_slow_15m", 21))
+    if _r10 < 20:
+        _rsn10 = (f"Only {_r10:.0f}% pass EMA{_fp10}>EMA{_sp10} — "
+                  "market trend is down on 15m, consider disabling")
+    elif _r10 > 70:
+        _rsn10 = (f"{_r10:.0f}% pass — strong 15m uptrend, "
+                  f"EMA{_fp10}>EMA{_sp10} barely filtering")
+    else:
+        _rsn10 = f"{_r10:.0f}% pass — EMA{_fp10}>EMA{_sp10} trending correctly on 15m"
+    recs["f10_ema_cross"] = {
+        "filter": f"F10 — EMA{_fp10}>EMA{_sp10} 15m",
+        "current": "ON" if cfg.get("use_ema_cross_15m", True) else "OFF",
+        "current_pass_rate": _r10,
+        "rec": _bool_rec(_r10, "ON"),
+        "rec_pass_rate": _r10,
+        "reason": _rsn10,
+        "icon": _icon(_r10),
+    }
+
+    return {
+        "recommendations": recs,
+        "total_coins":     n,
+        "valid_coins":     n - errors,
+        "errors":          errors,
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # STREAMLIT UI
 # ─────────────────────────────────────────────────────────────────────────────
 st.set_page_config(page_title="S&R Crypto Intelligent Portal", page_icon="💎",
@@ -9231,6 +9676,98 @@ with st.expander(_err_label, expanded=(_err_count > 0)):
             },
         )
         st.caption(f"Showing {len(_err_rows)} of {_err_count} entries (newest first) · max {_ERROR_LOG_MAX} kept")
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 🎯 Market Condition Analyser  (on-demand button — bottom of page)
+# ─────────────────────────────────────────────────────────────────────────────
+st.divider()
+st.markdown("### 🎯 Market Condition Analyser")
+st.caption(
+    "Scans every coin in your watchlist right now, computes all filter metrics live, "
+    "and recommends optimal filter settings for the current market. "
+    "**Read-only — no settings are changed automatically.**"
+)
+
+_mkt_symbols = list(_snap_cfg.get("watchlist", []))
+
+if st.button(
+    f"🔍  Analyse Market Now  ({len(_mkt_symbols)} coins)",
+    disabled=(len(_mkt_symbols) == 0),
+    type="primary",
+    key="btn_market_analyse",
+    help=(
+        "Fetches live multi-timeframe candle data for every coin in your watchlist, "
+        "computes each filter metric, and shows per-filter pass rates with recommendations. "
+        "Takes ~1–3 minutes depending on watchlist size."
+    ),
+):
+    _mkt_prog = st.progress(0.0)
+    _mkt_stat = st.empty()
+    with st.spinner("Analysing market conditions across all coins…"):
+        _mkt_result = _analyze_market_conditions(
+            dict(_snap_cfg), _mkt_symbols, _mkt_prog, _mkt_stat
+        )
+    _mkt_prog.empty()
+    _mkt_stat.empty()
+    st.session_state["_mkt_analysis_result"] = _mkt_result
+
+if "_mkt_analysis_result" in st.session_state:
+    _mkt_res  = st.session_state["_mkt_analysis_result"]
+    _mkt_recs = _mkt_res.get("recommendations", {})
+    _mkt_n    = _mkt_res.get("total_coins",  0)
+    _mkt_ok   = _mkt_res.get("valid_coins",  0)
+    _mkt_err  = _mkt_res.get("errors",       0)
+
+    st.success(
+        f"✅  Analysis complete — **{_mkt_ok}** coins analysed"
+        + (f"  ·  {_mkt_err} skipped (missing candle data)" if _mkt_err else "")
+    )
+
+    _MKT_ORDER = [
+        "f2_pdz15m", "f3_pdz5m",
+        "f4_rsi5m",  "f5_rsi1h",
+        "f5b_atr",
+        "f6_ema_3m",  "f6_ema_5m",  "f6_ema_15m",
+        "f7_macd_3m", "f7_macd_5m", "f7_macd_15m",
+        "f8_sar_3m",  "f8_sar_5m",  "f8_sar_15m",
+        "f9_vol",
+        "f10_ema_cross",
+    ]
+    _mkt_tbl = []
+    for _mk in _MKT_ORDER:
+        if _mk not in _mkt_recs:
+            continue
+        _mr = _mkt_recs[_mk]
+        _mkt_tbl.append({
+            " ":                  _mr["icon"],
+            "Filter":             _mr["filter"],
+            "Current Setting":    _mr["current"],
+            "Current Pass Rate":  f"{_mr['current_pass_rate']:.0f}%",
+            "Recommended":        _mr["rec"],
+            "Rec. Pass Rate":     f"{_mr['rec_pass_rate']:.0f}%",
+            "Analysis":           _mr["reason"],
+        })
+
+    st.dataframe(
+        _mkt_tbl,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            " ":                 st.column_config.TextColumn(width=35),
+            "Filter":            st.column_config.TextColumn(width="small"),
+            "Current Setting":   st.column_config.TextColumn(width="small"),
+            "Current Pass Rate": st.column_config.TextColumn(width="small"),
+            "Recommended":       st.column_config.TextColumn(width="small"),
+            "Rec. Pass Rate":    st.column_config.TextColumn(width="small"),
+            "Analysis":          st.column_config.TextColumn(width="large"),
+        },
+    )
+    st.caption(
+        "🟢 Pass rate ≥35% — healthy  ·  "
+        "🟡 15–35% — limited candidates  ·  "
+        "🔴 <15% — filter may be too strict for current market\n\n"
+        "Pass rates are **independent per filter** — apply changes manually in the sidebar if you agree."
+    )
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Download Diagnostics  (bottom of page — plain-text snapshot for debug/share)
