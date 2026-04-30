@@ -199,6 +199,7 @@ DEFAULT_CONFIG: dict = {
     # add more margin into a position that has already hit its loss limit.
     "dca_tp_usd":            0.50,   # Fixed $ profit target after any DCA
     "dca_sl_usd":            5.00,   # Fixed $ max loss   after any DCA (replaces % SL)
+    "use_dca_sl":            True,   # When False: no SL at any stage (entry % SL or post-DCA fixed $ SL) — TP-only mode
     # ── Open-Trade Watcher loop (1-minute DCA/TP checker) ─────────────────────
     # When > 0 AND < loop_minutes: a dedicated background thread runs every
     # `watcher_minutes` minutes, fetching 1m candles for each open trade and
@@ -3339,13 +3340,15 @@ def _execute_dca_fill_paper(sig: dict, cfg: dict) -> bool:
             new_tp = _pround(_avg_p * (1.0 + _tp_pct_fb))
             new_sl = _pround(_avg_p * (1.0 - _sl_d_fb))
         sig["tp"]            = new_tp
-        sig["sl"]            = new_sl
+        # Only update SL when use_dca_sl is enabled
+        if cfg.get("use_dca_sl", True):
+            sig["sl"]        = new_sl
         sig["fc_trigger_px"] = new_tp   # paper FC detection uses the same price
 
         dca_max          = int(sig.get("dca_max", 0) or 0)
         ladder_exhausted = (sig.get("dca_count", 0) >= dca_max)
         if ladder_exhausted:
-            sig["final_sl_price"] = new_sl
+            sig["final_sl_price"] = new_sl if cfg.get("use_dca_sl", True) else None
             sig["next_dca_px"]    = 0.0
         else:
             sig["final_sl_price"] = None
@@ -3616,12 +3619,14 @@ def _execute_dca_fill(sig: dict, cfg: dict) -> bool:
             new_tp = _pround(_avg_l * (1.0 + _tp_pct_fb))
             new_sl = _pround(_avg_l * (1.0 - _sl_d_fb))
         sig["tp"]            = new_tp
-        sig["sl"]            = new_sl
+        # Only update SL when use_dca_sl is enabled
+        if cfg.get("use_dca_sl", True):
+            sig["sl"]        = new_sl
         sig["fc_trigger_px"] = new_tp   # keeps FC detection consistent
 
         dca_max = int(sig.get("dca_max", 0) or 0)
         if sig["dca_count"] >= dca_max:
-            sig["final_sl_price"] = new_sl
+            sig["final_sl_price"] = new_sl if cfg.get("use_dca_sl", True) else None
             sig["next_dca_px"]    = 0.0
         else:
             sig["final_sl_price"] = None
@@ -3674,36 +3679,60 @@ def _execute_dca_fill(sig: dict, cfg: dict) -> bool:
                 reason  = f"replaced after DCA-{next_idx}",
             )
 
-        # ── Place fresh OCO (TP + SL) at fixed dollar levels ─────────────────
-        # Both cross and isolated mode now use a full OCO so OKX holds BOTH
-        # the fixed dollar TP and the fixed dollar SL simultaneously.
+        # ── Place fresh TP algo (OCO if use_dca_sl, TP-only otherwise) ──────────
         # fc_trigger_px is already set to sig["tp"] above, so the existing
         # OKX-sync / FC-detection path continues to work unchanged.
-        new_algo = _place_dca_oco_algo(sig, cfg, sig["tp"], sig["sl"],
-                                       total_contracts)
-        if new_algo:
-            sig["algo_id"]    = new_algo
-            sig["tp_algo_id"] = new_algo
-            _okx_log_entry(
-                sig, f"DCA OCO ALGO [{_dca_env_tag}]",
-                ordType         = "oco",
-                tpTriggerPx     = sig["tp"],
-                slTriggerPx     = sig["sl"],
-                tpTriggerPxType = "mark",
-                slTriggerPxType = "mark",
-                sz              = f"{total_contracts} contracts",
-                algoId          = new_algo,
-                tp_usd          = f"+${_dca_tp_usd_l:.2f}",
-                sl_usd          = f"-${_dca_sl_usd_l:.2f}",
-            )
+        _use_dca_sl_live = cfg.get("use_dca_sl", True)
+        if _use_dca_sl_live:
+            # Full OCO: OKX holds both fixed dollar TP and fixed dollar SL
+            new_algo = _place_dca_oco_algo(sig, cfg, sig["tp"], sig["sl"],
+                                           total_contracts)
+            if new_algo:
+                sig["algo_id"]    = new_algo
+                sig["tp_algo_id"] = new_algo
+                _okx_log_entry(
+                    sig, f"DCA OCO ALGO [{_dca_env_tag}]",
+                    ordType         = "oco",
+                    tpTriggerPx     = sig["tp"],
+                    slTriggerPx     = sig["sl"],
+                    tpTriggerPxType = "mark",
+                    slTriggerPxType = "mark",
+                    sz              = f"{total_contracts} contracts",
+                    algoId          = new_algo,
+                    tp_usd          = f"+${_dca_tp_usd_l:.2f}",
+                    sl_usd          = f"-${_dca_sl_usd_l:.2f}",
+                )
+            else:
+                _okx_log_entry(
+                    sig, f"DCA OCO ALGO FAILED [{_dca_env_tag}]",
+                    tpTriggerPx = sig["tp"],
+                    slTriggerPx = sig["sl"],
+                    sz          = f"{total_contracts} contracts",
+                    error       = "algo placement returned no algoId",
+                )
         else:
-            _okx_log_entry(
-                sig, f"DCA OCO ALGO FAILED [{_dca_env_tag}]",
-                tpTriggerPx = sig["tp"],
-                slTriggerPx = sig["sl"],
-                sz          = f"{total_contracts} contracts",
-                error       = "algo placement returned no algoId",
-            )
+            # TP-only mode — no SL placed on OKX; position managed manually
+            new_algo = _place_tp_only_order(sig, cfg, sig["tp"], total_contracts)
+            if new_algo:
+                sig["algo_id"]    = new_algo
+                sig["tp_algo_id"] = new_algo
+                _okx_log_entry(
+                    sig, f"DCA TP-ONLY ALGO [{_dca_env_tag}]",
+                    ordType         = "conditional",
+                    tpTriggerPx     = sig["tp"],
+                    tpTriggerPxType = "mark",
+                    sz              = f"{total_contracts} contracts",
+                    algoId          = new_algo,
+                    tp_usd          = f"+${_dca_tp_usd_l:.2f}",
+                    note            = "use_dca_sl=False — no SL on OKX",
+                )
+            else:
+                _okx_log_entry(
+                    sig, f"DCA TP-ONLY ALGO FAILED [{_dca_env_tag}]",
+                    tpTriggerPx = sig["tp"],
+                    sz          = f"{total_contracts} contracts",
+                    error       = "tp-only algo placement returned no algoId",
+                )
 
         sig.pop("_dca_pending", None)
         sig.pop("_dca_trigger_px", None)
@@ -3765,14 +3794,17 @@ def _update_one_signal(sig: dict) -> None:
             tp_time    = None
             dca_time   = None
             sl_time    = None
-            _dca_sl_px = float(sig.get("sl", 0) or 0)   # fixed dollar SL price
+            _dca_sl_px      = float(sig.get("sl", 0) or 0)   # fixed dollar SL price
+            _use_dca_sl_w   = _cfg_snap.get("use_dca_sl", True)  # honour toggle
             for c in _post_dca:
                 if tp_time is None and c["high"] >= sig["tp"]:
                     tp_time = c["time"]
                 if (dca_time is None and _dca_trigger_price > 0
                         and c["low"] <= _dca_trigger_price):
                     dca_time = c["time"]
-                if (sl_time is None and _dca_sl_px > 0
+                # Skip SL check entirely when use_dca_sl is disabled
+                if (_use_dca_sl_w
+                        and sl_time is None and _dca_sl_px > 0
                         and c["low"] <= _dca_sl_px):
                     sl_time = c["time"]
             # ── FC-B: check fc_trigger_px (= fixed dollar TP price) ──────────
@@ -3856,11 +3888,14 @@ def _update_one_signal(sig: dict) -> None:
         # When ladder is exhausted, sig["sl"] == final_sl_price
         # (blended avg × (1 − sl_distance_pct)) and a hit routes to
         # "dca_sl_hit" instead of "sl_hit".
-        _ladder_full = _dca_enabled and _dca_max > 0 and _dca_count >= _dca_max
+        _ladder_full  = _dca_enabled and _dca_max > 0 and _dca_count >= _dca_max
+        _use_sl_here  = _cfg_snap.get("use_dca_sl", True)  # False = TP-only mode
         tp_time = sl_time = None
         for c in post:
             if tp_time is None and c["high"] >= sig["tp"]: tp_time = c["time"]
-            if sl_time is None and c["low"]  <= sig["sl"]: sl_time = c["time"]
+            # Skip SL check when use_dca_sl is disabled (TP-only mode)
+            if _use_sl_here and sl_time is None and c["low"] <= sig["sl"]:
+                sl_time = c["time"]
         if tp_time is not None or sl_time is not None:
             if tp_time is not None and (sl_time is None or tp_time <= sl_time):
                 sig.update(status="tp_hit", close_price=sig["tp"],
@@ -5583,6 +5618,24 @@ with st.sidebar:
             "reached this limit.\n\n"
             "Applies to BOTH paper and live modes. Default: $5.00."
         ))
+    new_use_dca_sl = st.checkbox(
+        "Enable DCA SL (fixed $ stop-loss after DCA fills)",
+        value=bool(_snap_cfg.get("use_dca_sl", True)), key="cfg_use_dca_sl",
+        help=(
+            "DCA SL Toggle — ON/OFF\n\n"
+            "✅ ON (default): After any DCA fill the bot places a fixed dollar "
+            "stop-loss on OKX (SL price = blended avg − DCA SL $ ÷ coins held). "
+            "This SL replaces the entry % SL entirely and fires before the next "
+            "DCA trigger.\n\n"
+            "❌ OFF (TP-only mode): No stop-loss is set at any stage — not at "
+            "entry and not after any DCA fill. The position runs with a TP-only "
+            "conditional algo on OKX. SL management is entirely manual.\n\n"
+            "The DCA TP target above is completely unaffected by this toggle."
+        ))
+    if new_use_dca_sl:
+        st.caption("✅ Fixed $ SL active after each DCA fill")
+    else:
+        st.caption("⚠️ TP-only mode — NO stop-loss at any stage (manual SL management)")
 
     # Notional preview — always shown (even when Auto-Trading is off) so the
     # user can see the effective trade size driven by Size × Leverage.
@@ -6329,6 +6382,7 @@ with st.sidebar:
             "dca_cross_drop_pct":   max(0.1, min(50.0,  float(new_dca_cross_drop_pct))),
             "dca_tp_usd":           max(0.10, min(50.0,  float(new_dca_tp_usd))),
             "dca_sl_usd":           max(0.50, min(500.0, float(new_dca_sl_usd))),
+            "use_dca_sl":           bool(new_use_dca_sl),
         }
         with _config_lock: _b._bsc_cfg.clear(); _b._bsc_cfg.update(new_cfg)
         save_config(new_cfg)
@@ -9321,8 +9375,14 @@ def _build_diagnostics_text() -> str:
     try:
         _dca_tp_usd_d = float(_snap_cfg.get("dca_tp_usd", 0.50) or 0.50)
         _dca_sl_usd_d = float(_snap_cfg.get("dca_sl_usd", 5.00) or 5.00)
+        _dca_sl_on_d  = bool(_snap_cfg.get("use_dca_sl", True))
         _kv("dca_tp_usd  (fixed $ profit after DCA)", f"${_dca_tp_usd_d:.2f}")
         _kv("dca_sl_usd  (fixed $ max loss  after DCA)", f"${_dca_sl_usd_d:.2f}")
+        _kv("use_dca_sl  (SL enabled)", _dca_sl_on_d)
+        if _dca_sl_on_d:
+            _kv("sl_mode", "fixed $ SL active — OKX OCO (TP+SL) placed after each DCA fill")
+        else:
+            _kv("sl_mode", "TP-ONLY — no SL at any stage; position managed manually")
         _kv("note", "SL takes priority over DCA trigger if both fire on same candle")
     except Exception as _de:
         _push(f"  <error: {_de}>")
@@ -9487,21 +9547,26 @@ def _build_diagnostics_text() -> str:
             ("pre_filtered_out",  "Pre-filter eliminated"),
             ("checked",           "Deep-scanned"),
             ("f_empty_data",      "F0  -- Empty/bad data"),
-            ("f1_resistance",     "F1  -- Resistance"),
-            ("f2_super_setup",    "F2  -- Super setup passed"),
-            ("super_cap_demoted", "F2  -- Super cap demoted"),
-            ("f3_pdz5m",          "F3  -- PDZ 5m"),
-            ("f4_rsi5m",          "F4  -- RSI 5m"),
-            ("f5_rsi1h",          "F5  -- RSI 1h"),
-            ("f6_ema",            "F6  -- EMA"),
-            ("f7_macd",           "F7  -- MACD"),
-            ("f7b_macd5m",        "F7b -- MACD 5m"),
-            ("f7c_macd15m",       "F7c -- MACD 15m"),
-            ("f8_sar",            "F8  -- SAR"),
-            ("f9_vol",            "F9  -- Volume"),
-            ("f10_ema_cross",     "F10 -- EMA Cross 15m"),
+            ("f2_pdz15m",         "F2  -- PDZ 15m eliminated"),
+            ("super_cap_demoted", "F2  -- Super cap demoted to pipeline"),
+            ("f3_pdz5m",          "F3  -- PDZ 5m eliminated"),
+            ("f4_rsi5m",          "F4  -- RSI 5m eliminated"),
+            ("f5_rsi1h",          "F5  -- RSI 1h eliminated"),
+            ("f5b_atr",           "F5b -- ATR TP-reachability eliminated"),
+            ("f6_ema_3m",         "F6  -- EMA 3m eliminated"),
+            ("f6_ema_5m",         "F6  -- EMA 5m eliminated"),
+            ("f6_ema_15m",        "F6  -- EMA 15m eliminated"),
+            ("f7_macd_3m",        "F7  -- MACD 3m eliminated"),
+            ("f7_macd_5m",        "F7  -- MACD 5m eliminated"),
+            ("f7_macd_15m",       "F7  -- MACD 15m eliminated"),
+            ("f8_sar_3m",         "F8  -- SAR 3m eliminated"),
+            ("f8_sar_5m",         "F8  -- SAR 5m eliminated"),
+            ("f8_sar_15m",        "F8  -- SAR 15m eliminated"),
+            ("f9_vol",            "F9  -- Volume spike eliminated"),
+            ("f10_ema_cross",     "F10 -- EMA Cross 15m eliminated"),
+            ("f_sl_cooldown",     "SL cooldown blocked"),
             ("passed",            "Passed all filters"),
-            ("super_setup",       "Super setup"),
+            ("super_setup",       "Super setup (subset of passed)"),
         ]
         for _fk, _fl in _fmap:
             _fv = _fc.get(_fk, 0)
