@@ -3370,11 +3370,11 @@ if _acct_has_creds:
 # Display banner only — computation already done above.
 _closed_total = _total_tp_ct + _total_sl_ct
 if _closed_total == 0:
-    _total_color = "#7A6555"
+    _total_color = "#3A6464"
     _total_prefix = "💼"
     _total_sub    = "no closed trades yet"
 else:
-    _total_color  = "#5A7A3A" if _total_pnl >= 0 else "#8B3A3A"
+    _total_color  = "#2E7D32" if _total_pnl >= 0 else "#C0392B"
     _total_prefix = "💼" if _total_pnl >= 0 else "📉"
     _total_sub    = (
         f"{_closed_total} closed trades  ·  "
@@ -3438,7 +3438,7 @@ _cap_minimum   = _cap_per_trade * _cap_pool
 _cap_buffer    = _cap_minimum * 0.25
 _cap_total     = _cap_minimum + _cap_buffer
 st.markdown(
-    f"<p style='color:#A67C52;font-weight:700;margin:2px 0;font-size:14px;'>"
+    f"<p style='color:#007A80;font-weight:700;margin:2px 0;font-size:14px;'>"
     f"💰 Minimum Required: <span style='font-size:15px'>${_cap_minimum:,.2f} USDT</span>"
     f"&nbsp;&nbsp;|&nbsp;&nbsp;"
     f"🛡️ Buffer (25%): <span style='font-size:15px'>${_cap_buffer:,.2f} USDT</span>"
@@ -3483,39 +3483,39 @@ m6, m7, m8, m9 = st.columns(4)
 # ── Open — large green ──────────────────────────────────────────────────
 with m6:
     st.markdown(
-        f"""<div style="background:#0d1117;border:1px solid #21262d;border-radius:8px;
+        f"""<div style="background:#C8EDED;border:1px solid #007A8066;border-radius:8px;
                         padding:12px 16px 10px 16px;min-height:88px;"
              title="Active open trades (max {_max_open_cap} allowed simultaneously — configurable in sidebar)">
             <p style="margin:0 0 4px 0;font-size:0.72rem;font-weight:600;
-                      color:#D4821A;letter-spacing:.05em;line-height:1.2;">OPEN</p>
+                      color:#007A80;letter-spacing:.05em;line-height:1.2;">OPEN</p>
             <p style="margin:0;font-size:1.9rem;font-weight:700;
-                      color:#D4821A;line-height:1.1;">{open_count}</p>
+                      color:#007A80;line-height:1.1;">{open_count}</p>
         </div>""",
         unsafe_allow_html=True,
     )
-# ── TP Hit — large blue ──────────────────────────────────────────────────
+# ── TP Hit — large green ─────────────────────────────────────────────────
 with m7:
     st.markdown(
-        f"""<div style="background:#0d1117;border:1px solid #21262d;border-radius:8px;
+        f"""<div style="background:#D8EED8;border:1px solid #2E7D3266;border-radius:8px;
                         padding:12px 16px 10px 16px;min-height:88px;"
              title="Signals closed at Take-Profit price since startup">
             <p style="margin:0 0 4px 0;font-size:0.72rem;font-weight:600;
-                      color:#5A7A3A;letter-spacing:.05em;line-height:1.2;">TP HIT ✅</p>
+                      color:#2E7D32;letter-spacing:.05em;line-height:1.2;">TP HIT ✅</p>
             <p style="margin:0;font-size:1.9rem;font-weight:700;
-                      color:#5A7A3A;line-height:1.1;">{tp_count}</p>
+                      color:#2E7D32;line-height:1.1;">{tp_count}</p>
         </div>""",
         unsafe_allow_html=True,
     )
 # ── SL Hit — large red ───────────────────────────────────────────────────
 with m8:
     st.markdown(
-        f"""<div style="background:#0d1117;border:1px solid #21262d;border-radius:8px;
+        f"""<div style="background:#FDECEA;border:1px solid #C0392B66;border-radius:8px;
                         padding:12px 16px 10px 16px;min-height:88px;"
              title="Regular SL hits (non-DCA trades, or DCA disabled)">
             <p style="margin:0 0 4px 0;font-size:0.72rem;font-weight:600;
-                      color:#8B3A3A;letter-spacing:.05em;line-height:1.2;">SL HIT ❌</p>
+                      color:#C0392B;letter-spacing:.05em;line-height:1.2;">SL HIT ❌</p>
             <p style="margin:0;font-size:1.9rem;font-weight:700;
-                      color:#8B3A3A;line-height:1.1;">{sl_count}</p>
+                      color:#C0392B;line-height:1.1;">{sl_count}</p>
         </div>""",
         unsafe_allow_html=True,
     )
@@ -3531,8 +3531,8 @@ def _cfg_panel(cfg: dict) -> str:
 
     # ── helpers ────────────────────────────────────────────────────────────────
     def _pill(text, active=True):
-        bg  = "#1f3d5c" if active else "#21262d"
-        col = "#8B5E3C" if active else "#7A6555"
+        bg  = "#C8EDED" if active else "#D8F0F0"
+        col = "#007A80" if active else "#3A6464"
         return (f"<span style='display:inline-block;font-size:11px;"
                 f"padding:2px 9px;border-radius:12px;margin:2px 3px 2px 0;"
                 f"background:{bg};color:{col};font-weight:500'>{text}</span>")
@@ -3541,15 +3541,15 @@ def _cfg_panel(cfg: dict) -> str:
         return _pill(text, active=False)
 
     def _kv_cell(label, value, highlight=False):
-        vc = "#8B5E3C" if highlight else "#2C1810"
+        vc = "#007A80" if highlight else "#0D3333"
         return (f"<td style='padding:6px 8px 6px 0;vertical-align:top;white-space:nowrap;'>"
-                f"<span style='font-size:11px;color:#7A6555'>{label}</span><br>"
+                f"<span style='font-size:11px;color:#3A6464'>{label}</span><br>"
                 f"<span style='font-size:13px;font-weight:500;color:{vc}'>{value}</span></td>")
 
     def _section(title):
         return (f"<tr><td colspan='20' style='padding:10px 0 4px 0;"
-                f"font-size:11px;font-weight:500;color:#7A6555;"
-                f"border-top:1px solid #C4A882;letter-spacing:0.05em'>"
+                f"font-size:11px;font-weight:500;color:#3A6464;"
+                f"border-top:1px solid #007A8066;letter-spacing:0.05em'>"
                 f"{title}</td></tr>")
 
     # ── collect values ─────────────────────────────────────────────────────────
@@ -3574,13 +3574,13 @@ def _cfg_panel(cfg: dict) -> str:
     # Filter pills removed — all F2–F10 filters removed
 
     # ── build HTML ─────────────────────────────────────────────────────────────
-    _mode_col = "#8B5E3C" if demo else "#5A7A3A"
+    _mode_col = "#007A80" if demo else "#2E7D32"
     _mode_lbl = "DEMO" if demo else "LIVE"
     _html = (
-        f"<div style='background:#EDE4D3;border:1px solid #C4A88266;"
+        f"<div style='background:#D0EEEE;border:1px solid #007A8066;"
         f"border-radius:8px;padding:14px 18px;margin-bottom:12px;'>"
         f"<div style='display:flex;align-items:center;gap:10px;margin-bottom:10px;'>"
-        f"<span style='font-size:13px;font-weight:500;color:#2C1810;font-weight:700'>Scanner Config</span>"
+        f"<span style='font-size:13px;font-weight:500;color:#0D3333;font-weight:700'>Scanner Config</span>"
         f"<span style='font-size:11px;font-weight:500;padding:2px 8px;"
         f"border-radius:10px;background:{_mode_col}22;color:{_mode_col}'>{_mode_lbl}</span>"
         f"</div>"
@@ -3691,11 +3691,11 @@ for _s in signals:
 
 # Color based on sign: green for gain, red for loss, grey for exact zero / empty
 if _pnl_24h_tp_ct == 0 and _pnl_24h_sl_ct == 0:
-    _pnl_color   = "#7A6555"  # grey
+    _pnl_color   = "#3A6464"  # muted teal
     _pnl_prefix  = "💰"
     _pnl_summary = "no closed trades in the last 24 h"
 else:
-    _pnl_color   = "#5A7A3A" if _pnl_24h_total >= 0 else "#8B3A3A"
+    _pnl_color   = "#2E7D32" if _pnl_24h_total >= 0 else "#C0392B"
     _pnl_prefix  = "💰" if _pnl_24h_total >= 0 else "📉"
     # Use backslash-escaped $ so Streamlit's markdown engine doesn't treat
     # pairs of dollar signs as LaTeX math delimiters (which would otherwise
@@ -4394,9 +4394,9 @@ def _style_pnl_cell(val) -> str:
             return ""
         s = str(val).strip()
         if s.startswith("-"):
-            return "color: #8B3A3A; font-weight: 600;"   # red
+            return "color: #C0392B; font-weight: 600;"   # red
         if s.startswith("+"):
-            return "color: #5A7A3A; font-weight: 600;"   # green
+            return "color: #2E7D32; font-weight: 600;"   # green
     except Exception:
         pass
     return ""
@@ -5189,17 +5189,17 @@ if signals:
         labels=list(sec_counts.keys()), values=list(sec_counts.values()),
         hole=0.4, marker=dict(colors=px.colors.qualitative.Dark24)
     )).update_layout(title="Signals by Sector", paper_bgcolor="rgba(0,0,0,0)",
-                     plot_bgcolor="rgba(0,0,0,0)", font=dict(color="#2C1810"),
+                     plot_bgcolor="rgba(0,0,0,0)", font=dict(color="#0D3333"),
                      margin=dict(t=40,b=10,l=10,r=10)),
                      use_container_width=True)
     outcome = {"Open": open_count, "TP Hit": tp_count, "SL Hit": sl_count}
     ch2.plotly_chart(go.Figure(go.Bar(
         x=list(outcome.keys()), y=list(outcome.values()),
-        marker_color=["#8B5E3C", "#5A7A3A", "#8B3A3A"],
+        marker_color=["#007A80", "#2E7D32", "#C0392B"],
         text=list(outcome.values()), textposition="outside"
     )).update_layout(title="Signal Outcomes", paper_bgcolor="rgba(0,0,0,0)",
-                     plot_bgcolor="rgba(0,0,0,0)", font=dict(color="#2C1810"),
-                     yaxis=dict(gridcolor="#21262d"), margin=dict(t=40,b=10,l=10,r=10)),
+                     plot_bgcolor="rgba(0,0,0,0)", font=dict(color="#0D3333"),
+                     yaxis=dict(gridcolor="#007A8033"), margin=dict(t=40,b=10,l=10,r=10)),
                      use_container_width=True)
     if _has_per_day:
         _days = sorted(_dc.keys())
@@ -5207,20 +5207,20 @@ if signals:
             x=_days, y=[_dc[_d] for _d in _days],
             width=0.2,
             marker=dict(
-                color="#5A7A3A",
+                color="#007A80",
                 opacity=0.9,
-                line=dict(color="#56d364", width=1),
+                line=dict(color="#005A60", width=1),
             ),
             text=[_dc[_d] for _d in _days], textposition="outside",
-            textfont=dict(color="#56d364", size=11),
+            textfont=dict(color="#007A80", size=11),
         )).update_layout(
-            title=dict(text="Signals Per Day (Dubai/GST)", font=dict(size=13, color="#7A6555")),
+            title=dict(text="Signals Per Day (Dubai/GST)", font=dict(size=13, color="#3A6464")),
             paper_bgcolor="rgba(0,0,0,0)",
             plot_bgcolor="rgba(0,0,0,0)",
-            font=dict(color="#2C1810"),
+            font=dict(color="#0D3333"),
             bargap=0.7,
-            yaxis=dict(gridcolor="#21262d", zeroline=False),
-            xaxis=dict(gridcolor="#21262d"),
+            yaxis=dict(gridcolor="#007A8033", zeroline=False),
+            xaxis=dict(gridcolor="#007A8033"),
             margin=dict(t=40, b=10, l=10, r=10),
         ), use_container_width=True)
 
