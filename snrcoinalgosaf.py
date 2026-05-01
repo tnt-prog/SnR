@@ -3289,8 +3289,8 @@ with st.sidebar:
 # ─────────────────────────────────────────────────────────────────────────────
 # MAIN AREA
 # ─────────────────────────────────────────────────────────────────────────────
-_NOW_GST = dubai_now().strftime("%d %b %Y  %H:%M GST")
-st.title(f"S&R — Crypto Intelligent Portal   ·   🕐 {_NOW_GST}")
+_NOW_GST = dubai_now().strftime("%d %b %Y")
+st.title(f"S&R — Crypto Intelligent Portal   ·   📅 {_NOW_GST}")
 
 # ── Total Realized PnL computation ─────────────────────────────────────────────
 # Moved above the account summary box so _total_pnl is available for the
