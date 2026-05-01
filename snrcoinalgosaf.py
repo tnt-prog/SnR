@@ -3493,8 +3493,8 @@ m4.metric("Pre-filtered ⚡", pre_out,  help="Coins removed by bulk ticker pre-f
 m5c.metric("Deep Scanned",   deep_sc,  help="Coins that passed pre-filter and received full candle analysis")
 
 # ── Row 2: Trade results ──────────────────────────────────────────────────────
-m6, m7, m8, m9 = st.columns(4)
-# ── Open — large green ──────────────────────────────────────────────────
+m6, m7, m8, m8b, m9 = st.columns(5)
+# ── Open — large orange ─────────────────────────────────────────────────
 with m6:
     st.markdown(
         f"""<div style="background:#FFFDE7;border:1px solid #F9A82566;border-radius:8px;
@@ -3533,6 +3533,20 @@ with m8:
         </div>""",
         unsafe_allow_html=True,
     )
+# ── Trend Exit — red ─────────────────────────────────────────────────────
+with m8b:
+    st.markdown(
+        f"""<div style="background:#FDECEA;border:1px solid #C0392B66;border-radius:8px;
+                        padding:12px 16px 10px 16px;min-height:88px;"
+             title="Trades closed by trend reversal (F2/F3/F4 indicator flip)">
+            <p style="margin:0 0 4px 0;font-size:0.72rem;font-weight:600;
+                      color:#C0392B;letter-spacing:.05em;line-height:1.2;">TREND EXIT 🚨</p>
+            <p style="margin:0;font-size:1.9rem;font-weight:700;
+                      color:#C0392B;line-height:1.1;">{trend_exit_count}</p>
+        </div>""",
+        unsafe_allow_html=True,
+    )
+# ── Queued — gray ────────────────────────────────────────────────────────
 with m9:
     st.markdown(
         f"""<div style="background:#F0F0F0;border:1px solid #9E9E9E66;border-radius:8px;
