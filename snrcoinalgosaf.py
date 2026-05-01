@@ -2094,12 +2094,25 @@ def _update_one_signal(sig: dict) -> None:
                 # ── F2/F3/F4 Trend Exit — ANY ONE bearish flip on 15m ────────
                 with _config_lock:
                     _te_cfg = dict(_b._bsc_cfg)
+                _use_st  = bool(_te_cfg.get("f2_supertrend", True))
+                _use_ce  = bool(_te_cfg.get("f3_chandelier", True))
+                _use_lux = bool(_te_cfg.get("f4_lux",        True))
+                if _use_st or _use_ce or _use_lux:
+                    _c15 = get_klines(sig["symbol"], "15m", 100)[:-1]
+
+                    # ── Backfill entry_indicators for legacy signals ──────────
+                    # Old signals created before this field existed show "—".
+                    # Re-compute which indicators currently agree on a bullish
+                    # trend and store it so the table shows useful data.
+                    if not sig.get("entry_indicators") or sig.get("entry_indicators") == "—":
+                        _, _cur_inds = _check_trend_confirmation(
+                            _c15, _use_st, _use_ce, _use_lux)
+                        sig["entry_indicators"] = (
+                            "+".join(_cur_inds) if _cur_inds else "F2/F3/F4 unclear"
+                        )
+
                 if _te_cfg.get("use_trend_exit", True):
-                    _use_st  = bool(_te_cfg.get("f2_supertrend", True))
-                    _use_ce  = bool(_te_cfg.get("f3_chandelier", True))
-                    _use_lux = bool(_te_cfg.get("f4_lux",        True))
                     if _use_st or _use_ce or _use_lux:
-                        _c15 = get_klines(sig["symbol"], "15m", 100)[:-1]
                         _exited, _exit_inds = _check_trend_exit(
                             _c15, _use_st, _use_ce, _use_lux)
                         if _exited:
