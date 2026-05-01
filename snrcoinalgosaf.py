@@ -1612,8 +1612,12 @@ def _calc_lux_trend(candles: list, period: int = 14, mult: float = 2.0) -> list:
 def _check_trend_confirmation(candles_15m: list,
                                use_st:  bool = True,
                                use_ce:  bool = True,
-                               use_lux: bool = True) -> bool:
+                               use_lux: bool = True):
     """Entry qualification — no candle-window restriction.
+
+    Returns (True, ["F2","F3"]) if qualified, (False, []) otherwise.
+    The list contains the labels of every indicator with an active buy signal
+    that contributed to the qualification.
 
     A coin qualifies when ALL of the following hold:
       1. At least 2 of the enabled indicators have an ACTIVE buy signal —
@@ -1621,26 +1625,17 @@ def _check_trend_confirmation(candles_15m: list,
          and no bearish flip has occurred since.
       2. No indicator (F2, F3, or F4) fired a SELL signal (bearish flip)
          at any candle AFTER the earlier of the two qualifying buy flips.
-
-    Examples:
-      • F2 buy at 1:30 am, F4 buy at 2:10 am, nothing in between → QUALIFIED
-      • F2 buy at 1:30 am, F3 SELL at 1:45 am, F4 buy at 2:10 am → DISQUALIFIED
-        (F3 sell lands inside the F2→F4 window)
-
-    `candles_15m` must be pre-trimmed so [-1] is the last CLOSED candle
-    (the forming candle is excluded by the caller).
-    Requires ≥50 bars so ATR can stabilise.
     """
+    _LABEL = {"st": "F2", "ce": "F3", "lux": "F4"}
     _enabled = sum([use_st, use_ce, use_lux])
     if _enabled < 2 or len(candles_15m) < 50:
-        return False
+        return False, []
 
     st_res  = _calc_supertrend(candles_15m)      if use_st  else None
     ce_res  = _calc_chandelier_exit(candles_15m) if use_ce  else None
     lux_res = _calc_lux_trend(candles_15m)       if use_lux else None
 
     def _last_flip_idx(res, tkey, target_val):
-        """Index of the most recent candle where trend flipped TO target_val."""
         if not res:
             return None
         for i in range(len(res) - 1, 0, -1):
@@ -1648,7 +1643,6 @@ def _check_trend_confirmation(candles_15m: list,
                 return i
         return None
 
-    # Build (name, last_buy_idx, last_sell_idx) for each enabled indicator
     indicators = []
     if use_st and st_res:
         indicators.append(("st",
@@ -1663,33 +1657,30 @@ def _check_trend_confirmation(candles_15m: list,
                            _last_flip_idx(lux_res, "trend",  1),
                            _last_flip_idx(lux_res, "trend", -1)))
 
-    # An indicator has an "active buy" if its last buy flip is MORE RECENT
-    # than its last sell flip (or it has a buy but has never sold).
     def _active(buy_idx, sell_idx):
         if buy_idx is None:
             return False
         if sell_idx is None:
-            return True           # had a buy, never a sell → active
+            return True
         return buy_idx > sell_idx
 
     active = [(name, b, s)
               for name, b, s in indicators if _active(b, s)]
 
     if len(active) < 2:
-        return False
+        return False, []
 
-    # Sort by buy index descending (most recent first); take the two newest
     active.sort(key=lambda x: x[1], reverse=True)
     _, idx1, _ = active[0]
     _, idx2, _ = active[1]
-    window_start = min(idx1, idx2)   # earlier of the two qualifying buy flips
+    window_start = min(idx1, idx2)
 
-    # Disqualify if ANY indicator fired a SELL signal AFTER window_start
     for _, _b_idx, s_idx in indicators:
         if s_idx is not None and s_idx > window_start:
-            return False
+            return False, []
 
-    return True
+    active_labels = [_LABEL[name] for name, _, _ in active]
+    return True, active_labels
 
 def _pround(x, sig=6):
     """Round price to `sig` significant figures — handles micro-priced tokens.
@@ -1808,10 +1799,13 @@ def process(sym, cfg: dict, **_kwargs):
         _use_st  = bool(cfg.get("f2_supertrend", True))
         _use_ce  = bool(cfg.get("f3_chandelier", True))
         _use_lux = bool(cfg.get("f4_lux",        True))
+        _entry_indicators = []
         if _use_st or _use_ce or _use_lux:
             # [:-1] excludes the currently forming candle; [-1] = last closed bar
             _c15 = get_klines(sym, "15m", 100)[:-1]
-            if not _check_trend_confirmation(_c15, _use_st, _use_ce, _use_lux):
+            _confirmed, _entry_indicators = _check_trend_confirmation(
+                _c15, _use_st, _use_ce, _use_lux)
+            if not _confirmed:
                 _record_elim("f_trend_filter", "f_trend_filter_syms", sym)
                 return None
 
@@ -1819,19 +1813,20 @@ def process(sym, cfg: dict, **_kwargs):
         _filter_counts["passed_syms"].append(sym)
 
         return {
-            "id":             str(uuid.uuid4())[:8],
-            "timestamp":      dubai_now().isoformat(),
-            "symbol":         sym,
-            "entry":          entry,
-            "tp":             tp,
-            "sl":             sl,
-            "sector":         sec,
-            "status":         "open",
-            "close_price":    None,
-            "close_time":     None,
-            "max_lev":        max_lev,
-            "is_super_setup": False,
-            "criteria":       {},
+            "id":               str(uuid.uuid4())[:8],
+            "timestamp":        dubai_now().isoformat(),
+            "symbol":           sym,
+            "entry":            entry,
+            "tp":               tp,
+            "sl":               sl,
+            "sector":           sec,
+            "status":           "open",
+            "close_price":      None,
+            "close_time":       None,
+            "max_lev":          max_lev,
+            "is_super_setup":   False,
+            "criteria":         {},
+            "entry_indicators": "+".join(_entry_indicators) if _entry_indicators else "—",
         }
 
     except Exception as _proc_exc:
@@ -1972,13 +1967,14 @@ def _place_tp_only_order(sig: dict, cfg: dict,
 def _check_trend_exit(candles_15m: list,
                       use_st:  bool = True,
                       use_ce:  bool = True,
-                      use_lux: bool = True) -> bool:
-    """Return True if ANY ONE of the enabled indicators fired a sell signal
+                      use_lux: bool = True):
+    """Return (True, ["F2","F4"]) if ANY ONE enabled indicator fired a sell
     (trend flipped +1 → -1) on the last completed 15m candle.
+    Returns (False, []) otherwise.
     """
     _enabled = sum([use_st, use_ce, use_lux])
     if _enabled < 1 or len(candles_15m) < 50:
-        return False
+        return False, []
     st_res  = _calc_supertrend(candles_15m)      if use_st  else None
     ce_res  = _calc_chandelier_exit(candles_15m) if use_ce  else None
     lux_res = _calc_lux_trend(candles_15m)       if use_lux else None
@@ -1988,11 +1984,12 @@ def _check_trend_exit(candles_15m: list,
             return False
         return res[-1][tkey] == -1 and res[-2][tkey] == 1
 
-    return (
-        _sell_on_last(st_res,  "trend") or
-        _sell_on_last(ce_res,  "dir")   or
-        _sell_on_last(lux_res, "trend")
-    )
+    fired = []
+    if _sell_on_last(st_res,  "trend"): fired.append("F2")
+    if _sell_on_last(ce_res,  "dir"):   fired.append("F3")
+    if _sell_on_last(lux_res, "trend"): fired.append("F4")
+
+    return (len(fired) > 0, fired)
 
 
 def _place_market_close_order(sig: dict, cfg: dict, reason: str = "trend_exit") -> bool:
@@ -2072,12 +2069,14 @@ def _update_one_signal(sig: dict) -> None:
             if tp_time is not None and (sl_time is None or tp_time <= sl_time):
                 sig.update(status="tp_hit", close_price=sig["tp"],
                            close_time=to_dubai(datetime.fromtimestamp(
-                               tp_time/1000, tz=timezone.utc)).isoformat())
+                               tp_time/1000, tz=timezone.utc)).isoformat(),
+                           exit_indicators="TP Hit")
                 sig.pop("price_alert", None)
             else:
                 sig.update(status="sl_hit", close_price=sig["sl"],
                            close_time=to_dubai(datetime.fromtimestamp(
-                               sl_time/1000, tz=timezone.utc)).isoformat())
+                               sl_time/1000, tz=timezone.utc)).isoformat(),
+                           exit_indicators="SL Hit")
                 sig.pop("price_alert", None)
         else:
             if candles:
@@ -2101,11 +2100,14 @@ def _update_one_signal(sig: dict) -> None:
                     _use_lux = bool(_te_cfg.get("f4_lux",        True))
                     if _use_st or _use_ce or _use_lux:
                         _c15 = get_klines(sig["symbol"], "15m", 100)[:-1]
-                        if _check_trend_exit(_c15, _use_st, _use_ce, _use_lux):
+                        _exited, _exit_inds = _check_trend_exit(
+                            _c15, _use_st, _use_ce, _use_lux)
+                        if _exited:
                             sig.update(
-                                status      = "trend_exit",
-                                close_price = float(latest_price),
-                                close_time  = dubai_now().isoformat(),
+                                status          = "trend_exit",
+                                close_price     = float(latest_price),
+                                close_time      = dubai_now().isoformat(),
+                                exit_indicators = "+".join(_exit_inds) if _exit_inds else "Trend Exit",
                             )
                             sig.pop("price_alert", None)
                             # Place live market close if trade is live
@@ -3274,8 +3276,8 @@ with st.sidebar:
 # ─────────────────────────────────────────────────────────────────────────────
 # MAIN AREA
 # ─────────────────────────────────────────────────────────────────────────────
-_CODE_UPDATED = "28 Apr 2026  12:45 GST"
-st.title(f"S&R — Crypto Intelligent Portal   ·   🕐 {_CODE_UPDATED}")
+_NOW_GST = dubai_now().strftime("%d %b %Y  %H:%M GST")
+st.title(f"S&R — Crypto Intelligent Portal   ·   🕐 {_NOW_GST}")
 
 # ── Total Realized PnL computation ─────────────────────────────────────────────
 # Moved above the account summary box so _total_pnl is available for the
@@ -3903,34 +3905,33 @@ def _build_signal_row(s: dict, is_open_table: bool = False,
             except (TypeError, ValueError):
                 current_status_col = "—"
 
-    # ── Est Liquidity column (Open Signals only) ────────────────────────────
-    # Estimated liquidation price + % distance from entry (negative, since liq
-    # is below entry for LONG). Shown only for isolated trades. Cross-margin
-    # trades show "—" because their liquidation depends on account-wide equity
-    # and cannot be computed from per-trade info alone.
-    #
-    # Formula (LONG isolated, approximate):
-    #     liq ≈ entry × (1 − 1/leverage)
-    #     liq% from entry = -100 / leverage  (e.g. 10× → -10%, 20× → -5%)
-    est_liq_col = "—"
-    if status == "open":
-        _margin_mode_rm = (s.get("order_margin_mode") or
-                           _snap_cfg.get("trade_margin_mode", "isolated") or
-                           "isolated").lower()
-        # For DCA trades use the blended average; otherwise the original entry.
-        _entry_liq = float(s.get("avg_entry", s.get("entry", 0)) or 0)
-        _lev_liq   = int(s.get("trade_lev", _snap_cfg.get("trade_leverage", 10)) or 0)
-        if _margin_mode_rm == "isolated" and _entry_liq > 0 and _lev_liq > 0:
-            _liq_price = _entry_liq * (1.0 - 1.0 / _lev_liq)
-            _liq_pct   = -100.0 / _lev_liq
-            # Format liq price with enough precision for low-value coins
-            if _liq_price >= 1:
-                _liq_str = f"{_liq_price:.4f}"
-            elif _liq_price >= 0.01:
-                _liq_str = f"{_liq_price:.6f}"
+    # ── Entry Signals column — which F2/F3/F4 indicators triggered the buy ──
+    entry_signals_col = s.get("entry_indicators", "—") or "—"
+
+    # ── Exit Reason column (closed trades only) ───────────────────────────────
+    exit_reason_col = "—"
+    if status != "open":
+        _stored = s.get("exit_indicators", "")
+        if _stored:
+            exit_reason_col = _stored
+        elif status == "tp_hit":
+            exit_reason_col = "✅ TP Hit"
+        elif status == "sl_hit":
+            exit_reason_col = "❌ SL Hit"
+        elif status == "trend_exit":
+            exit_reason_col = "🚨 Trend Exit"
+        elif status == "dca_sl_hit":
+            exit_reason_col = "❌ DCA SL Hit"
+        elif status == "closed_okx":
+            exit_reason_col = "🟠 Closed on OKX"
+        # Format stored exit_indicators to add emoji prefix
+        if exit_reason_col not in ("—",) and not exit_reason_col.startswith(("✅","❌","🚨","🟠")):
+            if "TP Hit" in exit_reason_col:
+                exit_reason_col = "✅ " + exit_reason_col
+            elif "SL Hit" in exit_reason_col:
+                exit_reason_col = "❌ " + exit_reason_col
             else:
-                _liq_str = f"{_liq_price:.8f}"
-            est_liq_col = f"{_liq_str} ({_liq_pct:+.2f}%)"
+                exit_reason_col = "🚨 " + exit_reason_col
 
     # ── PnL $ column ─────────────────────────────────────────────────────────
     # Dollar PnL. Uses the per-signal trade_usdt and trade_lev stored at entry
@@ -4161,20 +4162,13 @@ def _build_signal_row(s: dict, is_open_table: bool = False,
     except Exception:
         trade_history_col = "—"
 
-    # Difficulty column removed (ATR filter removed)
-    diff_col = "—"
-
     if is_open_table:
-        # Open-Signals-specific column order — adds Difficulty as first column
-        # and Original Entry after Signal Entry for DCA trade visibility.
-        # TP Hit / SL Hit / DCA SL Hit / Queue Limit tables use the non-Open
-        # branch below.
         row: dict = {
-            "Difficulty":        diff_col,
             "Time (GST)":        ts_str,
             "Symbol":            s.get("symbol", ""),
             "Alert":             alert_col,
             "Setup":             setup_type,
+            "Entry Signals":     entry_signals_col,
             "PnL $":             pnl_col,
             "Margin Mode":       _mm_val,
             "Current Status":    current_status_col,
@@ -4184,7 +4178,6 @@ def _build_signal_row(s: dict, is_open_table: bool = False,
             "TP":                s.get("tp", ""),
             "SL":                s.get("sl", ""),
             "Trade History":     trade_history_col,
-            "Est Liquidity":     est_liq_col,
             "Duration":          duration_str,
             "TP $":              tp_usd_str,
             "SL $":              sl_usd_str,
@@ -4203,14 +4196,15 @@ def _build_signal_row(s: dict, is_open_table: bool = False,
         }
         return row
 
-    # ── Non-Open tables (TP Hit, SL Hit, Queue Limit) ────────────────────────
+    # ── Non-Open tables (TP Hit, SL Hit, Trend Exit, Queue Limit) ────────────
     row = {
         "Time (GST)":     ts_str,
         "Alert":          alert_col,
     }
-    row["Symbol"]     = s.get("symbol", "")
-    row["Difficulty"] = diff_col
-    row["Setup"]      = setup_type
+    row["Symbol"]          = s.get("symbol", "")
+    row["Entry Signals"]   = entry_signals_col
+    row["Exit Reason"]     = exit_reason_col
+    row["Setup"]           = setup_type
     if show_pnl:
         row["Margin Mode"] = _mm_val
     row["Sector"] = s.get("sector", "Other")
@@ -4246,16 +4240,24 @@ def _build_signal_row(s: dict, is_open_table: bool = False,
 
 # Shared column_config used by all four tables
 _SIG_COL_CFG = {
-    "Difficulty":     st.column_config.TextColumn(
-                          "🎯 Difficulty", width="small",
-                          help="TP reachability relative to ATR(14) on 15m at entry time.\n\n"
-                               "🟢 Easy   — TP within 1.5× ATR (market moves this far routinely)\n"
-                               "🟡 Medium — TP within 2.5× ATR (achievable with a good push)\n"
-                               "🔴 Hard   — TP beyond 2.5× ATR (needs unusually strong move)\n\n"
-                               "Updates live: ratio is recomputed from remaining TP distance "
-                               "vs. the ATR% measured at entry, so it gets easier as price "
-                               "moves toward TP. Shows '—' when ATR was not computed (ATR "
-                               "filter disabled at entry time)."),
+    "Entry Signals":  st.column_config.TextColumn(
+                          "📊 Entry Signals", width="small",
+                          help="Which F2/F3/F4 indicators had an active buy signal "
+                               "when this trade was entered.\n\n"
+                               "F2 = SuperTrend (ATR 10, mult 3.0)\n"
+                               "F3 = Chandelier Exit (ATR 22, mult 3.0)\n"
+                               "F4 = Lux Trend (ATR 14, mult 2.0)\n\n"
+                               "Example: 'F2+F4' means SuperTrend and Lux Trend "
+                               "both had active bullish flips with no sell between them.\n"
+                               "'—' for signals created before this feature was added."),
+    "Exit Reason":    st.column_config.TextColumn(
+                          "🚪 Exit Reason", width="small",
+                          help="Why this trade was closed.\n\n"
+                               "✅ TP Hit — price reached the take-profit level\n"
+                               "❌ SL Hit — price hit the hard stop-loss\n"
+                               "🚨 F2/F3/F4 — one or more trend indicators flipped "
+                               "bearish on the last 15m candle (Trend Exit)\n"
+                               "'—' for open trades or legacy signals."),
     "Alert":          st.column_config.TextColumn(
                           "🚨 Alert", width="small",
                           help="🔴 DL = price ≥3% below entry  |  🔴 TL = open ≥2 hours"),
@@ -4267,16 +4269,6 @@ _SIG_COL_CFG = {
                                "latest close price; rows show \"—\" only when "
                                "live price data hasn't landed yet (typically "
                                "the very first cycle after a signal fires)."),
-    "Est Liquidity":  st.column_config.TextColumn(
-                          "💥 Est Liquidity", width="medium",
-                          help="Estimated liquidation price for isolated trades, "
-                               "with % distance from entry in parentheses.\n\n"
-                               "Formula (LONG isolated, approximate): "
-                               "liq ≈ entry × (1 − 1/leverage).\n"
-                               "Distance from entry = -100 / leverage "
-                               "(e.g. 10× → -10%, 20× → -5%).\n\n"
-                               "Cross-margin trades show \"—\" because liquidation "
-                               "depends on account-wide equity, not per-trade info."),
     "Order Size":     st.column_config.TextColumn(
                           "💵 Order Size", width="small",
                           help="Total dollar notional for this trade "
