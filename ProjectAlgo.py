@@ -3921,16 +3921,8 @@ def _build_signal_row(s: dict, is_open_table: bool = False,
             _os_notional = _os_usdt * _os_lev
     order_size_col = f"${_os_notional:,.2f}" if _os_notional > 0 else "—"
 
-    # Signal Entry displays the latest working entry price:
-    #   • DCA trades (dca_count > 0) → blended average (avg_entry)
-    #   • Non-DCA / pre-first-DCA → signal_entry (actual fill) or entry
-    # The Original Entry column (inserted right after Signal Entry) holds
-    # the very first fill price so the original reference is never lost.
-    if _dca_count_row > 0:
-        _sig_entry_display = s.get("avg_entry",
-                                   s.get("signal_entry", s.get("entry", "")))
-    else:
-        _sig_entry_display = s.get("signal_entry", s.get("entry", ""))
+    # Signal Entry: use signal_entry (actual fill) or entry fallback.
+    _sig_entry_display = s.get("signal_entry", s.get("entry", ""))
     _orig_entry_display = s.get("original_entry",
                                 s.get("signal_entry", s.get("entry", ""))) \
         if s.get("original_entry") is not None \
