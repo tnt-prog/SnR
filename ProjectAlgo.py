@@ -1152,23 +1152,22 @@ def place_okx_order(sig: dict, cfg: dict) -> dict:
             sl_pct    = float(cfg.get("sl_pct", 3.0)) / 100
             actual_sl = _pround(actual_entry * (1 - sl_pct))
 
-        # ── Step 4: Place TP/SL algo using actual fill price ────────────────
-        # Cross margin: TP-only conditional order (no SL on OKX — user accepts
-        # OKX liquidation as the only backstop). DCA levels are triggered by
-        # price detection in the watcher and placed as market orders, not as
-        # pre-placed limit orders.
+        # ── Step 4: Place TP+SL algo using actual fill price ────────────────
+        # Cross margin: conditional order with both TP and SL on OKX so the
+        # position is protected even if the portal goes offline.
         # Isolated margin: unchanged OCO (TP + SL together).
         if mode == "cross":
-            # ── Cross: TP-only algo at the entry TP price ─────────────────────
+            # ── Cross: TP+SL conditional algo at the actual fill prices ──────
             _tp_sig = _place_tp_only_order(
                 {"symbol": sym, "order_margin_mode": mode,
                  "order_is_hedge": is_hedge},
-                cfg, actual_tp, contracts
+                cfg, actual_tp, contracts,
+                sl_price=actual_sl,
             )
             if not _tp_sig:
                 return {"ordId": ord_id, "algoId": "", "sz": contracts,
                         "status": "partial",
-                        "error": "Entry ✅ · TP algo ❌ (cross mode, no SL)",
+                        "error": "Entry ✅ · TP+SL algo ❌ (cross mode)",
                         "actual_entry": actual_entry,
                         "actual_tp": actual_tp, "actual_sl": actual_sl,
                         **_base_info}
@@ -1871,10 +1870,13 @@ def _parse_iso_safe(ts_str: str):
 # DCA helpers (Dollar-Cost Averaging ladder — Isolated 70% / Cross fixed 7%)
 # ─────────────────────────────────────────────────────────────────────────────
 def _place_tp_only_order(sig: dict, cfg: dict,
-                         tp_price: float, total_contracts: int) -> str:
-    """Place a standalone conditional TP sell order on OKX (cross margin mode).
+                         tp_price: float, total_contracts: int,
+                         sl_price: float = 0.0) -> str:
+    """Place a conditional TP+SL algo order on OKX (cross margin mode).
 
-    No SL attached — the user has chosen OKX liquidation as the only backstop.
+    Uses OKX's conditional order type with both tpTriggerPx and slTriggerPx
+    so the position is protected on OKX regardless of whether the portal is
+    running.  sl_price=0 falls back to TP-only (backward-compat).
     Returns algoId on success, "" on failure (non-fatal, logged).
     """
     try:
@@ -1883,16 +1885,23 @@ def _place_tp_only_order(sig: dict, cfg: dict,
                     cfg.get("trade_margin_mode", "isolated")).strip().lower()
         is_hedge = bool(sig.get("order_is_hedge", False))
         algo_body: dict = {
-            "instId":         _to_okx(sym),
-            "tdMode":         mode,
-            "side":           "sell",
-            "ordType":        "conditional",
-            "sz":             str(int(max(1, total_contracts))),
-            "tpTriggerPx":    str(_pround(tp_price)),
-            "tpTriggerPxType": "mark",   # use mark price — more reliable than
+            "instId":          _to_okx(sym),
+            "tdMode":          mode,
+            "side":            "sell",
+            "ordType":         "conditional",
+            "sz":              str(int(max(1, total_contracts))),
+            "tpTriggerPx":     str(_pround(tp_price)),
+            "tpTriggerPxType": "mark",   # mark price — more reliable than
                                          # last price for low-liquidity tokens
-            "tpOrdPx":        "-1",      # market fill when TP triggers
+            "tpOrdPx":         "-1",     # market fill when TP triggers
         }
+        # Add SL to the same conditional order so OKX enforces it independently
+        # of the portal.  OKX conditional orders support both TP and SL fields
+        # simultaneously (first trigger wins and cancels the other).
+        if sl_price > 0:
+            algo_body["slTriggerPx"]     = str(_pround(sl_price))
+            algo_body["slTriggerPxType"] = "mark"
+            algo_body["slOrdPx"]         = "-1"   # market fill when SL triggers
         if is_hedge:
             algo_body["posSide"] = "long"
         else:
@@ -1904,12 +1913,12 @@ def _place_tp_only_order(sig: dict, cfg: dict,
         if resp.get("code") != "0" or (ad.get("sCode", "0") not in ("0", "") and ad.get("sCode")):
             err = (_okx_err(resp) if resp.get("code") != "0"
                    else f"{ad.get('sCode')}: {ad.get('sMsg', '')}")
-            _append_error("trade", f"TP-only algo failed: {err}",
+            _append_error("trade", f"TP+SL algo failed: {err}",
                           symbol=sym, endpoint="/api/v5/trade/order-algo")
             return ""
         return ad.get("algoId", "")
     except Exception as exc:
-        _append_error("trade", f"TP-only algo exception: {exc}",
+        _append_error("trade", f"TP+SL algo exception: {exc}",
                       symbol=sig.get("symbol", ""),
                       endpoint="/api/v5/trade/order-algo")
         return ""
