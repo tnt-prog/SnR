@@ -3571,7 +3571,19 @@ def _cfg_panel(cfg: dict) -> str:
     # ── filter badge lists ─────────────────────────────────────────────────────
     filter_pills = []
     def _fpill(text, on): filter_pills.append(_pill(text, on))
-    # Filter pills removed — all F2–F10 filters removed
+
+    _fpill("F1 Pre-filter",   bool(_c.get("use_pre_filter",  True)))
+    _fpill("F2 SuperTrend",   bool(_c.get("f2_supertrend",   True)))
+    _fpill("F3 Chandelier",   bool(_c.get("f3_chandelier",   True)))
+    _fpill("F4 Lux Trend",    bool(_c.get("f4_lux",          True)))
+    _fpill("Trend Exit",      bool(_c.get("use_trend_exit",  True)))
+    _n_trend = sum([
+        bool(_c.get("f2_supertrend", True)),
+        bool(_c.get("f3_chandelier", True)),
+        bool(_c.get("f4_lux",        True)),
+    ])
+    _fpill(f"{_n_trend} trend indicators active", _n_trend >= 2)
+    _fpill("Cross Margin", _c.get("trade_margin_mode", "cross") == "cross")
 
     # ── build HTML ─────────────────────────────────────────────────────────────
     _mode_col = "#007A80" if demo else "#2E7D32"
@@ -5361,88 +5373,6 @@ with st.expander(_err_label, expanded=(_err_count > 0)):
         )
         st.caption(f"Showing {len(_err_rows)} of {_err_count} entries (newest first) · max {_ERROR_LOG_MAX} kept")
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 🎯 Market Condition Analyser  (on-demand button — bottom of page)
-# ─────────────────────────────────────────────────────────────────────────────
-st.divider()
-st.markdown("### 🎯 Market Condition Analyser")
-st.caption(
-    "Scans every coin in your watchlist right now, computes all filter metrics live, "
-    "and recommends optimal filter settings for the current market. "
-    "**Read-only — no settings are changed automatically.**"
-)
-
-_mkt_symbols = list(_snap_cfg.get("watchlist", []))
-
-if st.button(
-    f"🔍  Analyse Market Now  ({len(_mkt_symbols)} coins)",
-    disabled=(len(_mkt_symbols) == 0),
-    type="primary",
-    key="btn_market_analyse",
-    help=(
-        "Fetches live multi-timeframe candle data for every coin in your watchlist, "
-        "computes each filter metric, and shows per-filter pass rates with recommendations. "
-        "Takes ~1–3 minutes depending on watchlist size."
-    ),
-):
-    _mkt_prog = st.progress(0.0)
-    _mkt_stat = st.empty()
-    with st.spinner("Analysing market conditions across all coins…"):
-        _mkt_result = _analyze_market_conditions(
-            dict(_snap_cfg), _mkt_symbols, _mkt_prog, _mkt_stat
-        )
-    _mkt_prog.empty()
-    _mkt_stat.empty()
-    st.session_state["_mkt_analysis_result"] = _mkt_result
-
-if "_mkt_analysis_result" in st.session_state:
-    _mkt_res  = st.session_state["_mkt_analysis_result"]
-    _mkt_recs = _mkt_res.get("recommendations", {})
-    _mkt_n    = _mkt_res.get("total_coins",  0)
-    _mkt_ok   = _mkt_res.get("valid_coins",  0)
-    _mkt_err  = _mkt_res.get("errors",       0)
-
-    st.success(
-        f"✅  Analysis complete — **{_mkt_ok}** coins analysed"
-        + (f"  ·  {_mkt_err} skipped (missing candle data)" if _mkt_err else "")
-    )
-
-    _MKT_ORDER = []
-    _mkt_tbl = []
-    for _mk in _MKT_ORDER:
-        if _mk not in _mkt_recs:
-            continue
-        _mr = _mkt_recs[_mk]
-        _mkt_tbl.append({
-            " ":                  _mr["icon"],
-            "Filter":             _mr["filter"],
-            "Current Setting":    _mr["current"],
-            "Current Pass Rate":  f"{_mr['current_pass_rate']:.0f}%",
-            "Recommended":        _mr["rec"],
-            "Rec. Pass Rate":     f"{_mr['rec_pass_rate']:.0f}%",
-            "Analysis":           _mr["reason"],
-        })
-
-    st.dataframe(
-        _mkt_tbl,
-        use_container_width=True,
-        hide_index=True,
-        column_config={
-            " ":                 st.column_config.TextColumn(width=35),
-            "Filter":            st.column_config.TextColumn(width="small"),
-            "Current Setting":   st.column_config.TextColumn(width="small"),
-            "Current Pass Rate": st.column_config.TextColumn(width="small"),
-            "Recommended":       st.column_config.TextColumn(width="small"),
-            "Rec. Pass Rate":    st.column_config.TextColumn(width="small"),
-            "Analysis":          st.column_config.TextColumn(width="large"),
-        },
-    )
-    st.caption(
-        "🟢 Pass rate ≥35% — healthy  ·  "
-        "🟡 15–35% — limited candidates  ·  "
-        "🔴 <15% — filter may be too strict for current market\n\n"
-        "Pass rates are **independent per filter** — apply changes manually in the sidebar if you agree."
-    )
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Download Diagnostics  (bottom of page — plain-text snapshot for debug/share)
@@ -5539,6 +5469,37 @@ def _build_diagnostics_text() -> str:
             if len(_cfg_snap_local[_k]) > 20:
                 _v += " … (+" + str(len(_cfg_snap_local[_k]) - 20) + " more)"
         _kv(_k, _v)
+
+    # ── Entry / Exit Logic Summary ───────────────────────────────────────────────
+    _hdr("ENTRY / EXIT LOGIC")
+    try:
+        _use_st  = bool(_snap_cfg.get("f2_supertrend",  True))
+        _use_ce  = bool(_snap_cfg.get("f3_chandelier",  True))
+        _use_lux = bool(_snap_cfg.get("f4_lux",         True))
+        _n_enabled = sum([_use_st, _use_ce, _use_lux])
+        _sub("Trend Indicators")
+        _kv("F2 SuperTrend  (ATR 10, mult 3.0)",  "ENABLED" if _use_st  else "DISABLED")
+        _kv("F3 Chandelier  (ATR 22, mult 3.0)",  "ENABLED" if _use_ce  else "DISABLED")
+        _kv("F4 Lux Trend   (ATR 14, mult 2.0)",  "ENABLED" if _use_lux else "DISABLED")
+        _kv("indicators_enabled_count",            _n_enabled)
+        _sub("Entry Criteria (15m candle close required)")
+        _kv("rule", "≥2 indicators must have an ACTIVE BUY signal")
+        _kv("active_buy_definition",
+            "last flip was bullish (-1→+1) AND no bearish flip since")
+        _kv("disqualifier",
+            "if ANY indicator fires a SELL after the earlier of the two buy flips → skip coin")
+        _kv("candle_window_restriction", "NONE — buys can be any distance apart")
+        _sub("Exit Criteria")
+        _kv("trend_exit_enabled", bool(_snap_cfg.get("use_trend_exit", True)))
+        _kv("trend_exit_rule",
+            "ANY ONE indicator flips bearish on last closed 15m candle → close trade")
+        _kv("hard_sl", f"entry × (1 − {_snap_cfg.get('sl_pct', 3.0)}% / 100)  [always active]")
+        _kv("take_profit", f"entry × (1 + {_snap_cfg.get('tp_pct', 1.5)}% / 100)")
+        _sub("Margin / SL Mode")
+        _kv("margin_mode",  _snap_cfg.get("trade_margin_mode", "cross"))
+        _kv("sl_formula",   "entry × (1 − sl_pct/100)   — cross margin, NOT liq price")
+    except Exception as _le:
+        _push(f"  <error: {_le}>")
 
     # ── Signal bucket counts ────────────────────────────────────────────────────────
     _hdr("SIGNAL COUNTS")
