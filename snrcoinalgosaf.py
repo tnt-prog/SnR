@@ -3478,11 +3478,36 @@ st.markdown(
 )
 
 # ── Health metrics ─────────────────────────────────────────────────────────────
-open_count     = sum(1 for s in signals if s["status"]=="open")
-tp_count       = sum(1 for s in signals if s["status"]=="tp_hit")
+open_count        = sum(1 for s in signals if s["status"]=="open")
+tp_count          = sum(1 for s in signals if s["status"]=="tp_hit")
 sl_count          = sum(1 for s in signals if s["status"]=="sl_hit")
 trend_exit_count  = sum(1 for s in signals if s["status"]=="trend_exit")
 queue_count       = sum(1 for s in signals if s["status"]=="queue_limit")
+
+# ── Per-card PnL sums ─────────────────────────────────────────────────────────
+_pnl_fb_usdt = float(_snap_cfg.get("trade_usdt_amount", 5.0) or 5.0)
+_pnl_fb_lev  = int(_snap_cfg.get("trade_leverage", 20) or 20)
+_pnl_tp, _pnl_sl, _pnl_te = 0.0, 0.0, 0.0
+for _ps in signals:
+    _pv = _pnl_topline(_ps, _pnl_fb_usdt, _pnl_fb_lev)
+    if _pv is None:
+        continue
+    if _ps["status"] == "tp_hit":
+        _pnl_tp += _pv
+    elif _ps["status"] == "sl_hit":
+        _pnl_sl += _pv
+    elif _ps["status"] == "trend_exit":
+        _pnl_te += _pv
+
+# ── Capital at stake for open trades ─────────────────────────────────────────
+_open_at_stake = open_count * _pnl_fb_usdt  # margin deployed (not leveraged)
+
+def _fmt_pnl(v: float) -> str:
+    """Format a dollar PnL value for display inside a stat card."""
+    if v == 0.0:
+        return "—"
+    sign = "+" if v > 0 else ""
+    return f"{sign}${v:,.2f}"
 
 # ── Warn if log loaded from a previous session already exceeds the cap
 # (e.g. migrating from v1 which had no limit). No new trades will fire until
@@ -3519,6 +3544,8 @@ with m6:
                       color:#E65100;letter-spacing:.05em;line-height:1.2;">OPEN</p>
             <p style="margin:0;font-size:1.9rem;font-weight:700;
                       color:#E65100;line-height:1.1;">{open_count}</p>
+            <p style="margin:2px 0 0 0;font-size:0.68rem;font-weight:500;
+                      color:#BF6000;line-height:1.2;">${_open_at_stake:,.2f} at stake</p>
         </div>""",
         unsafe_allow_html=True,
     )
@@ -3532,6 +3559,8 @@ with m7:
                       color:#2E7D32;letter-spacing:.05em;line-height:1.2;">TP HIT ✅</p>
             <p style="margin:0;font-size:1.9rem;font-weight:700;
                       color:#2E7D32;line-height:1.1;">{tp_count}</p>
+            <p style="margin:2px 0 0 0;font-size:0.68rem;font-weight:500;
+                      color:#1B5E20;line-height:1.2;">{_fmt_pnl(_pnl_tp)}</p>
         </div>""",
         unsafe_allow_html=True,
     )
@@ -3545,6 +3574,8 @@ with m8:
                       color:#C0392B;letter-spacing:.05em;line-height:1.2;">SL HIT ❌</p>
             <p style="margin:0;font-size:1.9rem;font-weight:700;
                       color:#C0392B;line-height:1.1;">{sl_count}</p>
+            <p style="margin:2px 0 0 0;font-size:0.68rem;font-weight:500;
+                      color:#7B241C;line-height:1.2;">{_fmt_pnl(_pnl_sl)}</p>
         </div>""",
         unsafe_allow_html=True,
     )
@@ -3558,6 +3589,8 @@ with m8b:
                       color:#C0392B;letter-spacing:.05em;line-height:1.2;">TREND EXIT 🚨</p>
             <p style="margin:0;font-size:1.9rem;font-weight:700;
                       color:#C0392B;line-height:1.1;">{trend_exit_count}</p>
+            <p style="margin:2px 0 0 0;font-size:0.68rem;font-weight:500;
+                      color:#7B241C;line-height:1.2;">{_fmt_pnl(_pnl_te)}</p>
         </div>""",
         unsafe_allow_html=True,
     )
@@ -3571,6 +3604,8 @@ with m9:
                       color:#424242;letter-spacing:.05em;line-height:1.2;">⏳ QUEUED</p>
             <p style="margin:0;font-size:1.9rem;font-weight:700;
                       color:#424242;line-height:1.1;">{queue_count}</p>
+            <p style="margin:2px 0 0 0;font-size:0.68rem;font-weight:500;
+                      color:#616161;line-height:1.2;">no trade placed</p>
         </div>""",
         unsafe_allow_html=True,
     )
