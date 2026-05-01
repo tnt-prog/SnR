@@ -1693,7 +1693,16 @@ def _check_trend_confirmation(candles_15m: list,
     except (KeyError, TypeError, ValueError):
         _flip_close = None
 
-    active_labels = [_LABEL[name] for name, _, _ in active]
+    # ── Build labels with GST close-time of each flip candle ─────────────────
+    # candle["time"] is the open time in Unix ms; +15 min = close time (GST)
+    def _flip_time(idx):
+        try:
+            ts_ms = candles_15m[idx]["time"] + 15 * 60 * 1000
+            return datetime.fromtimestamp(ts_ms / 1000, tz=DUBAI_TZ).strftime("%H:%M")
+        except Exception:
+            return "?"
+
+    active_labels = [f"{_LABEL[name]}({_flip_time(b)})" for name, b, _ in active]
     return True, active_labels, _flip_close
 
 def _pround(x, sig=6):
@@ -5735,18 +5744,22 @@ def _build_diagnostics_text() -> str:
     _hdr("FILTER FUNNEL -- LAST SCAN")
     try:
         _fc = getattr(_b, "_bsc_filter_counts", {}) or {}
-        _fmap = [
-            ("pre_filtered_out", "Pre-filter eliminated"),
-            ("checked",          "Deep-scanned"),
-            ("f_empty_data",     "F0  -- Empty/bad data"),
-            ("f_sl_cooldown",    "SL cooldown blocked"),
-            ("passed",           "Passed all filters"),
-        ]
-        for _fk, _fl in _fmap:
-            _fv = _fc.get(_fk, 0)
-            if _fv:
-                _kv(_fl, _fv)
-        _kv("watchlist_size",   _fc.get("watchlist_size", "--"))
+        _total_wl  = _fc.get("total_watchlist", 0)
+        _pre_out   = _fc.get("pre_filtered_out", 0)
+        _checked   = _fc.get("checked", 0)
+        _empty     = _fc.get("f_empty_data", 0)
+        _trend     = _fc.get("f_trend_filter", 0)
+        _drift     = _fc.get("f_price_drift", 0)
+        _sl_cool   = _fc.get("f_sl_cooldown", 0)
+        _passed    = _fc.get("passed", 0)
+        _kv("Watchlist size",              _total_wl)
+        _kv("Pre-filter eliminated",       _pre_out)
+        _kv("Deep-scanned",                _checked)
+        _kv("Dropped -- Empty candle data",_empty)
+        _kv("Dropped -- Trend filter (F2/F3/F4 freshness+direction)", _trend)
+        _kv("Dropped -- Price drift (>0.5% above flip candle)",       _drift)
+        _kv("Dropped -- SL cooldown",      _sl_cool)
+        _kv("Passed all filters",          _passed)
     except Exception as _fe:
         _push(f"  <error: {_fe}>")
 
@@ -5765,6 +5778,12 @@ def _build_diagnostics_text() -> str:
               f"| algo_id={sig.get('algo_id','--')} "
               f"| tp_algo_id={sig.get('tp_algo_id','--')} "
               f"| demo={sig.get('demo_mode','--')}")
+        # Entry / exit signal detail
+        _entry_ind = sig.get("entry_indicators", "—") or "—"
+        _exit_ind  = sig.get("exit_indicators",  "—") or "—"
+        _push(f"    entry_signals : {_entry_ind}")
+        if sig.get("status") not in ("open", "queue_limit"):
+            _push(f"    exit_reason   : {_exit_ind}")
         # OKX Command log -- one sub-line per entry
         _log_entries = sig.get("okx_log")
         if isinstance(_log_entries, list) and _log_entries:
