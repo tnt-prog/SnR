@@ -123,12 +123,12 @@ DEFAULT_CONFIG: dict = {
     "api_passphrase":        "",
     "trade_usdt_amount":     5.0,    # USDT collateral per trade (before leverage)
     "trade_leverage":        20,     # leverage applied (capped by MAX_LEVERAGE)
-    "trade_margin_mode":     "isolated",  # "cross" or "isolated"
+    "trade_margin_mode":     "cross",     # always cross — isolated removed
     # ── Hours of operation (GST / Dubai UTC+4) ────────────────────────────────
     # When enabled, new signal scanning is paused outside the defined window.
     # Open-trade monitoring (TP/SL/DCA) always runs regardless of this setting.
     # Supports midnight-crossing windows (e.g. start=22, end=06).
-    "use_trend_exit":         True,   # auto-close open long on 2-of-3 bearish flip (15m)
+    "use_trend_exit":         True,   # auto-close open long when ANY ONE indicator flips bearish (15m)
     "f2_supertrend":         True,   # F2 SuperTrend (ATR 10, mult 3.0) on 15m
     "f3_chandelier":         True,   # F3 Chandelier Exit (ATR 22, mult 3.0) on 15m
     "f4_lux":                True,   # F4 Lux Trend (ATR 14, mult 2.0) on 15m
@@ -1142,15 +1142,11 @@ def place_okx_order(sig: dict, cfg: dict) -> dict:
                           symbol=sym, endpoint="margin_sanity_check")
 
         # Recalculate TP and SL from the actual fill price.
-        # Isolated mode: SL = liquidation price (entry × (1 − 1/leverage)).
-        # Cross mode:    SL = entry × (1 − sl_pct%).
+        # SL = entry × (1 − sl_pct%) — cross margin only.
         tp_pct    = float(cfg.get("tp_pct", 1.5)) / 100
         actual_tp = _pround(actual_entry * (1 + tp_pct))
-        if mode == "isolated":
-            actual_sl = _pround(actual_entry * (1 - 1 / lev))
-        else:
-            sl_pct    = float(cfg.get("sl_pct", 3.0)) / 100
-            actual_sl = _pround(actual_entry * (1 - sl_pct))
+        sl_pct    = float(cfg.get("sl_pct", 3.0)) / 100
+        actual_sl = _pround(actual_entry * (1 - sl_pct))
 
         # ── Step 4: Place TP+SL algo using actual fill price ────────────────
         # Cross margin: conditional order with both TP and SL on OKX so the
@@ -1617,33 +1613,83 @@ def _check_trend_confirmation(candles_15m: list,
                                use_st:  bool = True,
                                use_ce:  bool = True,
                                use_lux: bool = True) -> bool:
-    """Return True if ≥2 of the 3 enabled indicators fired a buySignal
-    within the last 2 completed 15m candles (Option A — 2-candle window).
+    """Entry qualification — no candle-window restriction.
 
-    `candles_15m` must be pre-trimmed so that [-1] is the last CLOSED candle
-    (i.e. the forming candle has already been excluded by the caller).
-    Returns False if fewer than 2 indicators are enabled or candle history
-    is too short for ATR to stabilise (< 50 bars required).
+    A coin qualifies when ALL of the following hold:
+      1. At least 2 of the enabled indicators have an ACTIVE buy signal —
+         meaning their most recent directional flip was bullish (-1 → +1)
+         and no bearish flip has occurred since.
+      2. No indicator (F2, F3, or F4) fired a SELL signal (bearish flip)
+         at any candle AFTER the earlier of the two qualifying buy flips.
+
+    Examples:
+      • F2 buy at 1:30 am, F4 buy at 2:10 am, nothing in between → QUALIFIED
+      • F2 buy at 1:30 am, F3 SELL at 1:45 am, F4 buy at 2:10 am → DISQUALIFIED
+        (F3 sell lands inside the F2→F4 window)
+
+    `candles_15m` must be pre-trimmed so [-1] is the last CLOSED candle
+    (the forming candle is excluded by the caller).
+    Requires ≥50 bars so ATR can stabilise.
     """
     _enabled = sum([use_st, use_ce, use_lux])
     if _enabled < 2 or len(candles_15m) < 50:
         return False
+
     st_res  = _calc_supertrend(candles_15m)      if use_st  else None
     ce_res  = _calc_chandelier_exit(candles_15m) if use_ce  else None
     lux_res = _calc_lux_trend(candles_15m)       if use_lux else None
 
-    def _fired(res) -> bool:
-        """True if the indicator fired buySignal on candle[-1] OR candle[-2]."""
-        if not res or len(res) < 2:
-            return False
-        return res[-1]["buy"] or res[-2]["buy"]
+    def _last_flip_idx(res, tkey, target_val):
+        """Index of the most recent candle where trend flipped TO target_val."""
+        if not res:
+            return None
+        for i in range(len(res) - 1, 0, -1):
+            if res[i][tkey] == target_val and res[i - 1][tkey] != target_val:
+                return i
+        return None
 
-    confirmed = sum([
-        bool(_fired(st_res)),
-        bool(_fired(ce_res)),
-        bool(_fired(lux_res)),
-    ])
-    return confirmed >= 2
+    # Build (name, last_buy_idx, last_sell_idx) for each enabled indicator
+    indicators = []
+    if use_st and st_res:
+        indicators.append(("st",
+                           _last_flip_idx(st_res,  "trend",  1),
+                           _last_flip_idx(st_res,  "trend", -1)))
+    if use_ce and ce_res:
+        indicators.append(("ce",
+                           _last_flip_idx(ce_res,  "dir",    1),
+                           _last_flip_idx(ce_res,  "dir",   -1)))
+    if use_lux and lux_res:
+        indicators.append(("lux",
+                           _last_flip_idx(lux_res, "trend",  1),
+                           _last_flip_idx(lux_res, "trend", -1)))
+
+    # An indicator has an "active buy" if its last buy flip is MORE RECENT
+    # than its last sell flip (or it has a buy but has never sold).
+    def _active(buy_idx, sell_idx):
+        if buy_idx is None:
+            return False
+        if sell_idx is None:
+            return True           # had a buy, never a sell → active
+        return buy_idx > sell_idx
+
+    active = [(name, b, s)
+              for name, b, s in indicators if _active(b, s)]
+
+    if len(active) < 2:
+        return False
+
+    # Sort by buy index descending (most recent first); take the two newest
+    active.sort(key=lambda x: x[1], reverse=True)
+    _, idx1, _ = active[0]
+    _, idx2, _ = active[1]
+    window_start = min(idx1, idx2)   # earlier of the two qualifying buy flips
+
+    # Disqualify if ANY indicator fired a SELL signal AFTER window_start
+    for _, _b_idx, s_idx in indicators:
+        if s_idx is not None and s_idx > window_start:
+            return False
+
+    return True
 
 def _pround(x, sig=6):
     """Round price to `sig` significant figures — handles micro-priced tokens.
@@ -1754,10 +1800,7 @@ def process(sym, cfg: dict, **_kwargs):
 
         entry   = _pround(m5[-1]["close"])
         tp      = _pround(entry * (1 + cfg["tp_pct"] / 100))
-        _lev_sl = max(1, int(cfg.get("trade_leverage", 10)))
-        sl      = (_pround(entry * (1 - 1 / _lev_sl))
-                   if cfg.get("trade_margin_mode", "isolated") == "isolated"
-                   else _pround(entry * (1 - cfg["sl_pct"] / 100)))
+        sl      = _pround(entry * (1 - cfg["sl_pct"] / 100))
         sec     = SECTORS.get(sym, "Other")
         max_lev = get_max_leverage(sym)
 
@@ -1930,33 +1973,26 @@ def _check_trend_exit(candles_15m: list,
                       use_st:  bool = True,
                       use_ce:  bool = True,
                       use_lux: bool = True) -> bool:
-    """Return True if ≥2 of the 3 enabled indicators fired a sellSignal
-    (trend flipped +1 → -1) within the last 2 completed 15m candles.
-    Mirrors _check_trend_confirmation — same 2-candle Option-A window,
-    same ≥2-of-3 rule, but checks the bearish flip direction.
+    """Return True if ANY ONE of the enabled indicators fired a sell signal
+    (trend flipped +1 → -1) on the last completed 15m candle.
     """
     _enabled = sum([use_st, use_ce, use_lux])
-    if _enabled < 2 or len(candles_15m) < 50:
+    if _enabled < 1 or len(candles_15m) < 50:
         return False
     st_res  = _calc_supertrend(candles_15m)      if use_st  else None
     ce_res  = _calc_chandelier_exit(candles_15m) if use_ce  else None
     lux_res = _calc_lux_trend(candles_15m)       if use_lux else None
 
-    def _sell_fired(res, key="trend") -> bool:
-        """True if the indicator fired a bearish flip on candle[-1] OR [-2]."""
+    def _sell_on_last(res, tkey):
         if not res or len(res) < 2:
             return False
-        # Bearish flip: current bar is -1, previous bar was +1
-        def _is_sell(i):
-            return res[i][key] == -1 and res[i - 1][key] == 1
-        return _is_sell(-1) or (len(res) >= 3 and _is_sell(-2))
+        return res[-1][tkey] == -1 and res[-2][tkey] == 1
 
-    confirmed = sum([
-        bool(_sell_fired(st_res,  key="trend")),
-        bool(_sell_fired(ce_res,  key="dir")),
-        bool(_sell_fired(lux_res, key="trend")),
-    ])
-    return confirmed >= 2
+    return (
+        _sell_on_last(st_res,  "trend") or
+        _sell_on_last(ce_res,  "dir")   or
+        _sell_on_last(lux_res, "trend")
+    )
 
 
 def _place_market_close_order(sig: dict, cfg: dict, reason: str = "trend_exit") -> bool:
@@ -2056,7 +2092,7 @@ def _update_one_signal(sig: dict) -> None:
                     sig["price_alert"]     = False
                     sig["price_alert_pct"] = 0.0
 
-                # ── F2/F3/F4 Trend Exit — 2-of-3 bearish flip on 15m ─────────
+                # ── F2/F3/F4 Trend Exit — ANY ONE bearish flip on 15m ────────
                 with _config_lock:
                     _te_cfg = dict(_b._bsc_cfg)
                 if _te_cfg.get("use_trend_exit", True):
@@ -2382,27 +2418,27 @@ st.markdown("""
 /* ── Global base ──────────────────────────────────────────────────────────── */
 html, body, [class*="css"] {
     font-family: 'Sora', sans-serif !important;
-    color: #2C1810 !important;
+    color: #0D3333 !important;
 }
 
 /* ── App background ───────────────────────────────────────────────────────── */
 .stApp {
-    background-color: #F5F0E8 !important;
+    background-color: #E8F7F7 !important;
 }
 
 /* ── Sidebar ──────────────────────────────────────────────────────────────── */
 [data-testid="stSidebar"] {
-    background-color: #EDE4D3 !important;
-    border-right: 1px solid #C4A88244 !important;
+    background-color: #C8EDED !important;
+    border-right: 1px solid #007A8044 !important;
 }
 [data-testid="stSidebar"] * {
-    color: #2C1810 !important;
+    color: #0D3333 !important;
 }
 [data-testid="stSidebar"] .stMarkdown h2 {
-    color: #8B5E3C !important;
+    color: #007A80 !important;
     font-weight: 700 !important;
     letter-spacing: 0.04em !important;
-    border-bottom: 1px solid #C4A88266 !important;
+    border-bottom: 1px solid #007A8066 !important;
     padding-bottom: 6px !important;
 }
 
@@ -2411,35 +2447,35 @@ h1 {
     font-family: 'Sora', sans-serif !important;
     font-weight: 700 !important;
     font-size: 1.9rem !important;
-    color: #8B5E3C !important;
+    color: #007A80 !important;
     letter-spacing: 0.05em !important;
-    border-bottom: 2px solid #C4A88266 !important;
+    border-bottom: 2px solid #007A8066 !important;
     padding-bottom: 8px !important;
     margin-bottom: 12px !important;
 }
 h2, h3 {
     font-family: 'Sora', sans-serif !important;
     font-weight: 600 !important;
-    color: #2C1810 !important;
+    color: #0D3333 !important;
     letter-spacing: 0.03em !important;
 }
 
 /* ── Metrics ──────────────────────────────────────────────────────────────── */
 [data-testid="stMetric"] {
-    background-color: #E8DECA !important;
-    border: 1px solid #C4A88266 !important;
+    background-color: #D0EEEE !important;
+    border: 1px solid #007A8066 !important;
     border-radius: 8px !important;
     padding: 10px 14px !important;
 }
 [data-testid="stMetricLabel"] {
-    color: #8B5E3C !important;
+    color: #007A80 !important;
     font-size: 0.72rem !important;
     font-weight: 600 !important;
     text-transform: uppercase !important;
     letter-spacing: 0.08em !important;
 }
 [data-testid="stMetricValue"] {
-    color: #2C1810 !important;
+    color: #0D3333 !important;
     font-family: 'JetBrains Mono', monospace !important;
     font-size: 1.4rem !important;
     font-weight: 500 !important;
@@ -2447,7 +2483,7 @@ h2, h3 {
 
 /* ── Dataframes ───────────────────────────────────────────────────────────── */
 [data-testid="stDataFrame"] {
-    border: 1px solid #C4A88244 !important;
+    border: 1px solid #007A8044 !important;
     border-radius: 8px !important;
     overflow: hidden !important;
 }
@@ -2458,9 +2494,9 @@ h2, h3 {
 
 /* ── Buttons ──────────────────────────────────────────────────────────────── */
 .stButton > button {
-    background-color: #E8DECA !important;
-    color: #2C1810 !important;
-    border: 1px solid #C4A88288 !important;
+    background-color: #D0EEEE !important;
+    color: #0D3333 !important;
+    border: 1px solid #007A8088 !important;
     border-radius: 6px !important;
     font-family: 'Sora', sans-serif !important;
     font-weight: 600 !important;
@@ -2469,28 +2505,28 @@ h2, h3 {
     transition: all 0.15s ease !important;
 }
 .stButton > button:hover {
-    background-color: #8B5E3C !important;
-    color: #F5F0E8 !important;
-    border-color: #8B5E3C !important;
+    background-color: #007A80 !important;
+    color: #E8F7F7 !important;
+    border-color: #007A80 !important;
 }
 .stButton > button[kind="primary"] {
-    background-color: #8B5E3C !important;
-    color: #F5F0E8 !important;
-    border-color: #8B5E3C !important;
+    background-color: #007A80 !important;
+    color: #E8F7F7 !important;
+    border-color: #007A80 !important;
     font-weight: 700 !important;
 }
 .stButton > button[kind="primary"]:hover {
-    background-color: #6B4423 !important;
+    background-color: #005A60 !important;
 }
 
 /* ── Expanders ────────────────────────────────────────────────────────────── */
 [data-testid="stExpander"] {
-    background-color: #E8DECA !important;
-    border: 1px solid #C4A88244 !important;
+    background-color: #D0EEEE !important;
+    border: 1px solid #007A8044 !important;
     border-radius: 8px !important;
 }
 [data-testid="stExpander"] summary {
-    color: #8B5E3C !important;
+    color: #007A80 !important;
     font-weight: 600 !important;
     font-size: 0.85rem !important;
     letter-spacing: 0.03em !important;
@@ -2498,33 +2534,33 @@ h2, h3 {
 
 /* ── Dividers ─────────────────────────────────────────────────────────────── */
 hr {
-    border-color: #C4A88244 !important;
+    border-color: #007A8044 !important;
 }
 
 /* ── Captions & info boxes ────────────────────────────────────────────────── */
 [data-testid="stCaptionContainer"] {
-    color: #7A6555 !important;
+    color: #3A6464 !important;
     font-size: 0.74rem !important;
 }
 [data-testid="stInfo"] {
-    background-color: #EDE4D3 !important;
-    border-left: 3px solid #8B5E3C !important;
-    color: #2C1810 !important;
+    background-color: #C8EDED !important;
+    border-left: 3px solid #007A80 !important;
+    color: #0D3333 !important;
     border-radius: 6px !important;
 }
 [data-testid="stSuccess"] {
-    background-color: #E4EED8 !important;
-    border-left: 3px solid #5A7A3A !important;
-    color: #2A4A1A !important;
+    background-color: #D8EED8 !important;
+    border-left: 3px solid #2E7D32 !important;
+    color: #1B4A1B !important;
 }
 [data-testid="stWarning"] {
-    background-color: #F5EDDC !important;
+    background-color: #FFF3CD !important;
     border-left: 3px solid #A07828 !important;
     color: #5C4010 !important;
 }
 [data-testid="stError"] {
-    background-color: #F5E4E0 !important;
-    border-left: 3px solid #8B3A3A !important;
+    background-color: #FDECEA !important;
+    border-left: 3px solid #C0392B !important;
     color: #5C1A1A !important;
 }
 
@@ -2533,27 +2569,27 @@ hr {
 [data-testid="stNumberInput"] input,
 [data-testid="stTextArea"] textarea,
 [data-testid="stSelectbox"] select {
-    background-color: #EDE4D3 !important;
-    color: #2C1810 !important;
-    border: 1px solid #C4A88266 !important;
+    background-color: #D8F0F0 !important;
+    color: #0D3333 !important;
+    border: 1px solid #007A8066 !important;
     border-radius: 6px !important;
     font-family: 'JetBrains Mono', monospace !important;
 }
 [data-testid="stCheckbox"] label {
-    color: #2C1810 !important;
+    color: #0D3333 !important;
     font-size: 0.82rem !important;
 }
 
 /* ── Plotly chart backgrounds ─────────────────────────────────────────────── */
 .js-plotly-plot .plotly .bg {
-    fill: #F5F0E8 !important;
+    fill: #E8F7F7 !important;
 }
 
 /* ── Scrollbar ────────────────────────────────────────────────────────────── */
 ::-webkit-scrollbar { width: 6px; height: 6px; }
-::-webkit-scrollbar-track { background: #F5F0E8; }
-::-webkit-scrollbar-thumb { background: #C4A88266; border-radius: 3px; }
-::-webkit-scrollbar-thumb:hover { background: #8B5E3C; }
+::-webkit-scrollbar-track { background: #E8F7F7; }
+::-webkit-scrollbar-thumb { background: #007A8066; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #007A80; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -2700,9 +2736,8 @@ with st.sidebar:
     # ── Size / Leverage / Margin Mode ────────────────────────────────────────
     # These fields are EDITABLE even when Auto-Trading is OFF, because they
     # drive display-only calculations too:
-    #   • Est Liquidity column    — uses leverage + margin mode
-    #   • PnL $ column        — uses size × leverage as notional
-    #   • Super / normal SL   — uses leverage to derive isolated SL (1 / lev)
+    #   • PnL $ column — uses size × leverage as notional
+    #   • Notional preview below
     # The user needs to be able to tune these to preview what a live trade
     # would look like without having to enable live trading first.
     ta1, ta2 = st.columns(2)
@@ -2726,35 +2761,16 @@ with st.sidebar:
             "Leverage applied (capped by OKX max for each coin).\n\n"
             "Used by:\n"
             "  • Live order leverage (when Auto-Trading is enabled)\n"
-            "  • Est Liquidity column — isolated liq ≈ entry × (1 − 1/lev)\n"
-            "  • PnL $ column — notional = Size × Leverage\n"
-            "  • Isolated SL level — SL = entry × (1 − 1/lev)\n\n"
+            "  • PnL $ column — notional = Size × Leverage\n\n"
             "Editable whether or not Auto-Trading is enabled."
         ))
-    new_margin_mode = st.selectbox(
-        "Margin Mode", ["isolated", "cross"],
-        index=0 if _snap_cfg.get("trade_margin_mode", "isolated") == "isolated" else 1,
-        key="cfg_margin_mode",
-        help=(
-            "Margin mode for futures positions.\n\n"
-            "  • isolated — each position uses its own collateral; SL is "
-            "pinned at the liquidation price (1/leverage below entry). "
-            "Est Liquidity column shows the per-trade liq price.\n"
-            "  • cross    — positions share account equity as collateral; SL "
-            "uses the configured SL %. Est Liquidity column shows '—'.\n\n"
-            "Editable whether or not Auto-Trading is enabled — affects display "
-            "columns (Est Liquidity) and SL placement logic."
-        ))
-
-
+    new_margin_mode = "cross"
+    st.info("🔒 **Margin Mode: Cross** — all trades use cross margin only.")
 
     # Notional preview — always shown (even when Auto-Trading is off) so the
     # user can see the effective trade size driven by Size × Leverage.
-    notional_usdt = new_trade_usdt * new_trade_lev
-    _liq_pct_cap  = round(100 / new_trade_lev, 2) if new_trade_lev > 0 else 0
-    _sl_caption   = (f"SL @ liq ~{_liq_pct_cap:.1f}% below entry"
-                     if new_margin_mode == "isolated"
-                     else f"SL -${notional_usdt * _snap_cfg.get('sl_pct',3.0)/100:.2f}")
+    notional_usdt   = new_trade_usdt * new_trade_lev
+    _sl_caption     = f"SL -${notional_usdt * _snap_cfg.get('sl_pct', 3.0) / 100:.2f}"
     _preview_prefix = "📐" if new_trade_enabled else "📐 *(preview)*"
     st.caption(f"{_preview_prefix} Notional per trade: ~${notional_usdt:,.0f} USDT   "
                f"| TP +${notional_usdt * _snap_cfg.get('tp_pct',1.5)/100:.2f}   "
@@ -2884,16 +2900,13 @@ with st.sidebar:
     st.markdown("**📊 Trade Settings**")
     c1, c2 = st.columns(2)
     new_tp = c1.number_input("TP %", min_value=0.1, max_value=20.0, step=0.1, value=float(_snap_cfg.get("tp_pct", 1.5)),    key="cfg_tp")
-    _isolated_active = _snap_cfg.get("trade_margin_mode", "isolated") == "isolated"
     new_sl = c2.number_input(
-        "SL % (Cross only)", min_value=0.1, max_value=20.0, step=0.1,
+        "SL %", min_value=0.1, max_value=20.0, step=0.1,
         value=float(_snap_cfg.get("sl_pct", 3.0)), key="cfg_sl",
-        disabled=_isolated_active,
         help=(
-            "Applies only to CROSS margin trades.\n\n"
+            "Stop-loss distance from entry.\n\n"
             "SL = entry × (1 − SL%/100).\n\n"
-            "Isolated mode: this field is ignored — SL is pinned to "
-            "the liquidation price (entry × (1 − 1/leverage))."
+            "All trades use cross margin — this SL is always active as a safety net."
         )
     )
     st.divider()
@@ -2929,27 +2942,24 @@ with st.sidebar:
             "If fewer than 2 indicators are enabled the filter is bypassed."
         )
     )
-    _tf1, _tf2, _tf3 = st.columns(3)
-    new_f2_st  = _tf1.checkbox(
-        "F2 SuperTrend",
+    new_f2_st = st.checkbox(
+        "F2 — SuperTrend",
         value=bool(_snap_cfg.get("f2_supertrend", True)), key="cfg_f2_st",
-        help="SuperTrend (ATR 10, mult 3.0) — fires on trend flip using hl2 src."
     )
-    new_f3_ce  = _tf2.checkbox(
-        "F3 Chandelier",
+    st.caption("ATR 10, mult 3.0 — trend flip signal using hl2 source.")
+    new_f3_ce = st.checkbox(
+        "F3 — Chandelier Exit",
         value=bool(_snap_cfg.get("f3_chandelier", True)), key="cfg_f3_ce",
-        help="Chandelier Exit (ATR 22, mult 3.0) — uses highest/lowest of close."
     )
-    new_f4_lux = _tf3.checkbox(
-        "F4 Lux",
+    st.caption("ATR 22, mult 3.0 — close-anchored, slower & more stable.")
+    new_f4_lux = st.checkbox(
+        "F4 — Lux Trend",
         value=bool(_snap_cfg.get("f4_lux", True)), key="cfg_f4_lux",
-        help="Lux Trend (ATR 14, mult 2.0) — SuperTrend with tighter sensitivity."
     )
+    st.caption("ATR 14, mult 2.0 — intermediate sensitivity between F2 and F3.")
     _n_tf_enabled = sum([new_f2_st, new_f3_ce, new_f4_lux])
     if _n_tf_enabled >= 2:
-        st.caption(
-            f"✅ Any 2 of {_n_tf_enabled} must agree within 2 × 15m candles"
-        )
+        st.caption(f"✅ {_n_tf_enabled} indicators active — any 2 must have an active buy signal")
     elif _n_tf_enabled == 1:
         st.caption("⚠️ Only 1 enabled — need ≥2 for cross-confirm; filter inactive")
     else:
@@ -2968,18 +2978,17 @@ with st.sidebar:
             "In Live mode a market SELL order is placed on OKX automatically. "
             "In Demo mode the close is recorded in the log only.\n\n"
             "⚠️ Whipsaw risk: a momentary bearish flip on choppy candles can "
-            "trigger a premature exit. The 2-of-3 rule reduces but does not "
-            "eliminate this risk."
+            "trigger a premature exit — any ONE indicator firing is enough to close."
         )
     )
     new_use_trend_exit = st.checkbox(
         "Enable Trend Exit",
         value=bool(_snap_cfg.get("use_trend_exit", True)),
         key="cfg_use_trend_exit",
-        help="Auto-close open longs when 2-of-3 trend indicators flip bearish on 15m."
+        help="Auto-close open longs when ANY ONE trend indicator flips bearish on the last closed 15m candle."
     )
     if new_use_trend_exit:
-        st.caption("✅ Open longs closed when 2-of-3 indicators flip -1 within 2 × 15m candles")
+        st.caption("✅ Open longs closed when ANY ONE indicator flips bearish on last 15m candle")
     else:
         st.caption("⚠️ Disabled — positions held until hard TP/SL price is hit")
     st.divider()
