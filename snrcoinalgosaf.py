@@ -1613,11 +1613,11 @@ def _check_trend_confirmation(candles_15m: list,
                                use_st:  bool = True,
                                use_ce:  bool = True,
                                use_lux: bool = True):
-    """Entry qualification — no candle-window restriction.
+    """Entry qualification with freshness guards.
 
-    Returns (True, ["F2","F3"]) if qualified, (False, []) otherwise.
-    The list contains the labels of every indicator with an active buy signal
-    that contributed to the qualification.
+    Returns (True, ["F2","F3"], flip_close) if qualified, (False, [], None) otherwise.
+      - flip_close: close price of the candle where the most recent qualifying
+                    buy flip occurred (used by process() for the price-drift guard).
 
     A coin qualifies when ALL of the following hold:
       1. At least 2 of the enabled indicators have an ACTIVE buy signal —
@@ -1625,11 +1625,14 @@ def _check_trend_confirmation(candles_15m: list,
          and no bearish flip has occurred since.
       2. No indicator (F2, F3, or F4) fired a SELL signal (bearish flip)
          at any candle AFTER the earlier of the two qualifying buy flips.
+      3. FRESHNESS: the most recent qualifying buy flip occurred within the
+         last 2 closed candles (≤ 30 min on 15m). Older setups are stale
+         and will be skipped regardless of indicator state.
     """
     _LABEL = {"st": "F2", "ce": "F3", "lux": "F4"}
     _enabled = sum([use_st, use_ce, use_lux])
     if _enabled < 2 or len(candles_15m) < 50:
-        return False, []
+        return False, [], None
 
     st_res  = _calc_supertrend(candles_15m)      if use_st  else None
     ce_res  = _calc_chandelier_exit(candles_15m) if use_ce  else None
@@ -1668,19 +1671,30 @@ def _check_trend_confirmation(candles_15m: list,
               for name, b, s in indicators if _active(b, s)]
 
     if len(active) < 2:
-        return False, []
+        return False, [], None
 
     active.sort(key=lambda x: x[1], reverse=True)
-    _, idx1, _ = active[0]
+    _, idx1, _ = active[0]   # most recent flip
     _, idx2, _ = active[1]
     window_start = min(idx1, idx2)
 
     for _, _b_idx, s_idx in indicators:
         if s_idx is not None and s_idx > window_start:
-            return False, []
+            return False, [], None
+
+    # ── Freshness guard (Option A): most recent flip ≤ 2 closed candles ago ──
+    _last_closed_idx = len(candles_15m) - 1
+    if _last_closed_idx - idx1 > 2:
+        return False, [], None
+
+    # ── Return flip-candle close for price-drift guard in process() ───────────
+    try:
+        _flip_close = float(candles_15m[idx1]["close"])
+    except (KeyError, TypeError, ValueError):
+        _flip_close = None
 
     active_labels = [_LABEL[name] for name, _, _ in active]
-    return True, active_labels
+    return True, active_labels, _flip_close
 
 def _pround(x, sig=6):
     """Round price to `sig` significant figures — handles micro-priced tokens.
@@ -1708,6 +1722,7 @@ def _reset_filter_counts():
         "f_empty_data":              0,
         "passed":                    0,
         "f_sl_cooldown":             0,
+        "f_price_drift":             0,
         "errors":                    0,
         "scan_cfg":                  {},
         "pre_filter_passed_syms":    [],
@@ -1716,6 +1731,7 @@ def _reset_filter_counts():
         "f_empty_data_syms":         [],
         "passed_syms":               [],
         "f_sl_cooldown_syms":        [],
+        "f_price_drift_syms":        [],
         "blocked_by_sl_cooldown_syms": [],
         "flushed_at":                0.0,
         "scan_completed_at":         0.0,
@@ -1803,10 +1819,17 @@ def process(sym, cfg: dict, **_kwargs):
         if _use_st or _use_ce or _use_lux:
             # [:-1] excludes the currently forming candle; [-1] = last closed bar
             _c15 = get_klines(sym, "15m", 100)[:-1]
-            _confirmed, _entry_indicators = _check_trend_confirmation(
+            _confirmed, _entry_indicators, _flip_close = _check_trend_confirmation(
                 _c15, _use_st, _use_ce, _use_lux)
             if not _confirmed:
                 _record_elim("f_trend_filter", "f_trend_filter_syms", sym)
+                return None
+
+            # ── Price-drift guard (Option B): entry must be ≤ 0.5% above
+            #    the close of the flip candle. Guards against late entries
+            #    where the move has already been largely consumed.
+            if _flip_close is not None and entry > _flip_close * 1.005:
+                _record_elim("f_price_drift", "f_price_drift_syms", sym)
                 return None
 
         _incr_filter("passed")
@@ -2105,7 +2128,7 @@ def _update_one_signal(sig: dict) -> None:
                     # Re-compute which indicators currently agree on a bullish
                     # trend and store it so the table shows useful data.
                     if not sig.get("entry_indicators") or sig.get("entry_indicators") == "—":
-                        _, _cur_inds = _check_trend_confirmation(
+                        _, _cur_inds, _ = _check_trend_confirmation(
                             _c15, _use_st, _use_ce, _use_lux)
                         sig["entry_indicators"] = (
                             "+".join(_cur_inds) if _cur_inds else "F2/F3/F4 unclear"
