@@ -2259,27 +2259,27 @@ st.markdown("""
 /* ── Global base ──────────────────────────────────────────────────────────── */
 html, body, [class*="css"] {
     font-family: 'Sora', sans-serif !important;
-    color: #F5F0F0 !important;
+    color: #2C1810 !important;
 }
 
 /* ── App background ───────────────────────────────────────────────────────── */
 .stApp {
-    background-color: #0C0506 !important;
+    background-color: #F5F0E8 !important;
 }
 
 /* ── Sidebar ──────────────────────────────────────────────────────────────── */
 [data-testid="stSidebar"] {
-    background-color: #110608 !important;
-    border-right: 1px solid #E30A1733 !important;
+    background-color: #EDE4D3 !important;
+    border-right: 1px solid #C4A88244 !important;
 }
 [data-testid="stSidebar"] * {
-    color: #F5F0F0 !important;
+    color: #2C1810 !important;
 }
 [data-testid="stSidebar"] .stMarkdown h2 {
-    color: #E30A17 !important;
+    color: #8B5E3C !important;
     font-weight: 700 !important;
     letter-spacing: 0.04em !important;
-    border-bottom: 1px solid #E30A1755 !important;
+    border-bottom: 1px solid #C4A88266 !important;
     padding-bottom: 6px !important;
 }
 
@@ -2288,35 +2288,35 @@ h1 {
     font-family: 'Sora', sans-serif !important;
     font-weight: 700 !important;
     font-size: 1.9rem !important;
-    color: #E30A17 !important;
+    color: #8B5E3C !important;
     letter-spacing: 0.05em !important;
-    border-bottom: 2px solid #E30A1755 !important;
+    border-bottom: 2px solid #C4A88266 !important;
     padding-bottom: 8px !important;
     margin-bottom: 12px !important;
 }
 h2, h3 {
     font-family: 'Sora', sans-serif !important;
     font-weight: 600 !important;
-    color: #F5F0F0 !important;
+    color: #2C1810 !important;
     letter-spacing: 0.03em !important;
 }
 
 /* ── Metrics ──────────────────────────────────────────────────────────────── */
 [data-testid="stMetric"] {
-    background-color: #160A0C !important;
-    border: 1px solid #E30A1744 !important;
+    background-color: #E8DECA !important;
+    border: 1px solid #C4A88266 !important;
     border-radius: 8px !important;
     padding: 10px 14px !important;
 }
 [data-testid="stMetricLabel"] {
-    color: #E30A17 !important;
+    color: #8B5E3C !important;
     font-size: 0.72rem !important;
     font-weight: 600 !important;
     text-transform: uppercase !important;
     letter-spacing: 0.08em !important;
 }
 [data-testid="stMetricValue"] {
-    color: #F5F0F0 !important;
+    color: #2C1810 !important;
     font-family: 'JetBrains Mono', monospace !important;
     font-size: 1.4rem !important;
     font-weight: 500 !important;
@@ -2324,7 +2324,7 @@ h2, h3 {
 
 /* ── Dataframes ───────────────────────────────────────────────────────────── */
 [data-testid="stDataFrame"] {
-    border: 1px solid #E30A1733 !important;
+    border: 1px solid #C4A88244 !important;
     border-radius: 8px !important;
     overflow: hidden !important;
 }
@@ -2335,9 +2335,9 @@ h2, h3 {
 
 /* ── Buttons ──────────────────────────────────────────────────────────────── */
 .stButton > button {
-    background-color: #160A0C !important;
-    color: #F5F0F0 !important;
-    border: 1px solid #E30A1766 !important;
+    background-color: #E8DECA !important;
+    color: #2C1810 !important;
+    border: 1px solid #C4A88288 !important;
     border-radius: 6px !important;
     font-family: 'Sora', sans-serif !important;
     font-weight: 600 !important;
@@ -2346,28 +2346,28 @@ h2, h3 {
     transition: all 0.15s ease !important;
 }
 .stButton > button:hover {
-    background-color: #E30A17 !important;
-    color: #FFFFFF !important;
-    border-color: #E30A17 !important;
+    background-color: #8B5E3C !important;
+    color: #F5F0E8 !important;
+    border-color: #8B5E3C !important;
 }
 .stButton > button[kind="primary"] {
-    background-color: #E30A17 !important;
-    color: #FFFFFF !important;
-    border-color: #E30A17 !important;
+    background-color: #8B5E3C !important;
+    color: #F5F0E8 !important;
+    border-color: #8B5E3C !important;
     font-weight: 700 !important;
 }
 .stButton > button[kind="primary"]:hover {
-    background-color: #FF3B47 !important;
+    background-color: #6B4423 !important;
 }
 
 /* ── Expanders ────────────────────────────────────────────────────────────── */
 [data-testid="stExpander"] {
-    background-color: #160A0C !important;
-    border: 1px solid #E30A1733 !important;
+    background-color: #E8DECA !important;
+    border: 1px solid #C4A88244 !important;
     border-radius: 8px !important;
 }
 [data-testid="stExpander"] summary {
-    color: #E30A17 !important;
+    color: #8B5E3C !important;
     font-weight: 600 !important;
     font-size: 0.85rem !important;
     letter-spacing: 0.03em !important;
@@ -2375,34 +2375,34 @@ h2, h3 {
 
 /* ── Dividers ─────────────────────────────────────────────────────────────── */
 hr {
-    border-color: #E30A1733 !important;
+    border-color: #C4A88244 !important;
 }
 
 /* ── Captions & info boxes ────────────────────────────────────────────────── */
 [data-testid="stCaptionContainer"] {
-    color: #B8A5A6 !important;
+    color: #7A6555 !important;
     font-size: 0.74rem !important;
 }
 [data-testid="stInfo"] {
-    background-color: #160A0C !important;
-    border-left: 3px solid #E30A17 !important;
-    color: #F5F0F0 !important;
+    background-color: #EDE4D3 !important;
+    border-left: 3px solid #8B5E3C !important;
+    color: #2C1810 !important;
     border-radius: 6px !important;
 }
 [data-testid="stSuccess"] {
-    background-color: #062010 !important;
-    border-left: 3px solid #22C55E !important;
-    color: #D1FAE5 !important;
+    background-color: #E4EED8 !important;
+    border-left: 3px solid #5A7A3A !important;
+    color: #2A4A1A !important;
 }
 [data-testid="stWarning"] {
-    background-color: #1C1208 !important;
-    border-left: 3px solid #F59E0B !important;
-    color: #FEF3C7 !important;
+    background-color: #F5EDDC !important;
+    border-left: 3px solid #A07828 !important;
+    color: #5C4010 !important;
 }
 [data-testid="stError"] {
-    background-color: #2D0808 !important;
-    border-left: 3px solid #E30A17 !important;
-    color: #FFE4E6 !important;
+    background-color: #F5E4E0 !important;
+    border-left: 3px solid #8B3A3A !important;
+    color: #5C1A1A !important;
 }
 
 /* ── Inputs / selects / checkboxes ───────────────────────────────────────── */
@@ -2410,27 +2410,27 @@ hr {
 [data-testid="stNumberInput"] input,
 [data-testid="stTextArea"] textarea,
 [data-testid="stSelectbox"] select {
-    background-color: #160A0C !important;
-    color: #F5F0F0 !important;
-    border: 1px solid #E30A1744 !important;
+    background-color: #EDE4D3 !important;
+    color: #2C1810 !important;
+    border: 1px solid #C4A88266 !important;
     border-radius: 6px !important;
     font-family: 'JetBrains Mono', monospace !important;
 }
 [data-testid="stCheckbox"] label {
-    color: #F5F0F0 !important;
+    color: #2C1810 !important;
     font-size: 0.82rem !important;
 }
 
 /* ── Plotly chart backgrounds ─────────────────────────────────────────────── */
 .js-plotly-plot .plotly .bg {
-    fill: #160A0C !important;
+    fill: #F5F0E8 !important;
 }
 
 /* ── Scrollbar ────────────────────────────────────────────────────────────── */
 ::-webkit-scrollbar { width: 6px; height: 6px; }
-::-webkit-scrollbar-track { background: #0C0506; }
-::-webkit-scrollbar-thumb { background: #E30A1755; border-radius: 3px; }
-::-webkit-scrollbar-thumb:hover { background: #E30A17; }
+::-webkit-scrollbar-track { background: #F5F0E8; }
+::-webkit-scrollbar-thumb { background: #C4A88266; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #8B5E3C; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -3209,11 +3209,11 @@ if _acct_has_creds:
 # Display banner only — computation already done above.
 _closed_total = _total_tp_ct + _total_sl_ct
 if _closed_total == 0:
-    _total_color = "#B8A5A6"
+    _total_color = "#7A6555"
     _total_prefix = "💼"
     _total_sub    = "no closed trades yet"
 else:
-    _total_color  = "#22C55E" if _total_pnl >= 0 else "#EF4444"
+    _total_color  = "#5A7A3A" if _total_pnl >= 0 else "#8B3A3A"
     _total_prefix = "💼" if _total_pnl >= 0 else "📉"
     _total_sub    = (
         f"{_closed_total} closed trades  ·  "
@@ -3277,7 +3277,7 @@ _cap_minimum   = _cap_per_trade * _cap_pool
 _cap_buffer    = _cap_minimum * 0.25
 _cap_total     = _cap_minimum + _cap_buffer
 st.markdown(
-    f"<p style='color:#E07070;font-weight:700;margin:2px 0;font-size:14px;'>"
+    f"<p style='color:#A67C52;font-weight:700;margin:2px 0;font-size:14px;'>"
     f"💰 Minimum Required: <span style='font-size:15px'>${_cap_minimum:,.2f} USDT</span>"
     f"&nbsp;&nbsp;|&nbsp;&nbsp;"
     f"🛡️ Buffer (25%): <span style='font-size:15px'>${_cap_buffer:,.2f} USDT</span>"
@@ -3325,9 +3325,9 @@ with m6:
                         padding:12px 16px 10px 16px;min-height:88px;"
              title="Active open trades (max {_max_open_cap} allowed simultaneously — configurable in sidebar)">
             <p style="margin:0 0 4px 0;font-size:0.72rem;font-weight:600;
-                      color:#FF8C42;letter-spacing:.05em;line-height:1.2;">OPEN</p>
+                      color:#D4821A;letter-spacing:.05em;line-height:1.2;">OPEN</p>
             <p style="margin:0;font-size:1.9rem;font-weight:700;
-                      color:#FF8C42;line-height:1.1;">{open_count}</p>
+                      color:#D4821A;line-height:1.1;">{open_count}</p>
         </div>""",
         unsafe_allow_html=True,
     )
@@ -3338,9 +3338,9 @@ with m7:
                         padding:12px 16px 10px 16px;min-height:88px;"
              title="Signals closed at Take-Profit price since startup">
             <p style="margin:0 0 4px 0;font-size:0.72rem;font-weight:600;
-                      color:#22C55E;letter-spacing:.05em;line-height:1.2;">TP HIT ✅</p>
+                      color:#5A7A3A;letter-spacing:.05em;line-height:1.2;">TP HIT ✅</p>
             <p style="margin:0;font-size:1.9rem;font-weight:700;
-                      color:#22C55E;line-height:1.1;">{tp_count}</p>
+                      color:#5A7A3A;line-height:1.1;">{tp_count}</p>
         </div>""",
         unsafe_allow_html=True,
     )
@@ -3351,9 +3351,9 @@ with m8:
                         padding:12px 16px 10px 16px;min-height:88px;"
              title="Regular SL hits (non-DCA trades, or DCA disabled)">
             <p style="margin:0 0 4px 0;font-size:0.72rem;font-weight:600;
-                      color:#E30A17;letter-spacing:.05em;line-height:1.2;">SL HIT ❌</p>
+                      color:#8B3A3A;letter-spacing:.05em;line-height:1.2;">SL HIT ❌</p>
             <p style="margin:0;font-size:1.9rem;font-weight:700;
-                      color:#E30A17;line-height:1.1;">{sl_count}</p>
+                      color:#8B3A3A;line-height:1.1;">{sl_count}</p>
         </div>""",
         unsafe_allow_html=True,
     )
@@ -3370,7 +3370,7 @@ def _cfg_panel(cfg: dict) -> str:
     # ── helpers ────────────────────────────────────────────────────────────────
     def _pill(text, active=True):
         bg  = "#1f3d5c" if active else "#21262d"
-        col = "#E30A17" if active else "#B8A5A6"
+        col = "#8B5E3C" if active else "#7A6555"
         return (f"<span style='display:inline-block;font-size:11px;"
                 f"padding:2px 9px;border-radius:12px;margin:2px 3px 2px 0;"
                 f"background:{bg};color:{col};font-weight:500'>{text}</span>")
@@ -3379,15 +3379,15 @@ def _cfg_panel(cfg: dict) -> str:
         return _pill(text, active=False)
 
     def _kv_cell(label, value, highlight=False):
-        vc = "#E30A17" if highlight else "#F0EDED"
+        vc = "#8B5E3C" if highlight else "#2C1810"
         return (f"<td style='padding:6px 8px 6px 0;vertical-align:top;white-space:nowrap;'>"
-                f"<span style='font-size:11px;color:#B8A5A6'>{label}</span><br>"
+                f"<span style='font-size:11px;color:#7A6555'>{label}</span><br>"
                 f"<span style='font-size:13px;font-weight:500;color:{vc}'>{value}</span></td>")
 
     def _section(title):
         return (f"<tr><td colspan='20' style='padding:10px 0 4px 0;"
-                f"font-size:11px;font-weight:500;color:#B8A5A6;"
-                f"border-top:1px solid #2D1518;letter-spacing:0.05em'>"
+                f"font-size:11px;font-weight:500;color:#7A6555;"
+                f"border-top:1px solid #C4A882;letter-spacing:0.05em'>"
                 f"{title}</td></tr>")
 
     # ── collect values ─────────────────────────────────────────────────────────
@@ -3412,13 +3412,13 @@ def _cfg_panel(cfg: dict) -> str:
     # Filter pills removed — all F2–F10 filters removed
 
     # ── build HTML ─────────────────────────────────────────────────────────────
-    _mode_col = "#E30A17" if demo else "#22C55E"
+    _mode_col = "#8B5E3C" if demo else "#5A7A3A"
     _mode_lbl = "DEMO" if demo else "LIVE"
     _html = (
-        f"<div style='background:#1C0D0F;border:1px solid #2D1518;"
+        f"<div style='background:#EDE4D3;border:1px solid #C4A88266;"
         f"border-radius:8px;padding:14px 18px;margin-bottom:12px;'>"
         f"<div style='display:flex;align-items:center;gap:10px;margin-bottom:10px;'>"
-        f"<span style='font-size:13px;font-weight:500;color:#F0EDED'>Scanner Config</span>"
+        f"<span style='font-size:13px;font-weight:500;color:#2C1810;font-weight:700'>Scanner Config</span>"
         f"<span style='font-size:11px;font-weight:500;padding:2px 8px;"
         f"border-radius:10px;background:{_mode_col}22;color:{_mode_col}'>{_mode_lbl}</span>"
         f"</div>"
@@ -3529,11 +3529,11 @@ for _s in signals:
 
 # Color based on sign: green for gain, red for loss, grey for exact zero / empty
 if _pnl_24h_tp_ct == 0 and _pnl_24h_sl_ct == 0:
-    _pnl_color   = "#B8A5A6"  # grey
+    _pnl_color   = "#7A6555"  # grey
     _pnl_prefix  = "💰"
     _pnl_summary = "no closed trades in the last 24 h"
 else:
-    _pnl_color   = "#22C55E" if _pnl_24h_total >= 0 else "#EF4444"
+    _pnl_color   = "#5A7A3A" if _pnl_24h_total >= 0 else "#8B3A3A"
     _pnl_prefix  = "💰" if _pnl_24h_total >= 0 else "📉"
     # Use backslash-escaped $ so Streamlit's markdown engine doesn't treat
     # pairs of dollar signs as LaTeX math delimiters (which would otherwise
@@ -4239,9 +4239,9 @@ def _style_pnl_cell(val) -> str:
             return ""
         s = str(val).strip()
         if s.startswith("-"):
-            return "color: #EF4444; font-weight: 600;"   # red
+            return "color: #8B3A3A; font-weight: 600;"   # red
         if s.startswith("+"):
-            return "color: #22C55E; font-weight: 600;"   # green
+            return "color: #5A7A3A; font-weight: 600;"   # green
     except Exception:
         pass
     return ""
@@ -5028,17 +5028,17 @@ if signals:
         labels=list(sec_counts.keys()), values=list(sec_counts.values()),
         hole=0.4, marker=dict(colors=px.colors.qualitative.Dark24)
     )).update_layout(title="Signals by Sector", paper_bgcolor="rgba(0,0,0,0)",
-                     plot_bgcolor="rgba(0,0,0,0)", font=dict(color="#F0EDED"),
+                     plot_bgcolor="rgba(0,0,0,0)", font=dict(color="#2C1810"),
                      margin=dict(t=40,b=10,l=10,r=10)),
                      use_container_width=True)
     outcome = {"Open": open_count, "TP Hit": tp_count,
                "SL Hit": sl_count, "FC Hit": fc_count}
     ch2.plotly_chart(go.Figure(go.Bar(
         x=list(outcome.keys()), y=list(outcome.values()),
-        marker_color=["#E30A17", "#22C55E", "#E30A17", "#C97070"],
+        marker_color=["#8B5E3C", "#5A7A3A", "#D4821A", "#A67C52"],
         text=list(outcome.values()), textposition="outside"
     )).update_layout(title="Signal Outcomes", paper_bgcolor="rgba(0,0,0,0)",
-                     plot_bgcolor="rgba(0,0,0,0)", font=dict(color="#F0EDED"),
+                     plot_bgcolor="rgba(0,0,0,0)", font=dict(color="#2C1810"),
                      yaxis=dict(gridcolor="#21262d"), margin=dict(t=40,b=10,l=10,r=10)),
                      use_container_width=True)
     if _has_per_day:
@@ -5047,17 +5047,17 @@ if signals:
             x=_days, y=[_dc[_d] for _d in _days],
             width=0.2,
             marker=dict(
-                color="#22C55E",
+                color="#5A7A3A",
                 opacity=0.9,
                 line=dict(color="#56d364", width=1),
             ),
             text=[_dc[_d] for _d in _days], textposition="outside",
             textfont=dict(color="#56d364", size=11),
         )).update_layout(
-            title=dict(text="Signals Per Day (Dubai/GST)", font=dict(size=13, color="#B8A5A6")),
+            title=dict(text="Signals Per Day (Dubai/GST)", font=dict(size=13, color="#7A6555")),
             paper_bgcolor="rgba(0,0,0,0)",
             plot_bgcolor="rgba(0,0,0,0)",
-            font=dict(color="#F0EDED"),
+            font=dict(color="#2C1810"),
             bargap=0.7,
             yaxis=dict(gridcolor="#21262d", zeroline=False),
             xaxis=dict(gridcolor="#21262d"),
