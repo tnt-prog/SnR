@@ -3048,26 +3048,7 @@ with st.sidebar:
             "open count, overflow signals route to queue_limit until natural "
             "TP/SL closures bring the count down to the new cap."
         ))
-    new_max_super_trades = qs2.number_input(
-        "Max Super Trades", min_value=1, max_value=20, step=1,
-        value=int(_snap_cfg.get("max_super_trades", 5)),
-        key="cfg_max_super_trades",
-        help=(
-            "Hard cap on the number of concurrent open **Super Setup** trades "
-            "(trades that bypass the F3–F10 filter chain because BOTH 15m and "
-            "1h are in Discount zone).\n\n"
-            "When this cap is reached, any new Super-eligible coin is NOT "
-            "skipped — it falls through to the normal F3–F10 pipeline and is "
-            "opened as a regular (non-super) trade if it passes all remaining "
-            "filters. If it fails any filter, it is rejected like any other "
-            "coin.\n\n"
-            "This cap is independent of 'Max Open Trades' — Super trades still "
-            "count toward that overall queue limit."
-        ))
-    st.caption(
-        f"🔒 Open cap: {int(new_max_open_trades)} total · "
-        f"⭐ Super cap: {int(new_max_super_trades)}"
-    )
+    st.caption(f"🔒 Open cap: {int(new_max_open_trades)} total")
     st.divider()
 
     st.markdown("**⏱ Execution**")
@@ -3632,7 +3613,7 @@ def _cfg_panel(cfg: dict) -> str:
     tp_pct   = float(_c.get("tp_pct", 1.2))
     sl_pct   = float(_c.get("sl_pct", 3.0))
     max_open = int(_c.get("max_open_trades", 15))
-    max_sup  = int(_c.get("max_super_trades", 1))
+
     demo     = bool(_c.get("demo_mode", True))
     loop_m   = int(_c.get("loop_minutes", 4))
     cooldown = int(_c.get("cooldown_minutes", 2))
@@ -3683,7 +3664,6 @@ def _cfg_panel(cfg: dict) -> str:
     _html += _kv_cell("SL (cross)",    f"{sl_pct}%")
     _html += _kv_cell("Liq distance",  f"{liq_pct}%")
     _html += _kv_cell("Max open",      str(max_open))
-    _html += _kv_cell("Max super",     str(max_sup))
     _html += _kv_cell("Loop",          f"{loop_m} min")
     _html += _kv_cell("Cooldown",      f"{cooldown} min")
     _html += _kv_cell("SL cooldown",   f"{sl_cool}h")
@@ -5267,11 +5247,13 @@ if signals:
                      plot_bgcolor="rgba(0,0,0,0)", font=dict(color="#062020"),
                      margin=dict(t=40,b=10,l=10,r=10)),
                      use_container_width=True)
-    outcome = {"Open": open_count, "TP Hit": tp_count, "SL Hit": sl_count}
+    outcome_labels = ["Open", "TP Hit", "SL Hit", "Trend Exit"]
+    outcome_values = [open_count, tp_count, sl_count, trend_exit_count]
+    outcome_colors = ["#005F65", "#2E7D32", "#C0392B", "#E67E22"]
     ch2.plotly_chart(go.Figure(go.Bar(
-        x=list(outcome.keys()), y=list(outcome.values()),
-        marker_color=["#005F65", "#2E7D32", "#C0392B"],
-        text=list(outcome.values()), textposition="outside"
+        x=outcome_labels, y=outcome_values,
+        marker_color=outcome_colors,
+        text=outcome_values, textposition="outside"
     )).update_layout(title="Signal Outcomes", paper_bgcolor="rgba(0,0,0,0)",
                      plot_bgcolor="rgba(0,0,0,0)", font=dict(color="#062020"),
                      yaxis=dict(gridcolor="rgba(0,122,128,0.2)"), margin=dict(t=40,b=10,l=10,r=10)),
@@ -5308,46 +5290,85 @@ if (
     and fc.get("scan_completed_at", 0.0) >= fc.get("flushed_at", 0.0)
 ):
     with st.expander("🔬 Last scan filter funnel"):
-        total     = fc.get("total_watchlist", 0)
-        pre_out_n = fc.get("pre_filtered_out", 0)
-        after_pre = total - pre_out_n
-        total     = fc.get("total_watchlist", 0)
-        pre_out_n = fc.get("pre_filtered_out", 0)
-        after_pre = total - pre_out_n
-        checked   = fc.get("checked", after_pre)
-        passed    = fc.get("passed",  0)
+        # ── Raw counts ────────────────────────────────────────────────────────
+        _total       = fc.get("total_watchlist", 0)
+        _pre_out_n   = fc.get("pre_filtered_out", 0)
+        _after_pre   = _total - _pre_out_n
+        _empty_n     = fc.get("f_empty_data", 0)
+        _skipped_n   = fc.get("skipped_pre_scan", 0)
+        _after_skip  = _after_pre - _skipped_n
+        _after_empty = max(0, _after_skip - _empty_n)
+        _trend_n     = fc.get("f_trend_filter", 0)
+        _after_trend = max(0, _after_empty - _trend_n)
+        _drift_n     = fc.get("f_price_drift", 0)
+        _after_drift = max(0, _after_trend - _drift_n)
+        _err_n       = max(0, fc.get("errors", 0))
+        _after_err   = max(0, _after_drift - _err_n)
+        _passed_n    = fc.get("passed", 0)
 
-        _pre  = set(fc.get("pre_filter_passed_syms", []))
-        _chk  = set(fc.get("checked_syms", []))
-        _ftrend = set(fc.get("f_trend_filter_syms", []))
-        _fempty = set(fc.get("f_empty_data_syms", []))
-        _new_sig_s    = set(fc.get("new_signal_syms",         []))
-        _blk_active_s = set(fc.get("blocked_by_active_syms",  []))
-        _blk_cool_s   = set(fc.get("blocked_by_cooldown_syms",[]))
+        # ── Symbol sets ───────────────────────────────────────────────────────
+        _pre_syms      = set(fc.get("pre_filter_passed_syms",   []))
+        _chk_syms      = set(fc.get("checked_syms",             []))
+        _fempty_syms   = set(fc.get("f_empty_data_syms",        []))
+        _ftrend_syms   = set(fc.get("f_trend_filter_syms",      []))
+        _fdrift_syms   = set(fc.get("f_price_drift_syms",       []))
+        _passed_syms   = set(fc.get("passed_syms",              []))
+        _new_sig_s     = set(fc.get("new_signal_syms",          []))
+        _blk_active_s  = set(fc.get("blocked_by_active_syms",   []))
+        _blk_cool_s    = set(fc.get("blocked_by_cooldown_syms", []))
         _blk_sl_cool_s = set(fc.get("blocked_by_sl_cooldown_syms", []))
-        _returned_syms = _new_sig_s | _blk_active_s | _blk_cool_s | _blk_sl_cool_s
-        _process_err_count = max(0, fc.get("errors", 0))
 
         def _coin_str(s): return ", ".join(sorted(s)) if s else "—"
 
-        stage_rows = [
-            ("⚡ After Bulk Pre-filter",      total,       len(_pre),  _coin_str(_pre)),
-            ("🔬 Entered Deep Scan",          len(_pre),   len(_chk),  _coin_str(_chk)),
-            ("⚠️ Dropped — Empty Candle Data",len(_chk),   len(_fempty),"—"),
-            ("📈 Dropped — Trend Filter (F2/F3/F4)", "—", len(_ftrend), _coin_str(_ftrend)),
-            ("💥 Dropped — Process Error",    "—", _process_err_count, "See API Error Log ↓"),
-            ("✅ Returned Signal",            "—", len(_returned_syms), _coin_str(_returned_syms)),
-            ("🔵 Blocked — Open trade",       "—", len(_blk_active_s), _coin_str(_blk_active_s)),
-            ("🟡 Blocked — TP Cooldown",      "—", len(_blk_cool_s),   _coin_str(_blk_cool_s)),
-            ("🔴 Blocked — SL Cooldown",      "—", len(_blk_sl_cool_s),_coin_str(_blk_sl_cool_s)),
-            ("🟢 New Signals Fired",          "—", len(_new_sig_s),    _coin_str(_new_sig_s)),
+        # ── Build rows: each row is (label, in, dropped, remaining, coins) ───
+        # "In" = what arrived at this stage; "Dropped" = rejected here;
+        # "Remaining" = passed through to next stage.
+        def _row(label, in_n, dropped_n, coins_str):
+            remaining = max(0, in_n - dropped_n)
+            return {
+                "Filter Stage":    label,
+                "In":              in_n,
+                "Dropped":         dropped_n,
+                "Remaining":       remaining,
+                "Qualified Coins": coins_str,
+            }
+
+        funnel_rows = [
+            _row("⚡ After Bulk Pre-filter",
+                 _total, _pre_out_n,
+                 _coin_str(_pre_syms)),
+            _row("🔬 Entered Deep Scan",
+                 _after_pre, _skipped_n,
+                 _coin_str(_chk_syms)),
+            _row("⚠️ Dropped — Empty Candle Data",
+                 _after_skip, _empty_n,
+                 "—" if not _fempty_syms else _coin_str(_fempty_syms)),
+            _row("📊 Dropped — Trend Filter (F2/F3/F4 freshness + direction)",
+                 _after_empty, _trend_n,
+                 _coin_str(_ftrend_syms)),
+            _row("📉 Dropped — Price Drift (>0.5% above flip candle)",
+                 _after_trend, _drift_n,
+                 _coin_str(_fdrift_syms)),
+            _row("💥 Dropped — Process Error",
+                 _after_drift, _err_n,
+                 "See API Error Log ↓" if _err_n else "—"),
+            _row("✅ Passed All Filters",
+                 _after_err, 0,
+                 _coin_str(_passed_syms)),
+            _row("🔵 Blocked — Open trade",
+                 _passed_n, len(_blk_active_s),
+                 _coin_str(_blk_active_s)),
+            _row("🟡 Blocked — TP Cooldown",
+                 _passed_n, len(_blk_cool_s),
+                 _coin_str(_blk_cool_s)),
+            _row("🔴 Blocked — SL Cooldown",
+                 _passed_n, len(_blk_sl_cool_s),
+                 _coin_str(_blk_sl_cool_s)),
+            _row("🟢 New Signals Fired",
+                 _passed_n, 0,
+                 _coin_str(_new_sig_s)),
         ]
-        st.dataframe(
-            [{"Filter Stage": r[0], "In": r[1],
-              "Dropped": (r[1]-r[2]) if isinstance(r[1],int) and isinstance(r[2],int) else "—",
-              "Remaining": r[2], "Qualified Coins": r[3]} for r in stage_rows],
-            use_container_width=True, hide_index=True,
-        )
+        st.dataframe(funnel_rows, use_container_width=True, hide_index=True)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # API Error Log  (bottom of page)
@@ -5743,8 +5764,7 @@ def _build_diagnostics_text() -> str:
               f"| order_id={sig.get('order_id','--')} "
               f"| algo_id={sig.get('algo_id','--')} "
               f"| tp_algo_id={sig.get('tp_algo_id','--')} "
-              f"| demo={sig.get('demo_mode','--')} "
-              f"| is_super={sig.get('is_super_setup',False)}")
+              f"| demo={sig.get('demo_mode','--')}")
         # OKX Command log -- one sub-line per entry
         _log_entries = sig.get("okx_log")
         if isinstance(_log_entries, list) and _log_entries:
