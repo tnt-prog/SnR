@@ -101,19 +101,21 @@ def fmt_dubai(iso_str: str, fmt: str = "%m/%d %H:%M") -> str:
 # Default configuration
 # ─────────────────────────────────────────────────────────────────────────────
 DEFAULT_CONFIG: dict = {
-    "tp_pct":               1.5,
-    "sl_pct":               3.0,
+    "tp_pct":               1.2,    # Take-profit %
+    "sl_pct":               3.0,    # Stop-loss %
     # ── per-filter enable/disable ──────────────────────────────────────────────
     "use_pre_filter":       True,   # Bulk ticker pre-filter (volume / change / low)
     # ── Queue limit (max concurrent open trades) ──────────────────────────────
-    "max_open_trades":       7,      # Hard cap on concurrent open trades.
+    "max_open_trades":       30,     # Hard cap on concurrent open trades.
                                      # Lowering this does NOT close existing
                                      # trades — new signals during overflow are
                                      # logged as queue_limit until natural TP/SL
                                      # closures bring the count down.
+    # ── Scan / cooldown timing ────────────────────────────────────────────────
+    "loop_minutes":          3,      # Full watchlist scan interval (minutes)
+    "cooldown_minutes":      2,      # Per-coin cooldown after TP close (minutes)
     # ── SL cooldown (per-coin blackout after SL hit) ──────────────────────────
-    "sl_cooldown_hours":     4,      # Hours to skip a coin after an SL hit.
-                                     # Applies UNIVERSALLY — even to Super Setups.
+    "sl_cooldown_hours":     2,      # Hours to skip a coin after an SL hit.
                                      # Separate from TP cooldown (cooldown_minutes).
     # ── Auto-trading (OKX Demo / Live) ────────────────────────────────────────
     "trade_enabled":         False,
