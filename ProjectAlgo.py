@@ -128,6 +128,7 @@ DEFAULT_CONFIG: dict = {
     # When enabled, new signal scanning is paused outside the defined window.
     # Open-trade monitoring (TP/SL/DCA) always runs regardless of this setting.
     # Supports midnight-crossing windows (e.g. start=22, end=06).
+    "use_trend_exit":         True,   # auto-close open long on 2-of-3 bearish flip (15m)
     "f2_supertrend":         True,   # F2 SuperTrend (ATR 10, mult 3.0) on 15m
     "f3_chandelier":         True,   # F3 Chandelier Exit (ATR 22, mult 3.0) on 15m
     "f4_lux":                True,   # F4 Lux Trend (ATR 14, mult 2.0) on 15m
@@ -1915,6 +1916,96 @@ def _place_tp_only_order(sig: dict, cfg: dict,
 
 
 
+
+def _check_trend_exit(candles_15m: list,
+                      use_st:  bool = True,
+                      use_ce:  bool = True,
+                      use_lux: bool = True) -> bool:
+    """Return True if ≥2 of the 3 enabled indicators fired a sellSignal
+    (trend flipped +1 → -1) within the last 2 completed 15m candles.
+    Mirrors _check_trend_confirmation — same 2-candle Option-A window,
+    same ≥2-of-3 rule, but checks the bearish flip direction.
+    """
+    _enabled = sum([use_st, use_ce, use_lux])
+    if _enabled < 2 or len(candles_15m) < 50:
+        return False
+    st_res  = _calc_supertrend(candles_15m)      if use_st  else None
+    ce_res  = _calc_chandelier_exit(candles_15m) if use_ce  else None
+    lux_res = _calc_lux_trend(candles_15m)       if use_lux else None
+
+    def _sell_fired(res, key="trend") -> bool:
+        """True if the indicator fired a bearish flip on candle[-1] OR [-2]."""
+        if not res or len(res) < 2:
+            return False
+        # Bearish flip: current bar is -1, previous bar was +1
+        def _is_sell(i):
+            return res[i][key] == -1 and res[i - 1][key] == 1
+        return _is_sell(-1) or (len(res) >= 3 and _is_sell(-2))
+
+    confirmed = sum([
+        bool(_sell_fired(st_res,  key="trend")),
+        bool(_sell_fired(ce_res,  key="dir")),
+        bool(_sell_fired(lux_res, key="trend")),
+    ])
+    return confirmed >= 2
+
+
+def _place_market_close_order(sig: dict, cfg: dict, reason: str = "trend_exit") -> bool:
+    """Place a market SELL order on OKX to close an open long position.
+
+    Uses the stored `order_sz` (contracts) from the signal.  Falls back to
+    computing contracts from trade_usdt × trade_lev / (entry × ct_val) if
+    order_sz is missing (paper trades that never hit OKX).
+
+    Returns True on success, False on any error (error is appended to log).
+    """
+    sym = sig.get("symbol", "")
+    try:
+        mode     = (sig.get("order_margin_mode") or
+                    cfg.get("trade_margin_mode", "isolated")).strip().lower()
+        is_hedge = bool(sig.get("order_is_hedge", False))
+
+        # Determine contract count: prefer stored order_sz, compute as fallback
+        sz = int(sig.get("order_sz", 0) or 0)
+        if sz <= 0:
+            ct_val = _get_ct_val(sym)
+            entry  = float(sig.get("entry", 0) or 0)
+            usdt   = float(sig.get("trade_usdt", cfg.get("trade_usdt_amount", 5)) or 5)
+            lev    = int(sig.get("trade_lev",  cfg.get("trade_leverage", 10))  or 10)
+            if ct_val > 0 and entry > 0:
+                sz = max(1, int(usdt * lev / (entry * ct_val)))
+
+        if sz <= 0:
+            _append_error("trade", f"{reason}: cannot compute contract size",
+                          symbol=sym, endpoint="/api/v5/trade/order")
+            return False
+
+        body: dict = {
+            "instId":  _to_okx(sym),
+            "tdMode":  mode,
+            "side":    "sell",
+            "ordType": "market",
+            "sz":      str(sz),
+        }
+        if is_hedge:
+            body["posSide"] = "long"
+        else:
+            body["reduceOnly"] = "true"
+
+        resp = _trade_post("/api/v5/trade/order", body, cfg)
+        if resp.get("code") != "0":
+            _append_error("trade",
+                          f"{reason} close failed: {_okx_err(resp)}",
+                          symbol=sym, endpoint="/api/v5/trade/order")
+            return False
+        _okx_log_entry(sig, f"MARKET CLOSE ({reason.upper()})",
+                       sz=sz, mode=mode)
+        return True
+    except Exception as exc:
+        _append_error("trade", f"{reason} close exception: {exc}",
+                      symbol=sym, endpoint="/api/v5/trade/order")
+        return False
+
 def _update_one_signal(sig: dict) -> None:
     """Fetch candles for a single open signal and update its status in-place.
 
@@ -1955,6 +2046,29 @@ def _update_one_signal(sig: dict) -> None:
                 else:
                     sig["price_alert"]     = False
                     sig["price_alert_pct"] = 0.0
+
+                # ── F2/F3/F4 Trend Exit — 2-of-3 bearish flip on 15m ─────────
+                with _config_lock:
+                    _te_cfg = dict(_b._bsc_cfg)
+                if _te_cfg.get("use_trend_exit", True):
+                    _use_st  = bool(_te_cfg.get("f2_supertrend", True))
+                    _use_ce  = bool(_te_cfg.get("f3_chandelier", True))
+                    _use_lux = bool(_te_cfg.get("f4_lux",        True))
+                    if _use_st or _use_ce or _use_lux:
+                        _c15 = get_klines(sig["symbol"], "15m", 100)[:-1]
+                        if _check_trend_exit(_c15, _use_st, _use_ce, _use_lux):
+                            sig.update(
+                                status      = "trend_exit",
+                                close_price = float(latest_price),
+                                close_time  = dubai_now().isoformat(),
+                            )
+                            sig.pop("price_alert", None)
+                            # Place live market close if trade is live
+                            _is_live = (bool(_te_cfg.get("trade_enabled")) and
+                                        not bool(_te_cfg.get("demo_mode", True)) and
+                                        sig.get("order_id"))
+                            if _is_live:
+                                _place_market_close_order(sig, _te_cfg, "trend_exit")
     except Exception as _upd_exc:
         _append_error("signal_update",
                       f"{_sym}: {type(_upd_exc).__name__}: {_upd_exc}",
@@ -2833,6 +2947,34 @@ with st.sidebar:
         st.caption("⚠️ All disabled — trend filter bypassed")
     st.divider()
 
+    # ── Trend Exit (auto-close on 15m bearish flip) ───────────────────────────
+    st.markdown(
+        "**🚨 Trend Exit — Auto-Close on Reversal**",
+        help=(
+            "When enabled, each open long signal is checked every scan cycle "
+            "against the same F2/F3/F4 indicators on 15m candles.\n\n"
+            "If ≥2 of the 3 enabled indicators flip bearish (-1) within the "
+            "last 2 completed 15m candles, the position is closed immediately "
+            "at the current market price — before the hard SL is hit.\n\n"
+            "In Live mode a market SELL order is placed on OKX automatically. "
+            "In Demo mode the close is recorded in the log only.\n\n"
+            "⚠️ Whipsaw risk: a momentary bearish flip on choppy candles can "
+            "trigger a premature exit. The 2-of-3 rule reduces but does not "
+            "eliminate this risk."
+        )
+    )
+    new_use_trend_exit = st.checkbox(
+        "Enable Trend Exit",
+        value=bool(_snap_cfg.get("use_trend_exit", True)),
+        key="cfg_use_trend_exit",
+        help="Auto-close open longs when 2-of-3 trend indicators flip bearish on 15m."
+    )
+    if new_use_trend_exit:
+        st.caption("✅ Open longs closed when 2-of-3 indicators flip -1 within 2 × 15m candles")
+    else:
+        st.caption("⚠️ Disabled — positions held until hard TP/SL price is hit")
+    st.divider()
+
     # ── Queue Size (max concurrent open trades) ──────────────────────────────
     st.markdown("**📊 Queue Size** (max concurrent open trades)")
     qs1, qs2 = st.columns(2)
@@ -3075,6 +3217,7 @@ with st.sidebar:
             "tp_pct": new_tp, "sl_pct": new_sl,
             # enable/disable flags
             "use_pre_filter":      bool(new_use_pre_filter),
+            "use_trend_exit":      bool(new_use_trend_exit),
             "f2_supertrend":       bool(new_f2_st),
             "f3_chandelier":       bool(new_f3_ce),
             "f4_lux":              bool(new_f4_lux),
@@ -3156,7 +3299,7 @@ _total_sl_ct     = 0
 _cfg_usdt_fb_top = float(_snap_cfg.get("trade_usdt_amount", 0) or 0)
 _cfg_lev_fb_top  = int(_snap_cfg.get("trade_leverage", 10) or 0)
 for _s in signals:
-    if _s.get("status") not in ("tp_hit", "sl_hit", "dca_sl_hit"):
+    if _s.get("status") not in ("tp_hit", "sl_hit", "dca_sl_hit", "trend_exit"):
         continue
     _v = _pnl_topline(_s, _cfg_usdt_fb_top, _cfg_lev_fb_top)
     if _v is None:
@@ -3218,7 +3361,7 @@ else:
     _total_sub    = (
         f"{_closed_total} closed trades  ·  "
         f"{_total_tp_ct} TP (+\\${_total_pnl_wins:,.2f})  |  "
-        f"{_total_sl_ct} SL (\\${_total_pnl_loss:,.2f})"
+        f"{_total_sl_ct} SL / Trend Exit (\\${_total_pnl_loss:,.2f})"
     )
 
 st.markdown(
@@ -3290,8 +3433,9 @@ st.markdown(
 # ── Health metrics ─────────────────────────────────────────────────────────────
 open_count     = sum(1 for s in signals if s["status"]=="open")
 tp_count       = sum(1 for s in signals if s["status"]=="tp_hit")
-sl_count       = sum(1 for s in signals if s["status"]=="sl_hit")
-queue_count    = sum(1 for s in signals if s["status"]=="queue_limit")
+sl_count          = sum(1 for s in signals if s["status"]=="sl_hit")
+trend_exit_count  = sum(1 for s in signals if s["status"]=="trend_exit")
+queue_count       = sum(1 for s in signals if s["status"]=="queue_limit")
 
 # ── Warn if log loaded from a previous session already exceeds the cap
 # (e.g. migrating from v1 which had no limit). No new trades will fire until
@@ -3504,7 +3648,7 @@ _pnl_24h_sl_ct     = 0
 _cfg_usdt_fallback = float(_snap_cfg.get("trade_usdt_amount", 0) or 0)
 _cfg_lev_fallback  = int(_snap_cfg.get("trade_leverage", 10) or 0)
 for _s in signals:
-    if _s.get("status") not in ("tp_hit", "sl_hit", "dca_sl_hit"):
+    if _s.get("status") not in ("tp_hit", "sl_hit", "dca_sl_hit", "trend_exit"):
         continue
     _ct_raw = _s.get("close_time")
     if not _ct_raw:
@@ -3662,6 +3806,7 @@ def _build_signal_row(s: dict, is_open_table: bool = False,
         "tp_hit":      "✅ TP Hit",
         "sl_hit":      "❌ SL Hit",
         "dca_sl_hit":  "❌ DCA SL Hit",
+        "trend_exit":  "🚨 Trend Exit",
         "fc_hit":      "🟣 FC Hit",
         "queue_limit": "⏳ Queue Limit",
         "closed_okx":  "🟠 Closed on OKX",
@@ -3748,7 +3893,7 @@ def _build_signal_row(s: dict, is_open_table: bool = False,
     #   • sl_hit  → sig["close_price"] (= SL level — realized loss)
     #   • queue   → "—" (no trade was ever opened)
     pnl_col = "—"
-    if status in ("open", "tp_hit", "sl_hit", "dca_sl_hit", "fc_hit"):
+    if status in ("open", "tp_hit", "sl_hit", "dca_sl_hit", "fc_hit", "trend_exit"):
         if status == "open":
             _ref_pnl = s.get("latest_price")
             if _ref_pnl is None:
@@ -3772,7 +3917,7 @@ def _build_signal_row(s: dict, is_open_table: bool = False,
     # DCA trades, original entry otherwise).
     #   Positive = closed above entry (TP or FC)  Negative = closed below (SL)
     exit_pct_col = "—"
-    if status in ("tp_hit", "sl_hit", "dca_sl_hit", "fc_hit"):
+    if status in ("tp_hit", "sl_hit", "dca_sl_hit", "fc_hit", "trend_exit"):
         try:
             _close_ep  = float(s.get("close_price", 0) or 0)
             _ref_ep    = float(s.get("signal_entry", s.get("entry", 0)) or 0)
@@ -4329,6 +4474,7 @@ def _signal_tables_fragment():
     _open_sigs       = [s for s in filtered_sorted if s.get("status") == "open"]
     _tp_sigs         = [s for s in filtered_sorted if s.get("status") == "tp_hit"]
     _sl_sigs         = [s for s in filtered_sorted if s.get("status") == "sl_hit"]
+    _trend_exit_sigs = [s for s in filtered_sorted if s.get("status") == "trend_exit"]
     _queue_sigs      = [s for s in filtered_sorted if s.get("status") == "queue_limit"]
     _closed_okx_sigs = [s for s in filtered_sorted if s.get("status") == "closed_okx"]
 
@@ -4614,6 +4760,10 @@ def _signal_tables_fragment():
     _render_sig_table(_sl_sigs,    "❌ SL Hit",         "No SL hits yet.",
                       show_pnl=True)
 
+    # ── Table 3b: Trend Exit ────────────────────────────────────────────────
+    _render_sig_table(_trend_exit_sigs, "🚨 Trend Exit",
+                      "No trend exits yet.", show_pnl=True)
+
     # ── OKX Liquidated / SL Closed Orders (auto-trading only) ───────────────────────
     if _hist_trade_on and _hist_has_creds:
         _sl_hist      = st.session_state.get("okx_sl_hist")
@@ -4727,8 +4877,9 @@ _filtered_pg   = signals if st.session_state.get("sector_filter","All") == "All"
 _fsorted_pg    = sorted(_filtered_pg, key=lambda x: x.get("timestamp",""), reverse=True)
 _open_sigs       = [s for s in _fsorted_pg if s.get("status") == "open"]
 _tp_sigs         = [s for s in _fsorted_pg if s.get("status") == "tp_hit"]
-_sl_sigs         = [s for s in _fsorted_pg if s.get("status") == "sl_hit"]
-_queue_sigs      = [s for s in _fsorted_pg if s.get("status") == "queue_limit"]
+_sl_sigs          = [s for s in _fsorted_pg if s.get("status") == "sl_hit"]
+_trend_exit_sigs  = [s for s in _fsorted_pg if s.get("status") == "trend_exit"]
+_queue_sigs       = [s for s in _fsorted_pg if s.get("status") == "queue_limit"]
 _closed_okx_sigs = [s for s in _fsorted_pg if s.get("status") == "closed_okx"]
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -5023,11 +5174,10 @@ if signals:
                      plot_bgcolor="rgba(0,0,0,0)", font=dict(color="#2C1810"),
                      margin=dict(t=40,b=10,l=10,r=10)),
                      use_container_width=True)
-    outcome = {"Open": open_count, "TP Hit": tp_count,
-               "SL Hit": sl_count, "FC Hit": fc_count}
+    outcome = {"Open": open_count, "TP Hit": tp_count, "SL Hit": sl_count}
     ch2.plotly_chart(go.Figure(go.Bar(
         x=list(outcome.keys()), y=list(outcome.values()),
-        marker_color=["#8B5E3C", "#5A7A3A", "#D4821A", "#A67C52"],
+        marker_color=["#8B5E3C", "#5A7A3A", "#8B3A3A"],
         text=list(outcome.values()), textposition="outside"
     )).update_layout(title="Signal Outcomes", paper_bgcolor="rgba(0,0,0,0)",
                      plot_bgcolor="rgba(0,0,0,0)", font=dict(color="#2C1810"),
@@ -5377,6 +5527,7 @@ def _build_diagnostics_text() -> str:
     _kv("open",        len(_open_sigs))
     _kv("tp_hit",      len(_tp_sigs))
     _kv("sl_hit",      len(_sl_sigs))
+    _kv("trend_exit",  len(_trend_exit_sigs))
     _kv("queue_limit", len(_queue_sigs))
     _kv("closed_okx",  len(_closed_okx_sigs))
     _kv("total",       len(signals))
@@ -5564,6 +5715,7 @@ def _build_diagnostics_text() -> str:
         ("OPEN SIGNALS",    _open_sigs),
         ("TP HIT",          _tp_sigs),
         ("SL HIT",          _sl_sigs),
+        ("TREND EXIT",      _trend_exit_sigs),
         ("QUEUE LIMIT",     _queue_sigs),
         ("CLOSED ON OKX",   _closed_okx_sigs),
         ("ENTRY FAILED",    _entry_failed_sigs),
