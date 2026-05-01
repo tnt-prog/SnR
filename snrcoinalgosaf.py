@@ -2418,7 +2418,7 @@ st.markdown("""
 /* ── Global base ──────────────────────────────────────────────────────────── */
 html, body, [class*="css"] {
     font-family: 'Sora', sans-serif !important;
-    color: #0D3333 !important;
+    color: #062020 !important;
 }
 
 /* ── App background ───────────────────────────────────────────────────────── */
@@ -2429,16 +2429,16 @@ html, body, [class*="css"] {
 /* ── Sidebar ──────────────────────────────────────────────────────────────── */
 [data-testid="stSidebar"] {
     background-color: #C8EDED !important;
-    border-right: 1px solid #007A8044 !important;
+    border-right: 1px solid #005F6544 !important;
 }
 [data-testid="stSidebar"] * {
-    color: #0D3333 !important;
+    color: #062020 !important;
 }
 [data-testid="stSidebar"] .stMarkdown h2 {
-    color: #007A80 !important;
+    color: #005F65 !important;
     font-weight: 700 !important;
     letter-spacing: 0.04em !important;
-    border-bottom: 1px solid #007A8066 !important;
+    border-bottom: 1px solid #005F6566 !important;
     padding-bottom: 6px !important;
 }
 
@@ -2447,35 +2447,35 @@ h1 {
     font-family: 'Sora', sans-serif !important;
     font-weight: 700 !important;
     font-size: 1.9rem !important;
-    color: #007A80 !important;
+    color: #005F65 !important;
     letter-spacing: 0.05em !important;
-    border-bottom: 2px solid #007A8066 !important;
+    border-bottom: 2px solid #005F6566 !important;
     padding-bottom: 8px !important;
     margin-bottom: 12px !important;
 }
 h2, h3 {
     font-family: 'Sora', sans-serif !important;
     font-weight: 600 !important;
-    color: #0D3333 !important;
+    color: #062020 !important;
     letter-spacing: 0.03em !important;
 }
 
 /* ── Metrics ──────────────────────────────────────────────────────────────── */
 [data-testid="stMetric"] {
     background-color: #D0EEEE !important;
-    border: 1px solid #007A8066 !important;
+    border: 1px solid #005F6566 !important;
     border-radius: 8px !important;
     padding: 10px 14px !important;
 }
 [data-testid="stMetricLabel"] {
-    color: #007A80 !important;
+    color: #005F65 !important;
     font-size: 0.72rem !important;
     font-weight: 600 !important;
     text-transform: uppercase !important;
     letter-spacing: 0.08em !important;
 }
 [data-testid="stMetricValue"] {
-    color: #0D3333 !important;
+    color: #062020 !important;
     font-family: 'JetBrains Mono', monospace !important;
     font-size: 1.4rem !important;
     font-weight: 500 !important;
@@ -2483,7 +2483,7 @@ h2, h3 {
 
 /* ── Dataframes ───────────────────────────────────────────────────────────── */
 [data-testid="stDataFrame"] {
-    border: 1px solid #007A8044 !important;
+    border: 1px solid #005F6544 !important;
     border-radius: 8px !important;
     overflow: hidden !important;
 }
@@ -2495,8 +2495,8 @@ h2, h3 {
 /* ── Buttons ──────────────────────────────────────────────────────────────── */
 .stButton > button {
     background-color: #D0EEEE !important;
-    color: #0D3333 !important;
-    border: 1px solid #007A8088 !important;
+    color: #062020 !important;
+    border: 1px solid #005F6588 !important;
     border-radius: 6px !important;
     font-family: 'Sora', sans-serif !important;
     font-weight: 600 !important;
@@ -2505,14 +2505,14 @@ h2, h3 {
     transition: all 0.15s ease !important;
 }
 .stButton > button:hover {
-    background-color: #007A80 !important;
+    background-color: #005F65 !important;
     color: #E8F7F7 !important;
-    border-color: #007A80 !important;
+    border-color: #005F65 !important;
 }
 .stButton > button[kind="primary"] {
-    background-color: #007A80 !important;
+    background-color: #005F65 !important;
     color: #E8F7F7 !important;
-    border-color: #007A80 !important;
+    border-color: #005F65 !important;
     font-weight: 700 !important;
 }
 .stButton > button[kind="primary"]:hover {
@@ -2522,11 +2522,11 @@ h2, h3 {
 /* ── Expanders ────────────────────────────────────────────────────────────── */
 [data-testid="stExpander"] {
     background-color: #D0EEEE !important;
-    border: 1px solid #007A8044 !important;
+    border: 1px solid #005F6544 !important;
     border-radius: 8px !important;
 }
 [data-testid="stExpander"] summary {
-    color: #007A80 !important;
+    color: #005F65 !important;
     font-weight: 600 !important;
     font-size: 0.85rem !important;
     letter-spacing: 0.03em !important;
@@ -2534,18 +2534,18 @@ h2, h3 {
 
 /* ── Dividers ─────────────────────────────────────────────────────────────── */
 hr {
-    border-color: #007A8044 !important;
+    border-color: #005F6544 !important;
 }
 
 /* ── Captions & info boxes ────────────────────────────────────────────────── */
 [data-testid="stCaptionContainer"] {
-    color: #3A6464 !important;
+    color: #1E4848 !important;
     font-size: 0.74rem !important;
 }
 [data-testid="stInfo"] {
     background-color: #C8EDED !important;
-    border-left: 3px solid #007A80 !important;
-    color: #0D3333 !important;
+    border-left: 3px solid #005F65 !important;
+    color: #062020 !important;
     border-radius: 6px !important;
 }
 [data-testid="stSuccess"] {
@@ -2570,13 +2570,13 @@ hr {
 [data-testid="stTextArea"] textarea,
 [data-testid="stSelectbox"] select {
     background-color: #D8F0F0 !important;
-    color: #0D3333 !important;
-    border: 1px solid #007A8066 !important;
+    color: #062020 !important;
+    border: 1px solid #005F6566 !important;
     border-radius: 6px !important;
     font-family: 'JetBrains Mono', monospace !important;
 }
 [data-testid="stCheckbox"] label {
-    color: #0D3333 !important;
+    color: #062020 !important;
     font-size: 0.82rem !important;
 }
 
@@ -2588,8 +2588,8 @@ hr {
 /* ── Scrollbar ────────────────────────────────────────────────────────────── */
 ::-webkit-scrollbar { width: 6px; height: 6px; }
 ::-webkit-scrollbar-track { background: #E8F7F7; }
-::-webkit-scrollbar-thumb { background: #007A8066; border-radius: 3px; }
-::-webkit-scrollbar-thumb:hover { background: #007A80; }
+::-webkit-scrollbar-thumb { background: #005F6566; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #005F65; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -3370,7 +3370,7 @@ if _acct_has_creds:
 # Display banner only — computation already done above.
 _closed_total = _total_tp_ct + _total_sl_ct
 if _closed_total == 0:
-    _total_color = "#3A6464"
+    _total_color = "#1E4848"
     _total_prefix = "💼"
     _total_sub    = "no closed trades yet"
 else:
@@ -3438,7 +3438,7 @@ _cap_minimum   = _cap_per_trade * _cap_pool
 _cap_buffer    = _cap_minimum * 0.25
 _cap_total     = _cap_minimum + _cap_buffer
 st.markdown(
-    f"<p style='color:#007A80;font-weight:700;margin:2px 0;font-size:14px;'>"
+    f"<p style='color:#005F65;font-weight:700;margin:2px 0;font-size:14px;'>"
     f"💰 Minimum Required: <span style='font-size:15px'>${_cap_minimum:,.2f} USDT</span>"
     f"&nbsp;&nbsp;|&nbsp;&nbsp;"
     f"🛡️ Buffer (25%): <span style='font-size:15px'>${_cap_buffer:,.2f} USDT</span>"
@@ -3483,13 +3483,13 @@ m6, m7, m8, m9 = st.columns(4)
 # ── Open — large green ──────────────────────────────────────────────────
 with m6:
     st.markdown(
-        f"""<div style="background:#C8EDED;border:1px solid #007A8066;border-radius:8px;
+        f"""<div style="background:#FFFDE7;border:1px solid #F9A82566;border-radius:8px;
                         padding:12px 16px 10px 16px;min-height:88px;"
              title="Active open trades (max {_max_open_cap} allowed simultaneously — configurable in sidebar)">
-            <p style="margin:0 0 4px 0;font-size:0.72rem;font-weight:600;
-                      color:#007A80;letter-spacing:.05em;line-height:1.2;">OPEN</p>
+            <p style="margin:0 0 4px 0;font-size:0.72rem;font-weight:700;
+                      color:#E65100;letter-spacing:.05em;line-height:1.2;">OPEN</p>
             <p style="margin:0;font-size:1.9rem;font-weight:700;
-                      color:#007A80;line-height:1.1;">{open_count}</p>
+                      color:#E65100;line-height:1.1;">{open_count}</p>
         </div>""",
         unsafe_allow_html=True,
     )
@@ -3519,7 +3519,18 @@ with m8:
         </div>""",
         unsafe_allow_html=True,
     )
-m9.metric("⏳ Queued",     queue_count,   help=f"Signals detected while the {_max_open_cap}-trade limit was reached — no order placed, coin rescanned each cycle")
+with m9:
+    st.markdown(
+        f"""<div style="background:#F0F0F0;border:1px solid #9E9E9E66;border-radius:8px;
+                        padding:12px 16px 10px 16px;min-height:88px;"
+             title="Signals detected while the {_max_open_cap}-trade limit was reached — no order placed, coin rescanned each cycle">
+            <p style="margin:0 0 4px 0;font-size:0.72rem;font-weight:700;
+                      color:#424242;letter-spacing:.05em;line-height:1.2;">⏳ QUEUED</p>
+            <p style="margin:0;font-size:1.9rem;font-weight:700;
+                      color:#424242;line-height:1.1;">{queue_count}</p>
+        </div>""",
+        unsafe_allow_html=True,
+    )
 
 if getattr(_b, "_bsc_last_error", ""):
     st.warning(f"⚠️ {_b._bsc_last_error}")
@@ -3531,25 +3542,36 @@ def _cfg_panel(cfg: dict) -> str:
 
     # ── helpers ────────────────────────────────────────────────────────────────
     def _pill(text, active=True):
-        bg  = "#C8EDED" if active else "#D8F0F0"
-        col = "#007A80" if active else "#3A6464"
+        if active:
+            bg     = "#C8F5C8"
+            col    = "#1B5E20"
+            border = "1px solid #2E7D32"
+            shadow = "0 0 7px rgba(46,125,50,0.55)"
+            fw     = "700"
+        else:
+            bg     = "#D4ECEC"
+            col    = "#1A4A4A"
+            border = "1px solid #7ABCBC"
+            shadow = "none"
+            fw     = "500"
         return (f"<span style='display:inline-block;font-size:11px;"
-                f"padding:2px 9px;border-radius:12px;margin:2px 3px 2px 0;"
-                f"background:{bg};color:{col};font-weight:500'>{text}</span>")
+                f"padding:3px 10px;border-radius:12px;margin:2px 4px 2px 0;"
+                f"background:{bg};color:{col};font-weight:{fw};"
+                f"border:{border};box-shadow:{shadow}'>{text}</span>")
 
     def _pill_off(text):
         return _pill(text, active=False)
 
     def _kv_cell(label, value, highlight=False):
-        vc = "#007A80" if highlight else "#0D3333"
+        vc = "#005F65" if highlight else "#062020"
         return (f"<td style='padding:6px 8px 6px 0;vertical-align:top;white-space:nowrap;'>"
-                f"<span style='font-size:11px;color:#3A6464'>{label}</span><br>"
+                f"<span style='font-size:11px;color:#1E4848'>{label}</span><br>"
                 f"<span style='font-size:13px;font-weight:500;color:{vc}'>{value}</span></td>")
 
     def _section(title):
         return (f"<tr><td colspan='20' style='padding:10px 0 4px 0;"
-                f"font-size:11px;font-weight:500;color:#3A6464;"
-                f"border-top:1px solid #007A8066;letter-spacing:0.05em'>"
+                f"font-size:11px;font-weight:500;color:#1E4848;"
+                f"border-top:1px solid #005F6566;letter-spacing:0.05em'>"
                 f"{title}</td></tr>")
 
     # ── collect values ─────────────────────────────────────────────────────────
@@ -3586,13 +3608,13 @@ def _cfg_panel(cfg: dict) -> str:
     _fpill("Cross Margin", _c.get("trade_margin_mode", "cross") == "cross")
 
     # ── build HTML ─────────────────────────────────────────────────────────────
-    _mode_col = "#007A80" if demo else "#2E7D32"
+    _mode_col = "#005F65" if demo else "#2E7D32"
     _mode_lbl = "DEMO" if demo else "LIVE"
     _html = (
-        f"<div style='background:#D0EEEE;border:1px solid #007A8066;"
+        f"<div style='background:#D0EEEE;border:1px solid #005F6566;"
         f"border-radius:8px;padding:14px 18px;margin-bottom:12px;'>"
         f"<div style='display:flex;align-items:center;gap:10px;margin-bottom:10px;'>"
-        f"<span style='font-size:13px;font-weight:500;color:#0D3333;font-weight:700'>Scanner Config</span>"
+        f"<span style='font-size:13px;font-weight:500;color:#062020;font-weight:700'>Scanner Config</span>"
         f"<span style='font-size:11px;font-weight:500;padding:2px 8px;"
         f"border-radius:10px;background:{_mode_col}22;color:{_mode_col}'>{_mode_lbl}</span>"
         f"</div>"
@@ -3703,7 +3725,7 @@ for _s in signals:
 
 # Color based on sign: green for gain, red for loss, grey for exact zero / empty
 if _pnl_24h_tp_ct == 0 and _pnl_24h_sl_ct == 0:
-    _pnl_color   = "#3A6464"  # muted teal
+    _pnl_color   = "#1E4848"  # muted teal
     _pnl_prefix  = "💰"
     _pnl_summary = "no closed trades in the last 24 h"
 else:
@@ -5201,16 +5223,16 @@ if signals:
         labels=list(sec_counts.keys()), values=list(sec_counts.values()),
         hole=0.4, marker=dict(colors=px.colors.qualitative.Dark24)
     )).update_layout(title="Signals by Sector", paper_bgcolor="rgba(0,0,0,0)",
-                     plot_bgcolor="rgba(0,0,0,0)", font=dict(color="#0D3333"),
+                     plot_bgcolor="rgba(0,0,0,0)", font=dict(color="#062020"),
                      margin=dict(t=40,b=10,l=10,r=10)),
                      use_container_width=True)
     outcome = {"Open": open_count, "TP Hit": tp_count, "SL Hit": sl_count}
     ch2.plotly_chart(go.Figure(go.Bar(
         x=list(outcome.keys()), y=list(outcome.values()),
-        marker_color=["#007A80", "#2E7D32", "#C0392B"],
+        marker_color=["#005F65", "#2E7D32", "#C0392B"],
         text=list(outcome.values()), textposition="outside"
     )).update_layout(title="Signal Outcomes", paper_bgcolor="rgba(0,0,0,0)",
-                     plot_bgcolor="rgba(0,0,0,0)", font=dict(color="#0D3333"),
+                     plot_bgcolor="rgba(0,0,0,0)", font=dict(color="#062020"),
                      yaxis=dict(gridcolor="rgba(0,122,128,0.2)"), margin=dict(t=40,b=10,l=10,r=10)),
                      use_container_width=True)
     if _has_per_day:
@@ -5219,17 +5241,17 @@ if signals:
             x=_days, y=[_dc[_d] for _d in _days],
             width=0.2,
             marker=dict(
-                color="#007A80",
+                color="#005F65",
                 opacity=0.9,
                 line=dict(color="#005A60", width=1),
             ),
             text=[_dc[_d] for _d in _days], textposition="outside",
-            textfont=dict(color="#007A80", size=11),
+            textfont=dict(color="#005F65", size=11),
         )).update_layout(
-            title=dict(text="Signals Per Day (Dubai/GST)", font=dict(size=13, color="#3A6464")),
+            title=dict(text="Signals Per Day (Dubai/GST)", font=dict(size=13, color="#1E4848")),
             paper_bgcolor="rgba(0,0,0,0)",
             plot_bgcolor="rgba(0,0,0,0)",
-            font=dict(color="#0D3333"),
+            font=dict(color="#062020"),
             bargap=0.7,
             yaxis=dict(gridcolor="rgba(0,122,128,0.2)", zeroline=False),
             xaxis=dict(gridcolor="rgba(0,122,128,0.2)"),
