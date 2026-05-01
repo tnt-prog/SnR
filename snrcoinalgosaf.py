@@ -5199,7 +5199,7 @@ if signals:
         text=list(outcome.values()), textposition="outside"
     )).update_layout(title="Signal Outcomes", paper_bgcolor="rgba(0,0,0,0)",
                      plot_bgcolor="rgba(0,0,0,0)", font=dict(color="#0D3333"),
-                     yaxis=dict(gridcolor="#007A8033"), margin=dict(t=40,b=10,l=10,r=10)),
+                     yaxis=dict(gridcolor="rgba(0,122,128,0.2)"), margin=dict(t=40,b=10,l=10,r=10)),
                      use_container_width=True)
     if _has_per_day:
         _days = sorted(_dc.keys())
@@ -5219,8 +5219,8 @@ if signals:
             plot_bgcolor="rgba(0,0,0,0)",
             font=dict(color="#0D3333"),
             bargap=0.7,
-            yaxis=dict(gridcolor="#007A8033", zeroline=False),
-            xaxis=dict(gridcolor="#007A8033"),
+            yaxis=dict(gridcolor="rgba(0,122,128,0.2)", zeroline=False),
+            xaxis=dict(gridcolor="rgba(0,122,128,0.2)"),
             margin=dict(t=40, b=10, l=10, r=10),
         ), use_container_width=True)
 
