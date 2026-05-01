@@ -105,46 +105,12 @@ DEFAULT_CONFIG: dict = {
     "sl_pct":               3.0,
     # ── per-filter enable/disable ──────────────────────────────────────────────
     "use_pre_filter":       True,   # Bulk ticker pre-filter (volume / change / low)
-    "use_rsi_5m":           True,   # F4 — 5m RSI
-    "rsi_5m_min":           30,
-    "use_rsi_1h":           True,   # F5 — 1h RSI
-    "rsi_1h_min":           30,
-    "rsi_1h_max":           95,
-    "loop_minutes":         4,
-    "cooldown_minutes":     2,
-    "use_ema_3m":           False,
-    "ema_period_3m":      12,
-    "use_ema_5m":         False,
-    "ema_period_5m":      12,
-    "use_ema_15m":        True,
-    "ema_period_15m":     12,
-    "use_macd_3m":        False,  # F7 — MACD dark-green (3m)
-    "use_macd_5m":        False,  # F7 — MACD dark-green (5m)
-    "use_macd_15m":       True,   # F7 — MACD dark-green (15m)
-    "use_sar_3m":         False,  # F8 — Parabolic SAR (3m)
-    "use_sar_5m":         True,   # F8 — Parabolic SAR (5m)
-    "use_sar_15m":        True,   # F8 — Parabolic SAR (15m)
-    "use_vol_spike":      False,
-    "vol_spike_mult":     2.0,
-    "vol_spike_lookback": 20,
-    "use_pdz_5m":            False,  # F3 — PDZ (5m)
-    "use_pdz_15m":           True,   # F2 — PDZ (15m)
-    "use_atr_filter":        False,  # F5b — ATR(14) 15m TP-reachability filter
-    "atr_mode":              "Normal",  # "Strict" (≤1.5×) | "Normal" (≤2.0×) | "Relaxed" (≤3.0×)
-    "use_ema_cross_15m":     True,   # F10 — 15m EMA crossover (fast > slow)
-    "ema_cross_fast_15m":    12,
-    "ema_cross_slow_15m":    21,
     # ── Queue limit (max concurrent open trades) ──────────────────────────────
     "max_open_trades":       7,      # Hard cap on concurrent open trades.
                                      # Lowering this does NOT close existing
                                      # trades — new signals during overflow are
                                      # logged as queue_limit until natural TP/SL
                                      # closures bring the count down.
-    # ── Super Setup cap (max concurrent Super trades) ─────────────────────────
-    "max_super_trades":      2,      # Hard cap on concurrent open Super trades.
-                                     # When cap is reached, Super-eligible coins
-                                     # fall through to the normal F3–F10 pipeline
-                                     # and open as regular trades if they pass.
     # ── SL cooldown (per-coin blackout after SL hit) ──────────────────────────
     "sl_cooldown_hours":     4,      # Hours to skip a coin after an SL hit.
                                      # Applies UNIVERSALLY — even to Super Setups.
@@ -157,49 +123,15 @@ DEFAULT_CONFIG: dict = {
     "api_passphrase":        "",
     "trade_usdt_amount":     5.0,    # USDT collateral per trade (before leverage)
     "trade_leverage":        20,     # leverage applied (capped by MAX_LEVERAGE)
-    "trade_margin_mode":     "isolated",  # "cross" or "isolated"
-    # ── DCA (Dollar-Cost Averaging) ──────────────────────────────────────────
-    # 0 = DCA OFF (legacy behavior — sidebar TP/SL apply normally).
-    # 1-6 = Allow up to N automated DCA adds per trade.
-    # Each DCA doubles the previous add's margin (10 → 10 → 20 → 40 → 80 …).
-    # Isolated: DCA triggers when price reaches 70% of the distance from the
-    #           current blended average to the current liquidation price.
-    # Cross:    DCA triggers when price drops 7% below the current blended avg.
-    # After N DCAs are consumed, the final SL uses the same formula as all
-    # earlier DCAs: blended_avg × (1 − sl_distance_pct). A breach routes
-    # the trade into a dedicated DCA SL Hit table. When DCA > 0, the sidebar
-    # SL % is ignored — only TP and this SL can close the trade.
-    "trade_max_dca":         3,
-    # ── DCA trigger drop percentages ──────────────────────────────────────────
-    # Two separate configurables, shown in the sidebar based on selected
-    # margin mode.
-    #   • Isolated: % DISTANCE ABOVE LIQUIDATION toward entry (dropdown
-    #     10/15/…/95, step 5). Higher = conservative (fires near entry);
-    #     lower = aggressive (fires near liq).
-    #       drop_pct = (1/lev) × (1 − iso_dist/100)
-    #       DCA price = entry × (1 − drop_pct)
-    #       Example: entry $100, 10× lev, liq ≈ $90
-    #         10% → $91  · 50% → $95  · 70% → $97  · 95% → $99.50
-    #       default 70 → at 10× lev, fires at −3% from avg.
-    #                    at 20× lev, fires at −1.5% from avg. (leverage-aware)
-    #   • Cross:    % drop below blended avg (leverage-independent).
-    #       default 7 → fires at −7% from avg, regardless of leverage.
-    # Snapshotted onto the signal at entry time so sidebar tweaks don't
-    # retroactively change already-open trades.
-    "dca_iso_distance_pct":  80.0,   # 10–95 (step 5), isolated
-    "dca_cross_drop_pct":    7.0,    # 0.1–50, cross
-    # ── Open-Trade Watcher loop (1-minute DCA/TP checker) ─────────────────────
-    # When > 0 AND < loop_minutes: a dedicated background thread runs every
-    # `watcher_minutes` minutes, fetching 1m candles for each open trade and
-    # executing DCA triggers + TP exits in real time. The main scan loop's
-    # open-trade check is DISABLED while the watcher is active to avoid
-    # double-execution. When 0 or ≥ loop_minutes, watcher is disabled and
-    # main loop handles open-trade checks as before (legacy behaviour).
-    "watcher_minutes":       1,
+    "trade_margin_mode":     "cross",     # always cross — isolated removed
     # ── Hours of operation (GST / Dubai UTC+4) ────────────────────────────────
     # When enabled, new signal scanning is paused outside the defined window.
     # Open-trade monitoring (TP/SL/DCA) always runs regardless of this setting.
     # Supports midnight-crossing windows (e.g. start=22, end=06).
+    "use_trend_exit":         True,   # auto-close open long when ANY ONE indicator flips bearish (15m)
+    "f2_supertrend":         True,   # F2 SuperTrend (ATR 10, mult 3.0) on 15m
+    "f3_chandelier":         True,   # F3 Chandelier Exit (ATR 22, mult 3.0) on 15m
+    "f4_lux":                True,   # F4 Lux Trend (ATR 14, mult 2.0) on 15m
     "scan_hour_enabled":     False,
     "scan_hour_start":       0,    # 0–23 GST
     "scan_hour_end":         23,   # 0–23 GST
@@ -335,141 +267,24 @@ def analyze_sl_reason(sig: dict) -> str:
                 f"Macro / higher-TF bias likely shifted after entry.")
             improve.append("Add 4h or daily trend filter to avoid counter-trend entries")
 
-    # ── 2. Super Setup bypass ─────────────────────────────────────────────────
-    if sig.get("is_super_setup"):
-        reasons.append(
-            "Super Setup — 15m Discount zone bypassed all filters. "
-            "No RSI / MACD / SAR confirmation was required.")
-        improve.append(
-            "Consider requiring at least RSI 5m ≥ 40 even for Super Setups "
-            "to avoid entering during momentum exhaustion")
 
-    # ── 3. PDZ zone risk ──────────────────────────────────────────────────────
-    pdz_5m  = str(criteria.get("pdz_zone_5m",  "") or "")
-    pdz_15m = str(criteria.get("pdz_zone_15m", "") or "")
-    for zone_label, zone_val in [("5m", pdz_5m), ("15m", pdz_15m)]:
-        if "BandA" in zone_val:
-            reasons.append(
-                f"PDZ {zone_label} zone was {zone_val} — price was near the Premium "
-                f"boundary. BandA entries carry higher reversal risk than Discount entries.")
-            improve.append(
-                f"Consider restricting {zone_label} PDZ to Discount + Equilibrium only "
-                f"(disable BandA/BandB) for lower-risk entries")
-        elif "BandB" in zone_val:
-            reasons.append(
-                f"PDZ {zone_label} zone was {zone_val} — borderline zone with elevated "
-                f"Premium exposure. Higher false-signal rate than Discount.")
-            improve.append(
-                f"Tighten {zone_label} PDZ to Discount / Equilibrium to reduce BandB SL rate")
-        elif "Premium" in zone_val:
-            reasons.append(
-                f"PDZ {zone_label} zone was Premium — price was in overbought territory "
-                f"at entry. This zone has the highest reversal probability.")
-
-    # ── 4. RSI analysis ───────────────────────────────────────────────────────
-    rsi_5m = _f("rsi_5m")
-    rsi_1h = _f("rsi_1h")
-
-    if rsi_5m is not None:
-        if rsi_5m < 35:
-            reasons.append(
-                f"RSI 5m was very low at entry ({rsi_5m:.1f}) — short-term momentum "
-                f"was already fading before trade opened.")
-            improve.append("Raise RSI 5m minimum threshold (e.g. 42 → 48) to avoid fading momentum")
-        elif rsi_5m < 42:
-            reasons.append(
-                f"RSI 5m borderline ({rsi_5m:.1f}) — weak short-term momentum at entry.")
-        elif rsi_5m > 75:
-            reasons.append(
-                f"RSI 5m was high at entry ({rsi_5m:.1f}) — near overbought on 5m, "
-                f"limited upside headroom.")
-            improve.append("Add RSI 5m upper cap (e.g. max 72) to avoid overbought entries")
-
-    if rsi_1h is not None:
-        if rsi_1h > 82:
-            reasons.append(
-                f"RSI 1h near overbought ({rsi_1h:.1f}) — hourly timeframe showing "
-                f"exhaustion. Higher-TF reversal likely.")
-            improve.append("Lower RSI 1h maximum threshold (e.g. 95 → 80)")
-        elif rsi_1h < 40:
-            reasons.append(
-                f"RSI 1h weak ({rsi_1h:.1f}) — no bullish higher-TF support at entry.")
-            improve.append("Raise RSI 1h minimum threshold (e.g. 30 → 45)")
-
-    # ── 5. RSI divergence (5m strong but 1h weak) ────────────────────────────
-    if rsi_5m is not None and rsi_1h is not None:
-        if rsi_5m >= 55 and rsi_1h < 45:
-            reasons.append(
-                f"RSI divergence — 5m ({rsi_5m:.1f}) was bullish but 1h ({rsi_1h:.1f}) "
-                f"was bearish. Short-term bounce against the hourly trend.")
-            improve.append(
-                "Enforce RSI 1h ≥ RSI 5m × 0.75 to reduce timeframe divergence entries")
-
-    # ── 6. MACD status at entry ───────────────────────────────────────────────
-    macd_flags = {
-        "3m":  criteria.get("macd_3m"),
-        "5m":  criteria.get("macd_5m"),
-        "15m": criteria.get("macd_15m"),
-    }
-    disabled_macd = [tf for tf, v in macd_flags.items() if v in (None, "—", "")]
-    false_macd    = [tf for tf, v in macd_flags.items()
-                     if str(v).strip().lower() in ("false", "0", "no")]
-    if disabled_macd:
-        reasons.append(
-            f"MACD was disabled for {', '.join(disabled_macd)} timeframe(s) at entry — "
-            f"no histogram confirmation on those timeframes.")
-        improve.append(
-            f"Enable MACD on {', '.join(disabled_macd)} for additional confirmation")
-    if false_macd:
-        reasons.append(
-            f"MACD was bearish on {', '.join(false_macd)} timeframe(s) at entry — "
-            f"filter was active but histogram was dark-red / declining.")
-
-    # ── 7. SAR status at entry ────────────────────────────────────────────────
-    sar_flags = {
-        "3m":  criteria.get("sar_3m"),
-        "5m":  criteria.get("sar_5m"),
-        "15m": criteria.get("sar_15m"),
-    }
-    disabled_sar = [tf for tf, v in sar_flags.items() if v in (None, "—", "")]
-    if disabled_sar:
-        reasons.append(
-            f"Parabolic SAR was disabled for {', '.join(disabled_sar)} timeframe(s) — "
-            f"no trend-direction confirmation on those timeframes.")
-        improve.append(
-            f"Enable SAR on {', '.join(disabled_sar)} as additional reversal guard")
-
-    # ── 8. Volume conviction ──────────────────────────────────────────────────
-    vol_ratio = _f("vol_ratio")
-    if vol_ratio is not None:
-        if vol_ratio < 1.5:
-            reasons.append(
-                f"Volume spike was only {vol_ratio:.1f}× average — low conviction. "
-                f"Weak volume entries have higher false-signal rate.")
-            improve.append("Raise volume spike minimum to 2.0× average for stronger conviction")
-        elif vol_ratio < 2.0:
-            reasons.append(
-                f"Volume spike was {vol_ratio:.1f}× average — moderate conviction. "
-                f"A 2×+ spike would indicate stronger participation.")
-
-    # ── Fallback if nothing specific was found ────────────────────────────────
+    # ── Fallback ─────────────────────────────────────────────────────────────
     if not reasons:
         reasons.append(
-            "All entry filters were healthy — reversal was caused by an external "
-            "market event (macro news, liquidation cascade, or broader market dump) "
-            "that no technical filter can predict.")
+            "Reversal was caused by an external market event "
+            "(macro news, liquidation cascade, or broader market dump).")
         improve.append(
-            "Consider adding a market-wide sentiment check (e.g. BTC dominance or "
-            "funding rate) to avoid entries during high-volatility macro windows")
+            "Consider adding a market-wide sentiment check (e.g. BTC dominance "
+            "or funding rate) to avoid entries during high-volatility macro windows")
 
     # ── Build output ──────────────────────────────────────────────────────────
-    lines = [f"• {r}" for r in reasons]
+    out_lines = [f"• {r}" for r in reasons]
     if improve:
-        lines.append("")
-        lines.append("💡 Improvement suggestions:")
-        lines.extend(f"  → {i}" for i in improve)
+        out_lines.append("")
+        out_lines.append("💡 Improvement suggestions:")
+        out_lines.extend(f"  → {i}" for i in improve)
 
-    return "\n".join(lines)
+    return "\n".join(out_lines)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Config persistence
@@ -585,31 +400,7 @@ def save_config(cfg: dict):
             print(f"[Config] WARNING — failed to save {CONFIG_FILE}: {type(_e).__name__}: {_e}")
 
 def _migrate_criteria(crit: dict) -> dict:
-    """
-    Convert old-format criteria that stored "✅"/"—" into the new per-timeframe
-    numeric keys.  Values that were "✅" become None (no data available) so the
-    UI shows "—" instead of a stale tick mark.
-    """
-    if not crit:
-        return crit
-    # Migrate flat MACD/SAR/Vol keys → per-timeframe keys
-    if "macd" in crit and "macd_3m" not in crit:
-        v = crit.pop("macd")
-        crit["macd_3m"]  = None if v == "✅" else v
-        crit["macd_5m"]  = None
-        crit["macd_15m"] = None
-    if "sar" in crit and "sar_3m" not in crit:
-        v = crit.pop("sar")
-        crit["sar_3m"]  = None if v == "✅" else v
-        crit["sar_5m"]  = None
-        crit["sar_15m"] = None
-    if "vol" in crit and "vol_ratio" not in crit:
-        v = crit.pop("vol")
-        crit["vol_ratio"] = None if v == "✅" else v
-    # EMA: if stored as "✅" we have no actual value — set to None
-    for key in ("ema_3m", "ema_5m", "ema_15m"):
-        if crit.get(key) == "✅":
-            crit[key] = None
+    """No-op migration stub — filter criteria fields removed."""
     return crit
 
 def load_log():
@@ -673,13 +464,6 @@ if "_scanner_initialised" not in st.session_state:
         _b._bsc_last_error    = ""
         _b._bsc_rescan_event  = threading.Event()   # set to skip sleep & rescan immediately
         # ── Open-Trade Watcher (1-minute DCA/TP checker) ──────────────────────
-        # Separate thread that polls open trades on a shorter interval than the
-        # main scan loop. When active, the main loop skips its own open-trade
-        # update (avoids duplicate candle fetches + double DCA execution).
-        _b._bsc_watcher_thread  = None
-        _b._bsc_watcher_event   = threading.Event()   # wake watcher immediately
-        _b._bsc_watcher_last_ts = 0                   # unix ts of last tick (for UI)
-        _b._bsc_watcher_last_dur = 0.0                # seconds — last tick duration
         # ── Circuit-breaker halt flag ─────────────────────────────────────────
         # Set to True by the background loop when the last 3 closed trades are
         # all sl_hit. CONTRACT: once True, ONLY the manual "▶️ Resume Scanning"
@@ -709,14 +493,6 @@ import builtins as _b
 # the app was already running before new attributes were added to the module,
 # those attributes won't exist on _b. Add any missing ones here so older
 # sessions keep working after a code update (no process restart required).
-if not hasattr(_b, "_bsc_watcher_thread"):
-    _b._bsc_watcher_thread = None
-if not hasattr(_b, "_bsc_watcher_event"):
-    _b._bsc_watcher_event = threading.Event()
-if not hasattr(_b, "_bsc_watcher_last_ts"):
-    _b._bsc_watcher_last_ts = 0
-if not hasattr(_b, "_bsc_watcher_last_dur"):
-    _b._bsc_watcher_last_dur = 0.0
 
 _cfg             = _b._bsc_cfg
 _log             = _b._bsc_log
@@ -835,8 +611,14 @@ def get_symbols(watchlist: list) -> tuple:
             sym = _from_okx(inst_id)
             active.add(sym)
             try:
-                _cv = float(s.get("ctVal") or 0)
-                ct_vals[sym] = _cv if _cv > 0 else 0.0
+                _cv   = float(s.get("ctVal")  or 0)
+                _cmul = float(s.get("ctMult") or 1)
+                # OKX position notional = sz × ctVal × price (ctMult is NOT used
+                # as a multiplier for some tokens, e.g. LIT has ctVal=1,
+                # 10× too-few contracts on tokens like BRETT where ctMult > 1).
+                _eff = _cv if _cv > 0 else 0.0   # ctMult excluded: OKX notional = sz × ctVal × price only
+                ct_vals[sym] = _eff
+                _b._bsc_symbol_cache.setdefault("ct_raw", {})[sym] = (_cv, _cmul, _eff)  # (ctVal, ctMult_from_api, effective=ctVal_only)
                 # Store 0 on parse failure so _get_ct_val treats it as a cache
                 # miss and forces a re-fetch rather than silently using 1.0.
             except (TypeError, ValueError):
@@ -1034,14 +816,18 @@ def _get_ct_val(sym: str) -> float:
         data = safe_get(f"{BASE}/api/v5/public/instruments",
                         {"instType": "SWAP", "instId": _to_okx(sym)})
         for s in data.get("data", []):
-            raw = s.get("ctVal", "")
-            val = float(raw) if raw not in ("", None) else 0.0
-            if val > 0:
-                _b._bsc_symbol_cache.setdefault("ct_val", {})[sym] = val
+            raw   = s.get("ctVal", "")
+            rmul  = s.get("ctMult", "")
+            val   = float(raw)  if raw  not in ("", None) else 0.0
+            cmul  = float(rmul) if rmul not in ("", None) else 1.0
+            # ctMult intentionally excluded — OKX uses only ctVal for position notional.
+            eff = val if val > 0 else 0.0   # ctMult excluded (see get_symbols note)
+            if eff > 0:
+                _b._bsc_symbol_cache.setdefault("ct_val", {})[sym] = eff
                 _append_error("info",
-                    f"ctVal for {_to_okx(sym)} fetched on-demand: {val} "
-                    f"(cache was cold — populated now)")
-                return val
+                    f"ctVal for {_to_okx(sym)} fetched on-demand: {eff} "
+                    f"(ctVal={val} ctMult={cmul} excluded) — cache populated now")
+                return eff
     except Exception as _e:
         raise ValueError(
             f"ctVal for {_to_okx(sym)} could not be fetched from OKX "
@@ -1103,6 +889,23 @@ def _okx_err(resp: dict) -> str:
             detail   = friendly if friendly else (s_msg or s_code)
             return f"[{s_code}] {detail}"
     return top
+
+def _okx_log_entry(sig: dict, label: str, **fields) -> None:
+    """Append a timestamped OKX command entry to sig['okx_log'].
+
+    Each entry is a single line: "[MM/DD HH:MM:SS] LABEL | key: val | ..."
+    Entries are stored in sig["okx_log"] (a list[str]) and joined with
+    "\\n########\\n" when rendered in the OKX Command column.
+    """
+    ts    = dubai_now().strftime("%m/%d %H:%M:%S")
+    parts = [f"[{ts}] {label}"]
+    for k, v in fields.items():
+        parts.append(f"{k}: {v}")
+    entry = " | ".join(parts)
+    if not isinstance(sig.get("okx_log"), list):
+        sig["okx_log"] = []
+    sig["okx_log"].append(entry)
+
 
 def place_okx_order(sig: dict, cfg: dict) -> dict:
     """
@@ -1297,32 +1100,101 @@ def place_okx_order(sig: dict, cfg: dict) -> dict:
                           f"Could not fetch fill price, using signal entry: {fill_exc}",
                           symbol=sym, endpoint="/api/v5/trade/order[GET]")
 
+        # ── Step 3b: Post-entry margin sanity check ─────────────────────────
+        # OKX sometimes reports ctMult=1 in its instruments API even when the
+        # actual position calculation uses ctMult=10 (or more). This causes the
+        # bot to place 10× too many contracts. We detect this by fetching the
+        # real position margin and comparing it to the intended USDT amount.
+        try:
+            time.sleep(1.0)  # let OKX settle the position
+            _pos_verify = _trade_get("/api/v5/account/positions",
+                                     {"instType": "SWAP", "instId": _to_okx(sym)},
+                                     cfg)
+            if _pos_verify.get("code") == "0":
+                _pv_list = [p for p in _pos_verify.get("data", [])
+                            if float(p.get("pos", 0) or 0) != 0]
+                if _pv_list:
+                    _pv        = _pv_list[0]
+                    _pv_margin = float(_pv.get("imr", 0) or _pv.get("margin", 0) or 0)
+                    _pv_notional = _pv_margin * lev if _pv_margin > 0 else 0
+                    _expected_margin = usdt
+                    if _pv_margin > 0 and _pv_margin > _expected_margin * 1.8:
+                        _ratio = _pv_margin / _expected_margin
+                        # Derive correct effective ctVal from actual notional
+                        _pv_sz = float(_pv.get("pos", contracts) or contracts)
+                        _corrected_ct_val = (_pv_notional / (_pv_sz * actual_entry)
+                                             if _pv_sz > 0 and actual_entry > 0 else ct_val)
+                        # Update cache with correct value to prevent repeat on DCA
+                        _b._bsc_symbol_cache.setdefault("ct_val", {})[sym] = _corrected_ct_val
+                        _append_error(
+                            "trade",
+                            (f"⚠️ MARGIN OVERSIZE for {sym}: actual margin "
+                             f"{_pv_margin:.2f} USDT is {_ratio:.1f}× expected "
+                             f"{_expected_margin:.2f} USDT. OKX ctVal API mismatch "
+                             f"— bot used ctVal={ct_val:.4f} but effective "
+                             f"ctVal={_corrected_ct_val:.4f}. Cache corrected. "
+                             f"Consider closing this position manually."),
+                            symbol=sym, endpoint="margin_sanity_check",
+                        )
+        except Exception as _mv_exc:
+            _append_error("trade",
+                          f"Margin sanity check failed for {sym}: {_mv_exc}",
+                          symbol=sym, endpoint="margin_sanity_check")
+
         # Recalculate TP and SL from the actual fill price.
-        # Isolated mode: SL = liquidation price (entry × (1 − 1/leverage)).
-        # Cross mode:    SL = entry × (1 − sl_pct%).
+        # SL = entry × (1 − sl_pct%) — cross margin only.
         tp_pct    = float(cfg.get("tp_pct", 1.5)) / 100
         actual_tp = _pround(actual_entry * (1 + tp_pct))
-        if mode == "isolated":
-            actual_sl = _pround(actual_entry * (1 - 1 / lev))
-        else:
-            sl_pct    = float(cfg.get("sl_pct", 3.0)) / 100
-            actual_sl = _pround(actual_entry * (1 - sl_pct))
+        sl_pct    = float(cfg.get("sl_pct", 3.0)) / 100
+        actual_sl = _pround(actual_entry * (1 - sl_pct))
 
-        # ── Step 4: Place OCO algo (TP + SL) using actual fill price ─────────
+        # ── Step 4: Place TP+SL algo using actual fill price ────────────────
+        # Cross margin: conditional order with both TP and SL on OKX so the
+        # position is protected even if the portal goes offline.
+        # Isolated margin: unchanged OCO (TP + SL together).
+        if mode == "cross":
+            # ── Cross: TP+SL conditional algo at the actual fill prices ──────
+            _tp_sig = _place_tp_only_order(
+                {"symbol": sym, "order_margin_mode": mode,
+                 "order_is_hedge": is_hedge},
+                cfg, actual_tp, contracts,
+                sl_price=actual_sl,
+            )
+            if not _tp_sig:
+                return {"ordId": ord_id, "algoId": "", "sz": contracts,
+                        "status": "partial",
+                        "error": "Entry ✅ · TP+SL algo ❌ (cross mode)",
+                        "actual_entry": actual_entry,
+                        "actual_tp": actual_tp, "actual_sl": actual_sl,
+                        **_base_info}
+
+            return {"ordId": ord_id, "algoId": _tp_sig, "sz": contracts,
+                    "status": "placed", "error": "",
+                    "actual_entry": actual_entry,
+                    "actual_tp": actual_tp, "actual_sl": actual_sl,
+                    "tp_algo_id":    _tp_sig,
+                    **_base_info}
+
+        # ── Isolated: OCO (TP + SL) ───────────────────────────────────────────
         # In hedge mode, closing a long requires posSide="long" on the sell too.
         algo_body: dict = {
-            "instId":       _to_okx(sym),
-            "tdMode":       mode,
-            "side":         "sell",
-            "ordType":      "oco",
-            "sz":           str(contracts),
-            "tpTriggerPx":  str(actual_tp),
-            "tpOrdPx":      "-1",    # market fill when TP triggers
-            "slTriggerPx":  str(actual_sl),
-            "slOrdPx":      "-1",    # market fill when SL triggers
+            "instId":          _to_okx(sym),
+            "tdMode":          mode,
+            "side":            "sell",
+            "ordType":         "oco",
+            "sz":              str(contracts),
+            "tpTriggerPx":     str(actual_tp),
+            "tpTriggerPxType": "mark",
+            "tpOrdPx":         "-1",    # market fill when TP triggers
+            "slTriggerPx":     str(actual_sl),
+            "slTriggerPxType": "mark",
+            "slOrdPx":         "-1",    # market fill when SL triggers
         }
         if is_hedge:
             algo_body["posSide"] = "long"    # closing a long in hedge mode
+        else:
+            # Prevent oversell flipping LONG → SHORT in cross net mode.
+            algo_body["reduceOnly"] = "true"
         algo_resp = _trade_post("/api/v5/trade/order-algo", algo_body, cfg)
         ad        = (algo_resp.get("data") or [{}])[0]
         algo_id   = ad.get("algoId", "")
@@ -1635,6 +1507,181 @@ def get_klines(sym: str, interval: str, limit: int) -> list:
 # Technical indicators
 # ─────────────────────────────────────────────────────────────────────────────
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Trend indicator helpers — F2 SuperTrend · F3 Chandelier Exit · F4 Lux
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _wilder_atr(candles: list, period: int) -> list:
+    """Wilder's smoothed ATR (RMA). Returns a float list, same length as candles.
+    First `period` values are seeded with SMA; subsequent values use RMA."""
+    n = len(candles)
+    if n == 0:
+        return []
+    trs = []
+    for i, c in enumerate(candles):
+        if i == 0:
+            trs.append(c["high"] - c["low"])
+        else:
+            p = candles[i - 1]
+            trs.append(max(c["high"] - c["low"],
+                           abs(c["high"] - p["close"]),
+                           abs(c["low"]  - p["close"])))
+    atrs = [0.0] * n
+    if n < period:
+        return atrs
+    atrs[period - 1] = sum(trs[:period]) / period
+    for i in range(period, n):
+        atrs[i] = (atrs[i - 1] * (period - 1) + trs[i]) / period
+    return atrs
+
+
+def _calc_supertrend(candles: list, period: int = 10, mult: float = 3.0) -> list:
+    """SuperTrend on `candles` (src = hl2).
+    Returns list of dicts: {'trend': 1/-1, 'buy': bool} — one per candle."""
+    n = len(candles)
+    if n < period + 1:
+        return [{"trend": 1, "buy": False}] * n
+    atrs   = _wilder_atr(candles, period)
+    up     = [0.0] * n
+    dn     = [0.0] * n
+    trend  = [1]   * n
+    for i in range(period, n):
+        src   = (candles[i]["high"] + candles[i]["low"]) / 2
+        u     = src - mult * atrs[i]
+        d     = src + mult * atrs[i]
+        # ratchet bands
+        if i > period:
+            u = max(u, up[i - 1]) if candles[i - 1]["close"] > up[i - 1] else u
+            d = min(d, dn[i - 1]) if candles[i - 1]["close"] < dn[i - 1] else d
+        up[i] = u
+        dn[i] = d
+        # trend direction
+        if   trend[i - 1] == -1 and candles[i]["close"] > dn[i - 1]:
+            trend[i] = 1
+        elif trend[i - 1] ==  1 and candles[i]["close"] < up[i - 1]:
+            trend[i] = -1
+        else:
+            trend[i] = trend[i - 1]
+    return [{"trend": trend[i],
+             "buy":   trend[i] == 1 and trend[i - 1] == -1}
+            for i in range(n)]
+
+
+def _calc_chandelier_exit(candles: list, period: int = 22, mult: float = 3.0) -> list:
+    """Chandelier Exit on `candles` (uses highest/lowest of close).
+    Returns list of dicts: {'dir': 1/-1, 'buy': bool} — one per candle."""
+    n      = len(candles)
+    if n < period + 1:
+        return [{"dir": 1, "buy": False}] * n
+    atrs   = _wilder_atr(candles, period)
+    closes = [c["close"] for c in candles]
+    ls     = [0.0] * n
+    ss     = [0.0] * n
+    d      = [1]   * n
+    for i in range(period, n):
+        atr_val  = atrs[i] * mult
+        hi_close = max(closes[i - period + 1: i + 1])
+        lo_close = min(closes[i - period + 1: i + 1])
+        l_stop   = hi_close - atr_val
+        s_stop   = lo_close + atr_val
+        # ratchet stops
+        if i > period:
+            l_stop = max(l_stop, ls[i - 1]) if closes[i - 1] > ls[i - 1] else l_stop
+            s_stop = min(s_stop, ss[i - 1]) if closes[i - 1] < ss[i - 1] else s_stop
+        ls[i] = l_stop
+        ss[i] = s_stop
+        # direction
+        if   closes[i] > ss[i - 1]:
+            d[i] =  1
+        elif closes[i] < ls[i - 1]:
+            d[i] = -1
+        else:
+            d[i] = d[i - 1]
+    return [{"dir": d[i],
+             "buy": d[i] == 1 and d[i - 1] == -1}
+            for i in range(n)]
+
+
+def _calc_lux_trend(candles: list, period: int = 14, mult: float = 2.0) -> list:
+    """Lux Trend — SuperTrend core with ATR 14 / mult 2.0 (src = hl2).
+    Returns list of dicts: {'trend': 1/-1, 'buy': bool} — one per candle."""
+    return _calc_supertrend(candles, period=period, mult=mult)
+
+
+def _check_trend_confirmation(candles_15m: list,
+                               use_st:  bool = True,
+                               use_ce:  bool = True,
+                               use_lux: bool = True):
+    """Entry qualification — no candle-window restriction.
+
+    Returns (True, ["F2","F3"]) if qualified, (False, []) otherwise.
+    The list contains the labels of every indicator with an active buy signal
+    that contributed to the qualification.
+
+    A coin qualifies when ALL of the following hold:
+      1. At least 2 of the enabled indicators have an ACTIVE buy signal —
+         meaning their most recent directional flip was bullish (-1 → +1)
+         and no bearish flip has occurred since.
+      2. No indicator (F2, F3, or F4) fired a SELL signal (bearish flip)
+         at any candle AFTER the earlier of the two qualifying buy flips.
+    """
+    _LABEL = {"st": "F2", "ce": "F3", "lux": "F4"}
+    _enabled = sum([use_st, use_ce, use_lux])
+    if _enabled < 2 or len(candles_15m) < 50:
+        return False, []
+
+    st_res  = _calc_supertrend(candles_15m)      if use_st  else None
+    ce_res  = _calc_chandelier_exit(candles_15m) if use_ce  else None
+    lux_res = _calc_lux_trend(candles_15m)       if use_lux else None
+
+    def _last_flip_idx(res, tkey, target_val):
+        if not res:
+            return None
+        for i in range(len(res) - 1, 0, -1):
+            if res[i][tkey] == target_val and res[i - 1][tkey] != target_val:
+                return i
+        return None
+
+    indicators = []
+    if use_st and st_res:
+        indicators.append(("st",
+                           _last_flip_idx(st_res,  "trend",  1),
+                           _last_flip_idx(st_res,  "trend", -1)))
+    if use_ce and ce_res:
+        indicators.append(("ce",
+                           _last_flip_idx(ce_res,  "dir",    1),
+                           _last_flip_idx(ce_res,  "dir",   -1)))
+    if use_lux and lux_res:
+        indicators.append(("lux",
+                           _last_flip_idx(lux_res, "trend",  1),
+                           _last_flip_idx(lux_res, "trend", -1)))
+
+    def _active(buy_idx, sell_idx):
+        if buy_idx is None:
+            return False
+        if sell_idx is None:
+            return True
+        return buy_idx > sell_idx
+
+    active = [(name, b, s)
+              for name, b, s in indicators if _active(b, s)]
+
+    if len(active) < 2:
+        return False, []
+
+    active.sort(key=lambda x: x[1], reverse=True)
+    _, idx1, _ = active[0]
+    _, idx2, _ = active[1]
+    window_start = min(idx1, idx2)
+
+    for _, _b_idx, s_idx in indicators:
+        if s_idx is not None and s_idx > window_start:
+            return False, []
+
+    active_labels = [_LABEL[name] for name, _, _ in active]
+    return True, active_labels
+
 def _pround(x, sig=6):
     """Round price to `sig` significant figures — handles micro-priced tokens.
     Prevents ultra-low prices (e.g. SATS at 0.000000003) from rounding to 0."""
@@ -1648,277 +1695,35 @@ def _pround(x, sig=6):
     except Exception:
         return x
 
-def calc_atr(candles: list, period: int = 14) -> list:
-    """
-    Average True Range (ATR) using Wilder's smoothing.
-    Returns a list of ATR values (same length as candles minus the warm-up).
-    Each candle must have 'high', 'low', 'close' keys.
-    """
-    if len(candles) < period + 1:
-        return []
-    trs = []
-    for i in range(1, len(candles)):
-        h = candles[i]["high"]
-        l = candles[i]["low"]
-        pc = candles[i - 1]["close"]
-        trs.append(max(h - l, abs(h - pc), abs(l - pc)))
-    if len(trs) < period:
-        return []
-    # Seed with simple average of first `period` TRs
-    atr = [sum(trs[:period]) / period]
-    for tr in trs[period:]:
-        atr.append((atr[-1] * (period - 1) + tr) / period)
-    return atr
-
-
-def calc_rsi_series(closes, period=14):
-    if len(closes) < period + 2: return []
-    deltas = [closes[i]-closes[i-1] for i in range(1, len(closes))]
-    gains  = [max(d, 0.) for d in deltas]
-    losses = [max(-d, 0.) for d in deltas]
-    ag = sum(gains[:period]) / period
-    al = sum(losses[:period]) / period
-    rsi = [100. if al == 0 else 100 - 100 / (1 + ag / al)]
-    for i in range(period, len(deltas)):
-        ag = (ag*(period-1)+gains[i])/period
-        al = (al*(period-1)+losses[i])/period
-        rsi.append(100. if al == 0 else 100 - 100/(1+ag/al))
-    return rsi
-
-def calc_ema(values: list, period: int) -> list:
-    if len(values) < period: return []
-    k      = 2.0 / (period + 1)
-    result = [sum(values[:period]) / period]
-    for v in values[period:]:
-        result.append(v * k + result[-1] * (1 - k))
-    return result
-
-def calc_macd(closes: list, fast=12, slow=26, signal_period=9):
-    if len(closes) < slow + signal_period: return [], [], []
-    ema_f = calc_ema(closes, fast)
-    ema_s = calc_ema(closes, slow)
-    trim  = len(ema_f) - len(ema_s)
-    ema_f = ema_f[trim:]
-    macd_line = [f-s for f,s in zip(ema_f, ema_s)]
-    if len(macd_line) < signal_period: return [], [], []
-    sig_line     = calc_ema(macd_line, signal_period)
-    trim2        = len(macd_line) - len(sig_line)
-    macd_aligned = macd_line[trim2:]
-    histogram    = [m-s for m,s in zip(macd_aligned, sig_line)]
-    return macd_aligned, sig_line, histogram
-
-def macd_bullish_and_value(closes: list, crossover_lookback: int = 12):
-    """
-    Single-pass MACD evaluation — computes MACD once and returns BOTH the
-    bullish verdict and the last MACD-line value, so callers don't need to
-    call calc_macd() a second time just to get the line value for display.
-
-    Returns (is_bullish: bool, macd_line_value: float | None).
-    """
-    macd_line, sig_line, histogram = calc_macd(closes)
-    _last_val = macd_line[-1] if macd_line else None
-    if not histogram or len(histogram) < 2:
-        return False, _last_val
-    if macd_line[-1] <= 0 or sig_line[-1] <= 0:
-        return False, _last_val
-    if histogram[-1] <= 0 or histogram[-1] <= histogram[-2]:
-        return False, _last_val
-    n = min(crossover_lookback + 1, len(macd_line))
-    for i in range(1, n):
-        prev, curr = -(i+1), -i
-        if (len(macd_line)+prev >= 0 and
-                macd_line[prev] <= sig_line[prev] and
-                macd_line[curr] >  sig_line[curr]):
-            return True, _last_val
-    return False, _last_val
-
-
-def macd_bullish(closes: list, crossover_lookback: int = 12) -> bool:
-    """
-    True when (all on given closes):
-      1. MACD line > 0
-      2. Signal line > 0
-      3. Histogram > 0 AND increasing  ← dark green only
-      4. Bullish crossover within last crossover_lookback candles
-
-    Thin wrapper around macd_bullish_and_value — kept for any external caller
-    that only wants the bool.
-    """
-    ok, _ = macd_bullish_and_value(closes, crossover_lookback)
-    return ok
-
-def calc_parabolic_sar(candles: list, af_start=0.02, af_step=0.02, af_max=0.20):
-    if not candles: return []
-    if len(candles) < 2: return [(candles[0]["close"], True)]
-    highs  = [c["high"]  for c in candles]
-    lows   = [c["low"]   for c in candles]
-    closes = [c["close"] for c in candles]
-    bullish = closes[1] >= closes[0]
-    ep, sar, af = (highs[0], lows[0], af_start) if bullish else (lows[0], highs[0], af_start)
-    result = [(sar, bullish)]
-    for i in range(1, len(candles)):
-        new_sar = sar + af*(ep-sar)
-        if bullish:
-            new_sar = min(new_sar, lows[i-1])
-            if i >= 2: new_sar = min(new_sar, lows[i-2])
-            if lows[i] < new_sar:
-                bullish, new_sar, ep, af = False, ep, lows[i], af_start
-            else:
-                if highs[i] > ep: ep = highs[i]; af = min(af+af_step, af_max)
-        else:
-            new_sar = max(new_sar, highs[i-1])
-            if i >= 2: new_sar = max(new_sar, highs[i-2])
-            if highs[i] > new_sar:
-                bullish, new_sar, ep, af = True, ep, highs[i], af_start
-            else:
-                if lows[i] < ep: ep = lows[i]; af = min(af+af_step, af_max)
-        sar = new_sar
-        result.append((sar, bullish))
-    return result
-
-# ─────────────────────────────────────────────────────────────────────────────
-# F12 — Premium / Discount / Equilibrium zone  (DZSAFM Pine Script logic)
-# ─────────────────────────────────────────────────────────────────────────────
-def calc_pdz_zone(candles: list, price: float, buffer_pct: float = 0.015) -> tuple:
-    """
-    Compute Smart Money Premium/Discount/Equilibrium zones from up to the last
-    50 candles on a given timeframe (mirrors the DZSAFM TradingView indicator exactly).
-
-    Zone boundaries  (H = swing high, L = swing low over last 50 candles):
-      Premium zone    : price >= 0.95·H + 0.05·L     ← top 5% of range
-      Equilibrium zone: 0.475·H+0.525·L ≤ price ≤ 0.525·H+0.475·L
-      Discount zone   : price ≤ 0.05·H + 0.95·L      ← bottom 5% of range
-
-    Qualification logic (LONG trades only):
-      • Discount zone                         → QUALIFIES  (greatest room to pump)
-      • Equilibrium zone                      → REJECTED   (indecision, risky)
-      • Premium zone                          → REJECTED   (no upward room)
-      • Band A (equil_top < price < prem_bot) → QUALIFIES if room ≥ buffer_pct (= tp_pct)
-      • Band B (disc_top  < price < equil_bot)→ QUALIFIES if room ≥ buffer_pct (= tp_pct)
-
-    Returns (qualifies: bool, zone_label: str)
-    """
-    # ── Empty / insufficient data → FAIL-CLOSED ──────────────────────────────
-    # Previously returned (True, "unknown") which silently qualified coins
-    # with no candle data — a serious fail-open bug. Now we fail-closed so
-    # missing data cannot accidentally pass the PDZ filter (or trigger a
-    # Super Setup on empty 1h data, for example).
-    #
-    # The DZSAFM indicator needs enough history for a meaningful swing
-    # high / swing low — use 50 as the functional minimum (matches the
-    # Pine Script's default lookback length).
-    if not candles or len(candles) < 50:
-        return False, "insufficient_data"
-
-    lookback = candles[-290:]  # 290 candles — 1 OKX API call (~72 hrs on 15m, ~24 hrs on 5m)
-    H = max(c["high"] for c in lookback)
-    L = min(c["low"]  for c in lookback)
-
-    if H <= L:
-        # Degenerate range (flat or inverted) — cannot compute zones.
-        return False, "flat_range"
-
-    # Boundary levels  (exact Pine Script maths from DZSAFM)
-    premium_bottom = 0.95 * H + 0.05 * L    # bottom edge of Premium zone
-    equil_top      = 0.525 * H + 0.475 * L  # top edge of Equilibrium zone
-    equil_bottom   = 0.475 * H + 0.525 * L  # bottom edge of Equilibrium zone
-    discount_top   = 0.05  * H + 0.95  * L  # top edge of Discount zone
-
-    band_a_ceil = premium_bottom * (1 - buffer_pct)   # buffer below Premium boundary
-    band_b_ceil = equil_bottom   * (1 - buffer_pct)   # buffer below Equilibrium boundary
-
-    if price <= discount_top:
-        # Fully inside Discount zone — best long setup
-        return True, "Discount"
-    elif price >= premium_bottom:
-        # Fully inside Premium zone — no upward room
-        return False, "Premium"
-    elif equil_bottom <= price <= equil_top:
-        # Equilibrium band — can go either way, skip
-        return False, "Equilibrium"
-    elif equil_top < price < premium_bottom:
-        # Band A: qualifies only if price is at least 1.5% below the Premium boundary
-        dist_pct = (premium_bottom - price) / premium_bottom * 100
-        label    = f"BandA({dist_pct:.1f}%\u2193Prem)"
-        return (price <= band_a_ceil), label
-    else:
-        # Band B: qualifies only if price is at least 1.5% below the Equilibrium boundary
-        dist_pct = (equil_bottom - price) / equil_bottom * 100
-        label    = f"BandB({dist_pct:.1f}%\u2193Equil)"
-        return (price <= band_b_ceil), label
-
-
 # ─────────────────────────────────────────────────────────────────────────────
 # Filter funnel counter
 # ─────────────────────────────────────────────────────────────────────────────
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Filter funnel counter
-# ─────────────────────────────────────────────────────────────────────────────
 def _reset_filter_counts():
     counts = {
-        "total_watchlist":  0,
-        "pre_filtered_out": 0,
-        "checked":          0,
-        # ── elimination counters (new F-order) ────────────────────────────────
-        "f2_pdz15m":        0,   # F2 — PDZ 15m
-        "f3_pdz5m":         0,   # F3 — PDZ 5m
-        "f4_rsi5m":         0,   # F4 — 5m RSI
-        "f5_rsi1h":         0,   # F5 — 1h RSI
-        "f5b_atr":          0,   # F5b — ATR(14) 15m TP-reachability
-        "f6_ema_3m":        0,   # F6 — EMA 3m
-        "f6_ema_5m":        0,   # F6 — EMA 5m
-        "f6_ema_15m":       0,   # F6 — EMA 15m
-        # F7 MACD — per timeframe
-        "f7_macd_3m":       0,
-        "f7_macd_5m":       0,
-        "f7_macd_15m":      0,
-        # F8 SAR — per timeframe
-        "f8_sar_3m":        0,
-        "f8_sar_5m":        0,
-        "f8_sar_15m":       0,
-        "f9_vol":           0,   # F9 — Vol Spike
-        "f10_ema_cross":    0,   # F10 — 15m EMA crossover (fast > slow)
-        "f_empty_data":     0,   # Stage 2 candle fetch returned empty for a timeframe
-        "passed":           0,
-        "super_setup":      0,   # subset of passed — 15m+1h Discount instant buys
-        "super_cap_demoted":0,   # Super-eligible coins demoted to F3-F10 pipeline
-        "f_sl_cooldown":    0,   # coins blocked by 24h SL blackout this cycle
-        "errors":           0,
-        "scan_cfg":         {},
-        # ── per-stage symbol lists ─────────────────────────────────────────────
-        "pre_filter_passed_syms": [],
-        "checked_syms":           [],
-        "f2_elim_syms":           [],
-        "f3_elim_syms":           [],
-        "f4_elim_syms":           [],
-        "f5_elim_syms":           [],
-        "f5b_elim_syms":          [],
-        "f6_ema_3m_elim_syms":    [],
-        "f6_ema_5m_elim_syms":    [],
-        "f6_ema_15m_elim_syms":   [],
-        "f7_macd_3m_elim_syms":   [],
-        "f7_macd_5m_elim_syms":   [],
-        "f7_macd_15m_elim_syms":  [],
-        "f8_sar_3m_elim_syms":    [],
-        "f8_sar_5m_elim_syms":    [],
-        "f8_sar_15m_elim_syms":   [],
-        "f9_elim_syms":           [],
-        "f10_elim_syms":          [],
-        "f_empty_data_syms":      [],
-        "passed_syms":            [],
-        "super_setup_syms":       [],
-        "super_cap_demoted_syms": [],
-        "f_sl_cooldown_syms":     [],
+        "total_watchlist":           0,
+        "pre_filtered_out":          0,
+        "checked":                   0,
+        "f_trend_filter":            0,
+        "f_empty_data":              0,
+        "passed":                    0,
+        "f_sl_cooldown":             0,
+        "errors":                    0,
+        "scan_cfg":                  {},
+        "pre_filter_passed_syms":    [],
+        "checked_syms":              [],
+        "f_trend_filter_syms":       [],
+        "f_empty_data_syms":         [],
+        "passed_syms":               [],
+        "f_sl_cooldown_syms":        [],
         "blocked_by_sl_cooldown_syms": [],
-        # ── Flush/scan timing (used to keep funnel hidden until a full post-flush scan) ─
-        "flushed_at":        0.0,
-        "scan_completed_at": 0.0,
+        "flushed_at":                0.0,
+        "scan_completed_at":         0.0,
     }
     with _filter_lock:
         _filter_counts.clear()
         _filter_counts.update(counts)
-        _b._bsc_filter_counts = _filter_counts   # keep reference in sync under lock
+        _b._bsc_filter_counts = _filter_counts
 
 # ─── Thread-local counter batching ──────────────────────────────────────────
 # Each process() call accumulates integer counter increments in a thread-local
@@ -1966,364 +1771,62 @@ def _flush_tl_counts() -> None:
     _tl_counts.delta = {}   # reset for next call on this worker thread
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Per-coin processing
-# ─────────────────────────────────────────────────────────────────────────────
-def process(sym, cfg: dict, super_counter: dict = None, super_lock=None):
-    """Per-coin pipeline.
-
-    super_counter / super_lock — shared atomic slot tracker for Super-cap
-    coordination across concurrent scan threads. When the Super slot count
-    reaches zero, any Super-eligible coin falls through to the F3–F10
-    pipeline and opens as a normal (non-super) trade if it passes.
-    If these args are None (e.g. unit test, standalone call), behave as if
-    unlimited Super slots are available.
+def process(sym, cfg: dict, **_kwargs):
     """
-    # Reset thread-local delta at entry so the previous process() call on the
-    # same worker thread doesn't bleed into this one. Flush happens in the
-    # outer finally below.
+    Evaluate a single symbol.
+    F1: 5m candle data check.
+    F2/F3/F4: SuperTrend / Chandelier Exit / Lux cross-confirmation on 15m.
+    Returns signal dict on pass, None on filter-out, "error" on exception.
+    """
     _tl_counts.delta = {}
     try:
         _incr_filter("checked")
-        # list.append is GIL-atomic — no lock needed.
         _filter_counts["checked_syms"].append(sym)
 
-        # ── Stage 1: Quick parallel fetch — 5m + 15m (PDZ) + 1h (PDZ+RSI) ────
-        # 1h is fetched here (not Stage 2) because Super Setup requires 1h
-        # to be in Discount zone — without 1h we can't decide Super vs normal.
-        # The same 1h candles are reused later for F5 (1h RSI) so no extra
-        # API call is introduced by moving the fetch earlier.
-        #
-        # Candle counts (all single API call — OKX cap is 300/call):
-        #   • 5m  = 300 → 25 hours of 5m structure
-        #   • 15m = 300 → 75 hours of 15m structure (PDZ uses last 290)
-        #   • 1h  = 300 → 12.5 days of 1h structure (PDZ uses last 290,
-        #                 giving ~12 days of 1h swing pivots for Discount-zone
-        #                 detection — matches the 290-candle internal cap of
-        #                 calc_pdz_zone which mirrors the DZSAFM indicator).
-        with ThreadPoolExecutor(max_workers=3) as pool:
-            f_5m_q  = pool.submit(get_klines, sym, "5m",  300)
-            f_15m_q = pool.submit(get_klines, sym, "15m", 300)
-            f_1h_q  = pool.submit(get_klines, sym, "1h",  300)
-            m5_quick   = f_5m_q.result()[:-1]
-            m15_quick  = f_15m_q.result()[:-1]
-            m1h_quick  = f_1h_q.result()[:-1]
-
-        closes_5m_q = [c["close"] for c in m5_quick]
-        entry_q     = _pround(m5_quick[-1]["close"])
-
-        # ── F2: PDZ 15m — Super Setup requires 15m Discount ──────────────────
-        pdz_zone_15m       = "—"
-        pdz_zone_1h        = "—"
-        is_super_eligible  = False
-        if cfg.get("use_pdz_15m", True):
-            pdz_pass_15m, pdz_zone_15m = calc_pdz_zone(m15_quick, entry_q, float(cfg.get("tp_pct", 1.2)) / 100.0)
-            if pdz_zone_15m == "Discount":
-                # 15m is Discount — now we need 1h also in Discount for Super
-                # (if 1h fetch failed, can't verify → treat as not-super, fall
-                # through to F3-F10 rather than blocking entry).
-                if m1h_quick:
-                    _, pdz_zone_1h = calc_pdz_zone(m1h_quick, entry_q, float(cfg.get("tp_pct", 1.2)) / 100.0)
-                if pdz_zone_1h == "Discount":
-                    is_super_eligible = True      # ⭐ BOTH 15m and 1h Discount
-                # else: only 15m Discount (not 1h) → fall through to F3-F10
-            elif not pdz_pass_15m:
-                _record_elim("f2_pdz15m", "f2_elim_syms", sym)
-                return None
-            # else Band A/B passes — continue to F3
-
-        # ── SUPER SETUP — BOTH 15m AND 1h Discount → instant trade ───────────
-        # Atomic slot check: only take the Super shortcut if slots remain.
-        # If the cap is exhausted, fall through to F3-F10 and open as normal.
-        if is_super_eligible:
-            _take_super_slot = True
-            if super_counter is not None and super_lock is not None:
-                with super_lock:
-                    if super_counter.get("slots", 0) > 0:
-                        super_counter["slots"] -= 1
-                    else:
-                        _take_super_slot = False
-            if _take_super_slot:
-                tp      = _pround(entry_q * (1 + cfg["tp_pct"] / 100))
-                _ss_lev = max(1, int(cfg.get("trade_leverage", 10)))
-                sl      = (_pround(entry_q * (1 - 1 / _ss_lev))
-                           if cfg.get("trade_margin_mode", "isolated") == "isolated"
-                           else _pround(entry_q * (1 - cfg["sl_pct"] / 100)))
-                sec     = SECTORS.get(sym, "Other")
-                max_lev = get_max_leverage(sym)
-                _incr_filter("passed")
-                _incr_filter("super_setup")
-                _filter_counts["passed_syms"].append(sym)
-                _filter_counts["super_setup_syms"].append(sym)
-                return {
-                    "id":             str(uuid.uuid4())[:8],
-                    "timestamp":      dubai_now().isoformat(),
-                    "symbol":         sym,
-                    "entry":          entry_q,
-                    "tp":             tp,
-                    "sl":             sl,
-                    "sector":         sec,
-                    "status":         "open",
-                    "close_price":    None,
-                    "close_time":     None,
-                    "max_lev":        max_lev,
-                    "is_super_setup": True,
-                    "criteria": {
-                        "rsi_5m": "—", "rsi_1h": "—",
-                        "ema_3m": "—", "ema_5m": "—", "ema_15m": "—",
-                        "macd_3m": "—", "macd_5m": "—", "macd_15m": "—",
-                        "sar_3m": "—", "sar_5m": "—", "sar_15m": "—",
-                        "vol_ratio": "—",
-                        "pdz_zone_5m":  "—",
-                        "pdz_zone_15m": pdz_zone_15m,
-                        "pdz_zone_1h":  pdz_zone_1h,
-                        "ema_cross_12_15m": "—",
-                        "ema_cross_21_15m": "—",
-                        "atr_15m": "—",
-                        "atr_ratio": "—",
-                    },
-                }
-            # else: super cap exhausted — demote and fall through to F3-F10
-            _record_elim("super_cap_demoted", "super_cap_demoted_syms", sym)
-
-        # ── F3: PDZ 5m ────────────────────────────────────────────────────────
-        pdz_zone_5m = "—"
-        if cfg.get("use_pdz_5m", True):
-            pdz_pass_5m, pdz_zone_5m = calc_pdz_zone(m5_quick, entry_q, float(cfg.get("tp_pct", 1.2)) / 100.0)
-            if not pdz_pass_5m:
-                _record_elim("f3_pdz5m", "f3_elim_syms", sym)
-                return None
-
-        # ── F4: Quick 5m RSI (still early — before full fetch) ────────────────
-        rsi5_q = (calc_rsi_series(closes_5m_q) or [0])[-1]
-        if cfg.get("use_rsi_5m", True) and rsi5_q < cfg["rsi_5m_min"]:
-            _record_elim("f4_rsi5m", "f4_elim_syms", sym)
-            return None
-
-        # ── Stage 2: Fetch ONLY new timeframes — 3m ──────────────────────────
-        # 5m, 15m, and 1h are already fetched in Stage 1 (m5_quick, m15_quick,
-        # m1h_quick). 1h was moved to Stage 1 so Super Setup can verify the
-        # 1h Discount requirement before committing. Here we reuse that 1h
-        # data for F5 (1h RSI) — no re-fetch needed.
-        #
-        # Only 3m (EMA/MACD/SAR) is genuinely new at this stage.
-        # This cuts Stage 2 from 2 API calls per coin → 1 API call per coin.
-        _need_3m_detail = (cfg.get("use_ema_3m") or cfg.get("use_macd_3m")
-                           or cfg.get("use_sar_3m"))
-        candle_limit_3m = 80 if _need_3m_detail else 30
-
-        m3_candles = get_klines(sym, "3m", candle_limit_3m)[:-1]
-
-        # Reuse Stage 1 data for 5m / 15m / 1h — no re-fetch needed
-        m5          = m5_quick
-        m15         = m15_quick
-        m1h_candles = m1h_quick
-
-        # ── Guard: check all required timeframes have data ────────────────────
-        _missing_tf = [tf for tf, bars in (("5m", m5), ("15m", m15),
-                                            ("1h", m1h_candles), ("3m", m3_candles))
-                       if not bars]
-        if _missing_tf:
+        m5 = get_klines(sym, "5m", 50)[:-1]
+        if not m5:
             _incr_filter("f_empty_data")
-            _filter_counts["f_empty_data_syms"].append(
-                f"{sym}(no {','.join(_missing_tf)})")
+            _filter_counts["f_empty_data_syms"].append(sym)
             return None
 
-        closes_5m  = [c["close"] for c in m5]
-        closes_15m = [c["close"] for c in m15]
-        closes_3m  = [c["close"] for c in m3_candles]
-        closes_1h  = [c["close"] for c in m1h_candles]
-        entry      = _pround(m5[-1]["close"])
-
-        # ── F5: 1h RSI ────────────────────────────────────────────────────────
-        rsi1h = (calc_rsi_series(closes_1h) or [0])[-1]
-        if cfg.get("use_rsi_1h", True) and \
-                not (cfg["rsi_1h_min"] <= rsi1h <= cfg["rsi_1h_max"]):
-            _record_elim("f5_rsi1h", "f5_elim_syms", sym)
-            return None
-
-        # ── F5b: ATR(14) 15m — TP reachability filter ───────────────────────
-        # ATR is ALWAYS computed and stored in criteria so that the Difficulty
-        # column in the Open Signals table works regardless of whether the
-        # filter toggle is on or off.
-        # ratio = (TP distance %) / (ATR %)
-        # Strict: ratio ≤ 1.5  → TP within 1.5× ATR (very reachable)
-        # Normal: ratio ≤ 2.0  → TP within 2× ATR
-        # Relaxed: ratio ≤ 3.0 → TP within 3× ATR
-        atr_15m_val = None
-        atr_ratio_val = None
-        _atr_series = calc_atr(m15, 14)
-        if _atr_series and entry > 0:
-            atr_15m_val   = _atr_series[-1]
-            _tp_dist_pct  = float(cfg.get("tp_pct", 1.5))  # TP% from config
-            _atr_pct      = (atr_15m_val / entry) * 100.0
-            atr_ratio_val = (_tp_dist_pct / _atr_pct) if _atr_pct > 0 else None
-        # Only REJECT the coin when the filter is explicitly enabled
-        if cfg.get("use_atr_filter", False) and atr_ratio_val is not None:
-            _atr_thresh = {"Strict": 1.5, "Normal": 2.0, "Relaxed": 3.0}.get(
-                              cfg.get("atr_mode", "Normal"), 2.0)
-            if atr_ratio_val > _atr_thresh:
-                _record_elim("f5b_atr", "f5b_elim_syms", sym)
-                return None
-
-        # ── F6: EMA (per-timeframe tracking) ────────────────────────────────
-        ema_3m_val = ema_5m_val = ema_15m_val = None
-        if cfg.get("use_ema_3m"):
-            ema = calc_ema(closes_3m, max(2, int(cfg.get("ema_period_3m", 12))))
-            if not ema or entry < ema[-1]:
-                _record_elim("f6_ema_3m", "f6_ema_3m_elim_syms", sym)
-                return None
-            ema_3m_val = _pround(ema[-1])
-        if cfg.get("use_ema_5m"):
-            ema = calc_ema(closes_5m, max(2, int(cfg.get("ema_period_5m", 12))))
-            if not ema or entry < ema[-1]:
-                _record_elim("f6_ema_5m", "f6_ema_5m_elim_syms", sym)
-                return None
-            ema_5m_val = _pround(ema[-1])
-        if cfg.get("use_ema_15m"):
-            ema = calc_ema(closes_15m, max(2, int(cfg.get("ema_period_15m", 12))))
-            if not ema or entry < ema[-1]:
-                _record_elim("f6_ema_15m", "f6_ema_15m_elim_syms", sym)
-                return None
-            ema_15m_val = _pround(ema[-1])
-
-        # ── F7: MACD dark-green — per-timeframe independent checks ──────────
-        # Each enabled timeframe is checked in order (3m → 5m → 15m).
-        # The first failure increments that timeframe's own counter and eliminates
-        # the coin — giving the funnel an accurate per-timeframe breakdown.
-        # Uses macd_bullish_and_value so MACD is computed ONCE per timeframe
-        # — the line value for display comes back from the same call, avoiding
-        # a second calc_macd() pass that the old code did after each check.
-        macd_3m_val = macd_5m_val = macd_15m_val = None
-        _macd_3m_on  = cfg.get("use_macd_3m",  True)
-        _macd_5m_on  = cfg.get("use_macd_5m",  True)
-        _macd_15m_on = cfg.get("use_macd_15m", True)
-        if _macd_3m_on:
-            _ok_3m, _ml3 = macd_bullish_and_value(closes_3m)
-            if _ml3 is not None:
-                macd_3m_val = round(_ml3, 8)
-            if not _ok_3m:
-                _record_elim("f7_macd_3m", "f7_macd_3m_elim_syms", sym)
-                return None
-        if _macd_5m_on:
-            _ok_5m, _ml5 = macd_bullish_and_value(closes_5m)
-            if _ml5 is not None:
-                macd_5m_val = round(_ml5, 8)
-            if not _ok_5m:
-                _record_elim("f7_macd_5m", "f7_macd_5m_elim_syms", sym)
-                return None
-        if _macd_15m_on:
-            _ok_15m, _ml15 = macd_bullish_and_value(closes_15m)
-            if _ml15 is not None:
-                macd_15m_val = round(_ml15, 8)
-            if not _ok_15m:
-                _record_elim("f7_macd_15m", "f7_macd_15m_elim_syms", sym)
-                return None
-
-        # ── F8: Parabolic SAR — per-timeframe independent checks ─────────────
-        # Each enabled timeframe checked in order (3m → 5m → 15m).
-        # First failure increments that timeframe's counter and eliminates the coin.
-        sar_3m_val = sar_5m_val = sar_15m_val = None
-        _sar_3m_on  = cfg.get("use_sar_3m",  True)
-        _sar_5m_on  = cfg.get("use_sar_5m",  True)
-        _sar_15m_on = cfg.get("use_sar_15m", True)
-        if _sar_3m_on:
-            sar_3m = calc_parabolic_sar(m3_candles)
-            if not (sar_3m and sar_3m[-1][1]):
-                _record_elim("f8_sar_3m", "f8_sar_3m_elim_syms", sym)
-                return None
-            sar_3m_val = _pround(sar_3m[-1][0])
-        if _sar_5m_on:
-            sar_5m = calc_parabolic_sar(m5)
-            if not (sar_5m and sar_5m[-1][1]):
-                _record_elim("f8_sar_5m", "f8_sar_5m_elim_syms", sym)
-                return None
-            sar_5m_val = _pround(sar_5m[-1][0])
-        if _sar_15m_on:
-            sar_15m = calc_parabolic_sar(m15)
-            if not (sar_15m and sar_15m[-1][1]):
-                _record_elim("f8_sar_15m", "f8_sar_15m_elim_syms", sym)
-                return None
-            sar_15m_val = _pround(sar_15m[-1][0])
-
-        # ── F9: Volume Spike ──────────────────────────────────────────────────
-        vol_ratio = None
-        if cfg.get("use_vol_spike"):
-            lookback = max(2, int(cfg.get("vol_spike_lookback", 20)))
-            mult     = float(cfg.get("vol_spike_mult", 2.0))
-            vols_15m = [c["volume"] for c in m15]
-            if len(vols_15m) >= lookback + 1:
-                window   = vols_15m[-(lookback+1):-1]
-                avg_vol  = sum(window) / len(window)
-                if avg_vol <= 0 or vols_15m[-1] < mult * avg_vol:
-                    _record_elim("f9_vol", "f9_elim_syms", sym)
-                    return None
-                vol_ratio = round(vols_15m[-1] / avg_vol, 2) if avg_vol > 0 else None
-
-        # ── F10: 15m EMA Crossover (fast > slow) ─────────────────────────────
-        # Uses 15m candles already fetched in Stage 1 (m15/closes_15m).
-        # Coin passes only when EMA(fast) is strictly greater than EMA(slow).
-        ema_cross_12_15m_val = ema_cross_21_15m_val = None
-        if cfg.get("use_ema_cross_15m", True):
-            _fast_p = max(2, int(cfg.get("ema_cross_fast_15m", 12)))
-            _slow_p = max(_fast_p + 1, int(cfg.get("ema_cross_slow_15m", 21)))
-            ema_fast_15m = calc_ema(closes_15m, _fast_p)
-            ema_slow_15m = calc_ema(closes_15m, _slow_p)
-            if not ema_fast_15m or not ema_slow_15m or \
-                    ema_fast_15m[-1] <= ema_slow_15m[-1]:
-                _record_elim("f10_ema_cross", "f10_elim_syms", sym)
-                return None
-            ema_cross_12_15m_val = _pround(ema_fast_15m[-1])
-            ema_cross_21_15m_val = _pround(ema_slow_15m[-1])
-
-        # ── All filters passed ────────────────────────────────────────────────
+        entry   = _pround(m5[-1]["close"])
         tp      = _pround(entry * (1 + cfg["tp_pct"] / 100))
-        _lev_sl = max(1, int(cfg.get("trade_leverage", 10)))
-        sl      = (_pround(entry * (1 - 1 / _lev_sl))
-                   if cfg.get("trade_margin_mode", "isolated") == "isolated"
-                   else _pround(entry * (1 - cfg["sl_pct"] / 100)))
+        sl      = _pround(entry * (1 - cfg["sl_pct"] / 100))
         sec     = SECTORS.get(sym, "Other")
         max_lev = get_max_leverage(sym)
+
+        # ── F2/F3/F4 — Trend Cross-Confirmation (15m candles) ────────────────
+        _use_st  = bool(cfg.get("f2_supertrend", True))
+        _use_ce  = bool(cfg.get("f3_chandelier", True))
+        _use_lux = bool(cfg.get("f4_lux",        True))
+        _entry_indicators = []
+        if _use_st or _use_ce or _use_lux:
+            # [:-1] excludes the currently forming candle; [-1] = last closed bar
+            _c15 = get_klines(sym, "15m", 100)[:-1]
+            _confirmed, _entry_indicators = _check_trend_confirmation(
+                _c15, _use_st, _use_ce, _use_lux)
+            if not _confirmed:
+                _record_elim("f_trend_filter", "f_trend_filter_syms", sym)
+                return None
 
         _incr_filter("passed")
         _filter_counts["passed_syms"].append(sym)
 
-        rsi5 = (calc_rsi_series(closes_5m) or [rsi5_q])[-1]
-        criteria = {
-            "rsi_5m":       round(rsi5,  1),
-            "rsi_1h":       round(rsi1h, 1),
-            "ema_3m":       ema_3m_val  if cfg.get("use_ema_3m")    else "—",
-            "ema_5m":       ema_5m_val  if cfg.get("use_ema_5m")    else "—",
-            "ema_15m":      ema_15m_val if cfg.get("use_ema_15m")   else "—",
-            "macd_3m":      macd_3m_val  if cfg.get("use_macd_3m",  True) else "—",
-            "macd_5m":      macd_5m_val  if cfg.get("use_macd_5m",  True) else "—",
-            "macd_15m":     macd_15m_val if cfg.get("use_macd_15m", True) else "—",
-            "sar_3m":       sar_3m_val   if cfg.get("use_sar_3m",   True) else "—",
-            "sar_5m":       sar_5m_val   if cfg.get("use_sar_5m",   True) else "—",
-            "sar_15m":      sar_15m_val  if cfg.get("use_sar_15m",  True) else "—",
-            "vol_ratio":    vol_ratio    if cfg.get("use_vol_spike") else "—",
-            "pdz_zone_5m":  pdz_zone_5m  if cfg.get("use_pdz_5m",  True) else "—",
-            "pdz_zone_15m": pdz_zone_15m if cfg.get("use_pdz_15m", True) else "—",
-            "pdz_zone_1h":  pdz_zone_1h  if cfg.get("use_pdz_15m", True) else "—",
-            "ema_cross_12_15m": ema_cross_12_15m_val if cfg.get("use_ema_cross_15m", True) else "—",
-            "ema_cross_21_15m": ema_cross_21_15m_val if cfg.get("use_ema_cross_15m", True) else "—",
-            "atr_15m":          round(atr_15m_val, 8)  if atr_15m_val   is not None else "—",
-            "atr_ratio":        round(atr_ratio_val, 3) if atr_ratio_val is not None else "—",
-        }
-
         return {
-            "id":             str(uuid.uuid4())[:8],
-            "timestamp":      dubai_now().isoformat(),
-            "symbol":         sym,
-            "entry":          entry,
-            "tp":             tp,
-            "sl":             sl,
-            "sector":         sec,
-            "status":         "open",
-            "close_price":    None,
-            "close_time":     None,
-            "max_lev":        max_lev,
-            "is_super_setup": False,
-            "criteria":       criteria,
+            "id":               str(uuid.uuid4())[:8],
+            "timestamp":        dubai_now().isoformat(),
+            "symbol":           sym,
+            "entry":            entry,
+            "tp":               tp,
+            "sl":               sl,
+            "sector":           sec,
+            "status":           "open",
+            "close_price":      None,
+            "close_time":       None,
+            "max_lev":          max_lev,
+            "is_super_setup":   False,
+            "criteria":         {},
+            "entry_indicators": "+".join(_entry_indicators) if _entry_indicators else "—",
         }
 
     except Exception as _proc_exc:
@@ -2331,48 +1834,26 @@ def process(sym, cfg: dict, super_counter: dict = None, super_lock=None):
         _append_error("scan", str(_proc_exc), symbol=sym)
         return "error"
     finally:
-        # Single lock acquisition per process() call — merges all thread-local
-        # counter deltas into the shared `_filter_counts`. Runs on every
-        # return path (None, signal dict, "error").
         _flush_tl_counts()
-
-def scan(cfg: dict, super_slots_remaining: int = None, skip_symbols: set = None):
-    """Full watchlist scan. Returns (sorted_results, error_count).
-
-    super_slots_remaining — number of additional Super Setup trades this cycle
-    may open before the cap (cfg['max_super_trades']) is reached. Computed by
-    the caller (bg loop) by subtracting currently-open Super trades from the
-    configured cap. If None, defaults to the full cap (fresh state).
-
-    skip_symbols — pre-computed blacklist (SL-cooldown ∪ TP-cooldown ∪ currently
-    active). Removed from the deep-scan pool BEFORE any candle fetches so that
-    (a) no API calls are wasted on coins that will be rejected at placement
-    time, and (b) SL-cooldown-blocked coins can never consume Super slots.
-    """
+def scan(cfg: dict, skip_symbols: set = None):
+    """Full watchlist scan. Returns (sorted_results, error_count)."""
     _reset_filter_counts()
-    with _filter_lock:                          # store config used for this scan
+    with _filter_lock:
         _filter_counts["scan_cfg"] = dict(cfg)
 
-    # D — cached symbol list (one instrument API call max every 6 h)
     symbols = get_symbols_cached(cfg["watchlist"])
     with _filter_lock:
         _filter_counts["total_watchlist"] = len(symbols)
 
-    # A — bulk ticker pre-filter (1 API call → eliminates ~70 % of coins)
     tickers = get_bulk_tickers()
     if cfg.get("use_pre_filter", True):
         pre_filtered = pre_filter_by_ticker(symbols, tickers)
     else:
-        pre_filtered = list(symbols)   # pre-filter disabled — deep-scan all
+        pre_filtered = list(symbols)
     with _filter_lock:
         _filter_counts["pre_filtered_out"] = len(symbols) - len(pre_filtered)
         _filter_counts["pre_filter_passed_syms"] = list(pre_filtered)
 
-    # ── Cooldown / active blacklist ─────────────────────────────────────────
-    # Drop these BEFORE deep-scan so:
-    #   • SL-cooldown blackout is respected at the earliest possible stage
-    #   • no Super slot is consumed by a coin that would be rejected anyway
-    #   • no candle API calls are wasted fetching data for skipped coins
     skip_set = set(skip_symbols) if skip_symbols else set()
     _skipped_count = 0
     if skip_set:
@@ -2382,29 +1863,16 @@ def scan(cfg: dict, super_slots_remaining: int = None, skip_symbols: set = None)
         with _filter_lock:
             _filter_counts["skipped_pre_scan"] = _skipped_count
 
-    _removed_pre = (0 if not cfg.get('use_pre_filter', True)
-                    else _filter_counts['pre_filtered_out'])
+    _removed_pre = (0 if not cfg.get("use_pre_filter", True)
+                    else _filter_counts["pre_filtered_out"])
     _blk_tag = f", {_skipped_count} blacklisted" if skip_set else ""
     print(f"[Scan] {len(symbols)} valid symbols → "
           f"{len(pre_filtered)} after bulk pre-filter "
           f"({_removed_pre} removed{_blk_tag})")
 
-    # ── Super Setup cap coordination ─────────────────────────────────────────
-    # Shared atomic counter + lock — used by process() to decide whether a
-    # Super-eligible coin takes the shortcut or falls through to F3-F10.
-    # When slots hit 0, any further Super-eligible coin is demoted and must
-    # qualify through the normal pipeline to open as a regular trade.
-    if super_slots_remaining is None:
-        super_slots_remaining = max(0, int(cfg.get("max_super_trades", 5)))
-    super_counter = {"slots": max(0, int(super_slots_remaining))}
-    super_lock    = threading.Lock()
-
     results = []
-    # 10 outer workers — semaphore(5) caps actual concurrent HTTP requests to 5
-    # so more workers just means less idle time between coin batches, not more API pressure.
     with ThreadPoolExecutor(max_workers=10) as exe:
-        futs = [exe.submit(process, s, cfg, super_counter, super_lock)
-                for s in pre_filtered]
+        futs = [exe.submit(process, s, cfg) for s in pre_filtered]
         for f in as_completed(futs):
             r = f.result()
             if r and r != "error":
@@ -2413,7 +1881,6 @@ def scan(cfg: dict, super_slots_remaining: int = None, skip_symbols: set = None)
     with _filter_lock:
         _filter_counts["scan_completed_at"] = time.time()
     return sorted(results, key=lambda x: x["symbol"]), _filter_counts.get("errors", 0)
-
 # ─────────────────────────────────────────────────────────────────────────────
 # Open signal tracker
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2440,906 +1907,181 @@ def _parse_iso_safe(ts_str: str):
 # ─────────────────────────────────────────────────────────────────────────────
 # DCA helpers (Dollar-Cost Averaging ladder — Isolated 70% / Cross fixed 7%)
 # ─────────────────────────────────────────────────────────────────────────────
-def _init_signal_trade_snapshot(sig: dict, cfg: dict) -> None:
-    """Snapshot trade + DCA config onto a freshly-created signal.
+def _place_tp_only_order(sig: dict, cfg: dict,
+                         tp_price: float, total_contracts: int,
+                         sl_price: float = 0.0) -> str:
+    """Place a conditional TP+SL algo order on OKX (cross margin mode).
 
-    This MUST be called for every new signal the scanner adds to the log —
-    not just signals that pass through the auto-trading path — so that:
-
-      • Paper-mode / credential-less signals still carry `dca_enabled`,
-        `dca_max`, and the snapshotted drop percentages. Without this
-        snapshot, `_dca_compute_trigger` returns 0 → the Next DCA column
-        renders "—" for every open trade, and the paper-mode DCA simulator
-        has nothing to act on.
-      • `trade_usdt`, `trade_lev`, `order_margin_mode`, `demo_mode` reflect
-        what WOULD have been sent to OKX, so PnL, Margin Mode, and OKX
-        Command columns show meaningful values even without a live order.
-      • `avg_entry`, `dca_fills[0]`, `total_notional`, `original_entry` are
-        populated so DCA math works the instant a signal fires.
-
-    Idempotent-ish: the DCA fields are always (re)set to a fresh state for
-    fill 0. Callers in the auto-trade path call this AFTER overwriting
-    `entry` with the actual OKX fill price, so fill 0 reflects the real
-    execution price rather than the scanner's signal price.
-    """
-    _dca_max_snap = int(cfg.get("trade_max_dca", 0) or 0)
-    _dca_max_snap = max(0, min(6, _dca_max_snap))
-    _entry_px     = float(sig.get("entry", 0) or 0)
-    # Prefer values already set on the signal (from auto-trade path); else
-    # fall back to the current cfg so paper/no-creds signals still show
-    # what would have been used.
-    _entry_usdt   = float(sig.get("trade_usdt",
-                                  cfg.get("trade_usdt_amount", 0)) or 0)
-    _entry_lev    = int(sig.get("trade_lev",
-                                cfg.get("trade_leverage", 10)) or 10)
-    _entry_notnl  = _entry_usdt * _entry_lev if _entry_lev > 0 else 0.0
-
-    # Trade config — only set if not already populated by auto-trade path.
-    sig.setdefault("trade_usdt",        _entry_usdt)
-    sig.setdefault("trade_lev",         _entry_lev)
-    sig.setdefault("demo_mode",         bool(cfg.get("demo_mode", True)))
-    sig.setdefault("order_margin_mode",
-                   (cfg.get("trade_margin_mode", "isolated") or "isolated"))
-
-    # DCA state — always overwritten (this is the source of truth).
-    sig["dca_enabled"]    = _dca_max_snap > 0
-    sig["dca_max"]        = _dca_max_snap
-    sig["dca_count"]      = 0
-    sig["dca_iso_distance_pct"] = float(
-        cfg.get("dca_iso_distance_pct", 70.0) or 70.0
-    )
-    sig["dca_cross_drop_pct"]   = float(
-        cfg.get("dca_cross_drop_pct",   7.0)  or 7.0
-    )
-    # Snapshot the TP/SL active at entry time so the Trade History column
-    # can show the original levels on the first line, even after later DCAs
-    # have recomputed sig["tp"] / sig["sl"].
-    _entry_tp_snap = float(sig.get("tp", 0) or 0)
-    _entry_sl_snap = float(sig.get("sl", 0) or 0)
-    sig["dca_fills"]      = [{
-        "price":    _entry_px,
-        "usdt":     _entry_usdt,
-        "leverage": _entry_lev,
-        "notional": _entry_notnl,
-        "ts":       sig.get("timestamp", ""),
-        "order_id": sig.get("order_id", "") or "",
-        "dca_idx":  0,
-        "tp":       _entry_tp_snap,
-        "sl":       _entry_sl_snap,
-    }] if _entry_px > 0 else []
-    sig["avg_entry"]      = _entry_px
-    sig["total_usdt"]     = _entry_usdt
-    sig["total_notional"] = _entry_notnl
-    sig["original_entry"] = _entry_px
-    # final_sl_price is populated only after the DCA ladder is fully
-    # exhausted (dca_count == dca_max).
-    sig["final_sl_price"] = None
-
-    # ── SL distance snapshot (isolated → 1/lev; cross → sl_pct/100) ──
-    # Snapshotted at entry time so post-DCA SL recompute stays proportional
-    # to the initial SL distance even if the sidebar SL % is changed later.
-    # Formula is identical regardless of mode — the distance just differs.
-    # Post-DCA: sig["sl"] = avg_entry × (1 − sl_distance_pct).
-    _mode = (sig.get("order_margin_mode") or "isolated").strip().lower()
-    if _mode == "isolated" and _entry_lev > 0:
-        _sl_dist = 1.0 / _entry_lev
-    else:
-        _sl_dist = float(cfg.get("sl_pct", 3.0) or 3.0) / 100.0
-    # Prefer deriving from the actual entry SL if available (more accurate
-    # when entry/sl were already set by the auto-trade path with fill price).
-    if _entry_px > 0 and 0 < _entry_sl_snap < _entry_px:
-        _sl_dist = (_entry_px - _entry_sl_snap) / _entry_px
-    sig["sl_distance_pct"] = float(_sl_dist)
-
-    # ── next_dca_px: the price at which the NEXT DCA add will fire. ──
-    # Separate from sig["sl"] so sig["sl"] can always be a real stop.
-    # Recomputed on each DCA fill in _execute_dca_fill_paper / _execute_dca_fill.
-    try:
-        sig["next_dca_px"] = float(_dca_compute_trigger(sig, cfg) or 0.0)
-    except Exception:
-        sig["next_dca_px"] = 0.0
-
-
-def _migrate_legacy_signals(log: dict, cfg: dict) -> int:
-    """Backfill the DCA/trade snapshot onto pre-existing OPEN signals that
-    were created before `_init_signal_trade_snapshot` was wired into the
-    non-traded path (or before the DCA fields even existed in the schema).
-
-    Only touches signals where:
-      • status == "open"  (closed trades are historical and must not change)
-      • At least one of the DCA snapshot fields is missing / legacy —
-        specifically, `dca_fills` is empty OR `dca_enabled` is absent OR
-        `original_entry` is missing.
-
-    Uses the CURRENT sidebar config to fill in trade_usdt, trade_lev,
-    margin_mode, DCA max, and drop percentages. This is the pragmatic
-    trade-off: we can't retroactively know what the config was at the
-    moment the signal fired (it may have been different), but it's better
-    than the current state of the Next DCA column showing "—" forever.
-
-    Returns the number of signals migrated so it can be logged/reported.
-    """
-    if not log or not isinstance(log.get("signals"), list):
-        return 0
-    _n = 0
-    for _sig in log["signals"]:
-        if not isinstance(_sig, dict):
-            continue
-        if _sig.get("status") != "open":
-            continue
-        # Detect legacy / missing snapshot
-        _missing_dca = (
-            "dca_enabled" not in _sig
-            or not _sig.get("dca_fills")
-            or "original_entry" not in _sig
-        )
-        if not _missing_dca:
-            continue
-        try:
-            _init_signal_trade_snapshot(_sig, cfg)
-            # Also populate the tag that surfaces in the UI fallback paths.
-            _sig.setdefault("signal_entry", _sig.get("entry"))
-            _n += 1
-        except Exception:
-            # Never let one bad row abort the rest of the migration.
-            continue
-    return _n
-
-
-def _dca_compute_trigger(sig: dict, cfg: dict = None) -> float:
-    """Compute the next-DCA trigger price for an open signal.
-
-    Two percentages are configurable from the sidebar and snapshotted onto
-    the signal at entry time so later sidebar changes don't retroactively
-    alter already-open trades:
-
-      Isolated: `dca_iso_distance_pct` % = HOW FAR PRICE MUST DROP from
-                avg_entry toward liquidation before next DCA fires, expressed
-                as a fraction of the full entry-to-liq range.
-                10 → fires very close to entry (conservative / early).
-                80 → fires 80% of the way toward liquidation (aggressive).
-                95 → fires almost at liquidation (very aggressive).
-
-                Formula:
-                  dca_drop % = (1 / leverage) × (iso_dist / 100)
-                  DCA price  = avg_entry × (1 − dca_drop %)
-
-                Example — entry $100 · 10× → liq ≈ $90:
-                  iso_dist=10  →  drop 1%    →  DCA at $99
-                  iso_dist=50  →  drop 5%    →  DCA at $95
-                  iso_dist=80  →  drop 8%    →  DCA at $92
-                  iso_dist=95  →  drop 9.5%  →  DCA at $90.50
-
-      Cross:    `dca_cross_drop_pct` % fixed drop below blended avg (default 7%).
-                Leverage-independent.
-
-    Fallback chain for each %: sig snapshot → cfg → hardcoded default.
-    Returns 0.0 if the trigger cannot be computed.
-    """
-    avg_entry = float(sig.get("avg_entry", sig.get("entry", 0)) or 0)
-    if avg_entry <= 0:
-        return 0.0
-    mode = (sig.get("order_margin_mode") or "isolated").strip().lower()
-    lev  = int(sig.get("trade_lev", 0) or 0)
-    if lev <= 0:
-        lev = 10
-    cfg = cfg or {}
-    if mode == "isolated":
-        # sig snapshot wins; fall back to current cfg; then hardcoded 70.
-        iso_dist = float(sig.get("dca_iso_distance_pct",
-                                 cfg.get("dca_iso_distance_pct", 70.0)) or 70.0)
-        iso_dist = max(10.0, min(95.0, iso_dist))  # clamp to dropdown range
-        # iso_dist = % of the entry-to-liq range price must drop before next DCA fires.
-        # drop_pct = (1/lev) × (iso_dist/100)
-        # At 20×, iso_dist=80 → drop 4% → trigger at entry × 0.96.
-        dca_drop_pct = (1.0 / lev) * (iso_dist / 100.0)
-    else:
-        cross_drop = float(sig.get("dca_cross_drop_pct",
-                                   cfg.get("dca_cross_drop_pct", 7.0)) or 7.0)
-        cross_drop = max(0.1, min(50.0, cross_drop))  # clamp 0.1–50
-        dca_drop_pct = cross_drop / 100.0
-    return _pround(avg_entry * (1.0 - dca_drop_pct))
-
-
-def _dca_next_usdt(sig: dict) -> float:
-    """Return the USDT margin for the NEXT DCA add (doubles previous add).
-
-    Fill 0 is the original entry. DCA 1 matches the original size. Each
-    subsequent DCA doubles the prior DCA's margin:
-        DCA 1 → base
-        DCA 2 → 2× base
-        DCA 3 → 4× base
-        DCA 4 → 8× base …
-    """
-    fills = sig.get("dca_fills") or []
-    base  = float(sig.get("trade_usdt", 0) or 0)
-    if base <= 0:
-        return 0.0
-    # dca_count = number of DCAs already done (fills beyond index 0).
-    dca_count = max(0, len(fills) - 1)
-    # Next DCA index is dca_count + 1. DCA 1 = base; DCA N = base × 2^(N-1).
-    next_idx = dca_count + 1
-    return base * (2 ** (next_idx - 1))
-
-
-def place_okx_dca_order(sig: dict, cfg: dict, dca_usdt: float) -> dict:
-    """Place a DCA market-buy add on OKX using the sig's existing leverage/mode.
-
-    Does NOT touch the OCO algo order — caller is responsible for cancelling
-    the old algo and placing a new one with updated TP/SL after this returns.
-
-    Returns a dict compatible with the main order-result shape:
-      {"ordId", "sz", "status": "placed"|"error", "error",
-       "actual_entry", "ct_val", "notional", "tdMode", "is_hedge"}
+    Uses OKX's conditional order type with both tpTriggerPx and slTriggerPx
+    so the position is protected on OKX regardless of whether the portal is
+    running.  sl_price=0 falls back to TP-only (backward-compat).
+    Returns algoId on success, "" on failure (non-fatal, logged).
     """
     try:
-        sym = sig.get("symbol", "")
-        if not sym:
-            return {"ordId": "", "sz": 0, "status": "error",
-                    "error": "Missing symbol"}
-        if dca_usdt <= 0:
-            return {"ordId": "", "sz": 0, "status": "error",
-                    "error": f"Invalid DCA size: {dca_usdt}"}
-
-        lev  = int(sig.get("trade_lev", 0) or 0)
-        if lev <= 0:
-            lev = int(cfg.get("trade_leverage", 10) or 10)
-        lev  = min(lev, get_max_leverage(sym))
-        mode = (sig.get("order_margin_mode") or
-                cfg.get("trade_margin_mode", "isolated")).strip().lower()
-
-        # Current market price reference (use latest close as sizing reference)
-        ref_price = float(sig.get("latest_price",
-                                  sig.get("avg_entry",
-                                          sig.get("entry", 0))) or 0)
-        if ref_price <= 0:
-            return {"ordId": "", "sz": 0, "status": "error",
-                    "error": "No reference price for DCA sizing"}
-
-        try:
-            ct_val = _get_ct_val(sym)
-        except ValueError as _cv:
-            return {"ordId": "", "sz": 0, "status": "error",
-                    "error": f"ct_val: {_cv}"}
-        if ct_val <= 0:
-            return {"ordId": "", "sz": 0, "status": "error",
-                    "error": f"Invalid ct_val: {ct_val}"}
-
-        notional  = dca_usdt * lev
-        contracts = max(1, int(notional / (ct_val * ref_price)))
-        if contracts > 100_000:
-            return {"ordId": "", "sz": contracts, "status": "error",
-                    "error": f"DCA contract count too large ({contracts})"}
-
-        # Fetch posMode (hedge vs net) — best-effort
-        is_hedge = bool(sig.get("order_is_hedge", False))
-        try:
-            _pm_resp = _trade_get("/api/v5/account/config", {}, cfg)
-            if _pm_resp.get("code") == "0":
-                _pm = _pm_resp.get("data", [{}])[0].get("posMode", "net_mode")
-                is_hedge = (_pm == "long_short_mode")
-        except Exception:
-            pass
-
-        # Re-apply leverage (idempotent; warning-only for DCA — position already
-        # exists at its original leverage so a rejection here is non-critical)
-        try:
-            _set_leverage_okx(sym, cfg)
-        except Exception as lev_exc:
-            _append_error("trade", f"DCA set-leverage warning (non-critical): {lev_exc}",
-                          symbol=sym, endpoint="/api/v5/account/set-leverage")
-
-        order_body: dict = {
-            "instId":  _to_okx(sym),
-            "tdMode":  mode,
-            "side":    "buy",
-            "ordType": "market",
-            "sz":      str(contracts),
-        }
-        if is_hedge:
-            order_body["posSide"] = "long"
-
-        resp   = _trade_post("/api/v5/trade/order", order_body, cfg)
-        _b._bsc_last_trade_raw = {
-            "endpoint":  "/api/v5/trade/order (DCA add)",
-            "body_sent": order_body,
-            "response":  resp,
-            "is_hedge":  is_hedge,
-            "contracts": contracts,
-            "ct_val":    ct_val,
-            "dca_usdt":  dca_usdt,
-        }
-        d0     = (resp.get("data") or [{}])[0]
-        ord_id = d0.get("ordId", "")
-
-        if resp.get("code") != "0":
-            err = _okx_err(resp)
-            _append_error("trade",
-                          f"DCA {err} | body={json.dumps(order_body)} | "
-                          f"resp={json.dumps(resp)[:300]}",
-                          symbol=sym, endpoint="/api/v5/trade/order")
-            return {"ordId": "", "sz": contracts, "status": "error",
-                    "error": err, "ct_val": ct_val, "notional": notional,
-                    "tdMode": mode, "is_hedge": is_hedge}
-        if d0.get("sCode", "0") != "0":
-            err = f"DCA order: {d0.get('sCode')}: {d0.get('sMsg','')}"
-            _append_error("trade",
-                          f"{err} | body={json.dumps(order_body)}",
-                          symbol=sym, endpoint="/api/v5/trade/order")
-            return {"ordId": ord_id, "sz": contracts, "status": "error",
-                    "error": err, "ct_val": ct_val, "notional": notional,
-                    "tdMode": mode, "is_hedge": is_hedge}
-
-        # Fetch actual fill price
-        actual_entry = ref_price
-        time.sleep(0.3)
-        try:
-            fill_resp = _trade_get("/api/v5/trade/order",
-                                   {"instId": _to_okx(sym), "ordId": ord_id},
-                                   cfg)
-            if fill_resp.get("code") == "0":
-                fill_d = fill_resp.get("data", [{}])[0]
-                avg_px = float(fill_d.get("avgPx", 0) or 0)
-                if avg_px > 0:
-                    actual_entry = avg_px
-        except Exception as fill_exc:
-            _append_error("trade",
-                          f"DCA fill fetch failed: {fill_exc}",
-                          symbol=sym, endpoint="/api/v5/trade/order[GET]")
-
-        return {"ordId": ord_id, "sz": contracts,
-                "status": "placed", "error": "",
-                "actual_entry": actual_entry,
-                "ct_val": ct_val, "notional": notional,
-                "tdMode": mode, "is_hedge": is_hedge}
-
-    except Exception as exc:
-        _append_error("trade", f"DCA exception: {exc}",
-                      symbol=sig.get("symbol", ""),
-                      endpoint="/api/v5/trade/order")
-        return {"ordId": "", "sz": 0, "status": "error", "error": str(exc)}
-
-
-def _cancel_algo_best_effort(algo_id: str, sym: str, cfg: dict) -> None:
-    """Cancel an OCO algo order on OKX — log failure, never raise."""
-    if not algo_id or not sym:
-        return
-    try:
-        _trade_post("/api/v5/trade/cancel-algos",
-                    [{"algoId": algo_id, "instId": _to_okx(sym)}],
-                    cfg)
-    except Exception as exc:
-        _append_error("trade",
-                      f"cancel-algo failed for {sym} algoId={algo_id}: {exc}",
-                      symbol=sym, endpoint="/api/v5/trade/cancel-algos")
-
-
-def _place_dca_oco_algo(sig: dict, cfg: dict, new_tp: float,
-                         new_sl: float, total_contracts: int) -> str:
-    """Place a fresh OCO (TP + SL) algo on OKX after a DCA add.
-
-    Returns the new algoId, or "" on failure (non-fatal — DCA already placed).
-    """
-    try:
-        sym  = sig.get("symbol", "")
-        mode = (sig.get("order_margin_mode") or
-                cfg.get("trade_margin_mode", "isolated")).strip().lower()
+        sym      = sig.get("symbol", "")
+        mode     = (sig.get("order_margin_mode") or
+                    cfg.get("trade_margin_mode", "isolated")).strip().lower()
         is_hedge = bool(sig.get("order_is_hedge", False))
         algo_body: dict = {
-            "instId":      _to_okx(sym),
-            "tdMode":      mode,
-            "side":        "sell",
-            "ordType":     "oco",
-            "sz":          str(int(total_contracts)),
-            "tpTriggerPx": str(_pround(new_tp)),
-            "tpOrdPx":     "-1",
-            "slTriggerPx": str(_pround(new_sl)),
-            "slOrdPx":     "-1",
+            "instId":          _to_okx(sym),
+            "tdMode":          mode,
+            "side":            "sell",
+            "ordType":         "conditional",
+            "sz":              str(int(max(1, total_contracts))),
+            "tpTriggerPx":     str(_pround(tp_price)),
+            "tpTriggerPxType": "mark",   # mark price — more reliable than
+                                         # last price for low-liquidity tokens
+            "tpOrdPx":         "-1",     # market fill when TP triggers
         }
+        # Add SL to the same conditional order so OKX enforces it independently
+        # of the portal.  OKX conditional orders support both TP and SL fields
+        # simultaneously (first trigger wins and cancels the other).
+        if sl_price > 0:
+            algo_body["slTriggerPx"]     = str(_pround(sl_price))
+            algo_body["slTriggerPxType"] = "mark"
+            algo_body["slOrdPx"]         = "-1"   # market fill when SL triggers
         if is_hedge:
             algo_body["posSide"] = "long"
-        algo_resp = _trade_post("/api/v5/trade/order-algo", algo_body, cfg)
-        ad        = (algo_resp.get("data") or [{}])[0]
-        if algo_resp.get("code") != "0" or (ad.get("sCode","0") != "0" and ad.get("sCode","")):
-            err = _okx_err(algo_resp) if algo_resp.get("code") != "0" \
-                  else f"{ad.get('sCode')}: {ad.get('sMsg','')}"
-            _append_error("trade", f"DCA OCO algo failed: {err}",
+        else:
+            # Prevent oversell flipping LONG → SHORT in cross net mode.
+            # OKX caps execution at the actual position size when reduceOnly=true.
+            algo_body["reduceOnly"] = "true"
+        resp = _trade_post("/api/v5/trade/order-algo", algo_body, cfg)
+        ad   = (resp.get("data") or [{}])[0]
+        if resp.get("code") != "0" or (ad.get("sCode", "0") not in ("0", "") and ad.get("sCode")):
+            err = (_okx_err(resp) if resp.get("code") != "0"
+                   else f"{ad.get('sCode')}: {ad.get('sMsg', '')}")
+            _append_error("trade", f"TP+SL algo failed: {err}",
                           symbol=sym, endpoint="/api/v5/trade/order-algo")
             return ""
         return ad.get("algoId", "")
     except Exception as exc:
-        _append_error("trade", f"DCA OCO exception: {exc}",
+        _append_error("trade", f"TP+SL algo exception: {exc}",
                       symbol=sig.get("symbol", ""),
                       endpoint="/api/v5/trade/order-algo")
         return ""
 
 
-def _execute_dca_fill_paper(sig: dict, cfg: dict) -> bool:
-    """Paper-mode DCA fill (no OKX API calls).
 
-    Runs the SAME math as `_execute_dca_fill` — appends a synthetic fill
-    record, recomputes blended avg / total_usdt / total_notional / tp / sl,
-    increments dca_count — but skips the real market-buy order AND the
-    OCO cancel/replace. The simulated fill price is taken from the detected
-    trigger (`sig["_dca_trigger_px"]`, set by `_update_one_signal` /
-    `_watcher_update_one_signal`) so the displayed blended avg matches what
-    a live fill at market would have produced.
 
-    Used automatically whenever:
-      • auto-trading is OFF  (cfg["trade_enabled"] is False), OR
-      • the signal has no live OKX order  (no order_id — e.g. a paper-mode
-        entry that never placed a real order).
-
-    Returns True on successful simulated add, False otherwise.
-    Each paper fill record is tagged with "paper": True so the UI / logs
-    can distinguish it from real fills.
+def _check_trend_exit(candles_15m: list,
+                      use_st:  bool = True,
+                      use_ce:  bool = True,
+                      use_lux: bool = True):
+    """Return (True, ["F2","F4"]) if ANY ONE enabled indicator fired a sell
+    (trend flipped +1 → -1) on the last completed 15m candle.
+    Returns (False, []) otherwise.
     """
-    sym = sig.get("symbol", "?")
+    _enabled = sum([use_st, use_ce, use_lux])
+    if _enabled < 1 or len(candles_15m) < 50:
+        return False, []
+    st_res  = _calc_supertrend(candles_15m)      if use_st  else None
+    ce_res  = _calc_chandelier_exit(candles_15m) if use_ce  else None
+    lux_res = _calc_lux_trend(candles_15m)       if use_lux else None
+
+    def _sell_on_last(res, tkey):
+        if not res or len(res) < 2:
+            return False
+        return res[-1][tkey] == -1 and res[-2][tkey] == 1
+
+    fired = []
+    if _sell_on_last(st_res,  "trend"): fired.append("F2")
+    if _sell_on_last(ce_res,  "dir"):   fired.append("F3")
+    if _sell_on_last(lux_res, "trend"): fired.append("F4")
+
+    return (len(fired) > 0, fired)
+
+
+def _place_market_close_order(sig: dict, cfg: dict, reason: str = "trend_exit") -> bool:
+    """Place a market SELL order on OKX to close an open long position.
+
+    Uses the stored `order_sz` (contracts) from the signal.  Falls back to
+    computing contracts from trade_usdt × trade_lev / (entry × ct_val) if
+    order_sz is missing (paper trades that never hit OKX).
+
+    Returns True on success, False on any error (error is appended to log).
+    """
+    sym = sig.get("symbol", "")
     try:
-        dca_usdt = _dca_next_usdt(sig)
-        if dca_usdt <= 0:
-            sig.pop("_dca_pending", None)
+        mode     = (sig.get("order_margin_mode") or
+                    cfg.get("trade_margin_mode", "isolated")).strip().lower()
+        is_hedge = bool(sig.get("order_is_hedge", False))
+
+        # Determine contract count: prefer stored order_sz, compute as fallback
+        sz = int(sig.get("order_sz", 0) or 0)
+        if sz <= 0:
+            ct_val = _get_ct_val(sym)
+            entry  = float(sig.get("entry", 0) or 0)
+            usdt   = float(sig.get("trade_usdt", cfg.get("trade_usdt_amount", 5)) or 5)
+            lev    = int(sig.get("trade_lev",  cfg.get("trade_leverage", 10))  or 10)
+            if ct_val > 0 and entry > 0:
+                sz = max(1, int(usdt * lev / (entry * ct_val)))
+
+        if sz <= 0:
+            _append_error("trade", f"{reason}: cannot compute contract size",
+                          symbol=sym, endpoint="/api/v5/trade/order")
             return False
 
-        # Use the detected trigger price as the simulated fill — this is the
-        # price the low wick reached on the candle that flagged the trigger,
-        # which is a faithful approximation of what a market order would have
-        # filled at. Fallback: recompute the current trigger.
-        fill_px = float(sig.get("_dca_trigger_px", 0) or 0)
-        if fill_px <= 0:
-            fill_px = _dca_compute_trigger(sig, cfg)
-        if fill_px <= 0:
-            sig.pop("_dca_pending", None)
-            return False
-
-        lev = int(sig.get("trade_lev", 0) or 0)
-        if lev <= 0:
-            lev = int(cfg.get("trade_leverage", 10) or 10)
-        fill_not = dca_usdt * lev
-
-        fills = sig.get("dca_fills") or []
-        next_idx = len(fills)
-        fills.append({
-            "price":    _pround(fill_px),
-            "usdt":     dca_usdt,
-            "leverage": lev,
-            "notional": fill_not,
-            "ts":       dubai_now().isoformat(),
-            "order_id": "",
-            "dca_idx":  next_idx,
-            "paper":    True,
-        })
-        sig["dca_fills"] = fills
-
-        # Recompute blended average as notional-weighted mean of fills.
-        total_notional = 0.0
-        total_units    = 0.0
-        total_usdt     = 0.0
-        for f in fills:
-            px = float(f.get("price", 0) or 0)
-            nt = float(f.get("notional", 0) or 0)
-            ud = float(f.get("usdt", 0) or 0)
-            if px > 0 and nt > 0:
-                total_notional += nt
-                total_units    += nt / px
-                total_usdt     += ud
-        if total_units > 0:
-            avg_entry = total_notional / total_units
+        body: dict = {
+            "instId":  _to_okx(sym),
+            "tdMode":  mode,
+            "side":    "sell",
+            "ordType": "market",
+            "sz":      str(sz),
+        }
+        if is_hedge:
+            body["posSide"] = "long"
         else:
-            prices = [float(f.get("price", 0) or 0) for f in fills
-                      if float(f.get("price", 0) or 0) > 0]
-            avg_entry = (sum(prices) / len(prices)
-                         if prices else float(sig.get("avg_entry", 0) or 0))
+            body["reduceOnly"] = "true"
 
-        sig["avg_entry"]      = _pround(avg_entry)
-        sig["total_usdt"]     = total_usdt
-        sig["total_notional"] = total_notional
-        sig["dca_count"]      = next_idx
-
-        # Recompute TP from sidebar tp_pct and new blended avg
-        tp_pct = float(cfg.get("tp_pct", 1.5)) / 100.0
-        sig["tp"] = _pround(sig["avg_entry"] * (1.0 + tp_pct))
-
-        # Post-DCA SL recompute — single unified rule for ALL DCAs including
-        # the final one: sl = avg_entry × (1 − sl_distance_pct).
-        #
-        # sl_distance_pct is snapshotted at entry time:
-        #   • Isolated → 1 / leverage  (e.g. 20× = 0.05)
-        #   • Cross    → sl_pct / 100  (sidebar value)
-        #
-        # Using the same formula throughout ensures the SL always moves
-        # FURTHER from price as the blended average is pulled down by each
-        # DCA fill. The previous hardcoded −3% floor was replaced because it
-        # produced a HIGHER (tighter) SL than the normal formula for any
-        # isolated-mode trade below 33× leverage, causing the SL to jump
-        # upward after the final DCA — the opposite of intended behaviour.
-        #
-        # When the ladder is fully exhausted, final_sl_price is also set to
-        # the same value so breaches route to the DCA SL Hit table correctly.
-        # The NEXT-DCA-TRIGGER price lives in sig["next_dca_px"].
-        dca_max  = int(sig.get("dca_max", 0) or 0)
-        _sl_dist = float(sig.get("sl_distance_pct", 0.0) or 0.0)
-        if _sl_dist <= 0:
-            # Legacy fallback: derive from fills[0] (entry price and sl)
-            _f0 = (sig.get("dca_fills") or [{}])[0]
-            _p0 = float(_f0.get("price", 0) or 0)
-            _s0 = float(_f0.get("sl", 0) or 0)
-            if _p0 > 0 and 0 < _s0 < _p0:
-                _sl_dist = (_p0 - _s0) / _p0
-            else:
-                _sl_dist = float(cfg.get("sl_pct", 3.0) or 3.0) / 100.0
-        new_sl = _pround(sig["avg_entry"] * (1.0 - _sl_dist))
-        sig["sl"] = new_sl
-        if sig["dca_count"] >= dca_max:
-            # Ladder fully exhausted — mark final SL so UI routes breach
-            # to DCA SL Hit table; zero out next_dca_px (no more adds).
-            sig["final_sl_price"] = new_sl
-            sig["next_dca_px"]    = 0.0
-        else:
-            sig["final_sl_price"] = None
-            try:
-                sig["next_dca_px"] = float(_dca_compute_trigger(sig, cfg) or 0.0)
-            except Exception:
-                sig["next_dca_px"] = 0.0
-
-        # Snapshot the post-recompute Entry / TP / SL onto THIS DCA fill so
-        # the Trade History column always shows all three values for every row.
-        try:
-            fills[-1]["entry"] = float(sig.get("avg_entry", 0) or 0)
-            fills[-1]["tp"]    = float(sig.get("tp", 0) or 0)
-            fills[-1]["sl"]    = float(sig.get("sl", 0) or 0)
-        except Exception:
-            pass
-
-        # No order_id / algo_id change — paper trade has no OKX position.
-        # Mark display-level status so the UI can reflect the paper fill.
-        sig["order_status"] = "paper_filled"
-
-        sig.pop("_dca_pending", None)
-        sig.pop("_dca_trigger_px", None)
-        sig.pop("_dca_trigger_time", None)
-        return True
-
-    except Exception as exc:
-        _append_error("trade", f"Paper DCA exception: {exc}",
-                      symbol=sym, endpoint="_execute_dca_fill_paper")
-        sig.pop("_dca_pending", None)
-        return False
-
-
-def _execute_dca_fill(sig: dict, cfg: dict) -> bool:
-    """Execute one DCA add for a signal flagged with `_dca_pending=True`.
-
-    Steps:
-      1. Compute next DCA margin (doubles previous).
-      2. Place the market-buy add via place_okx_dca_order().
-      3. On success: append to dca_fills, recompute blended avg / total_usdt /
-         total_notional, increment dca_count, recompute tp & (if ladder now
-         exhausted) final_sl_price.
-      4. Cancel the prior OCO algo and place a fresh one at the new TP/SL.
-
-    Returns True on successful add, False otherwise. Clears _dca_pending.
-    """
-    sym = sig.get("symbol", "?")
-    try:
-        # ── Change 3: verify OKX still holds an open position before adding.
-        # If the position was closed externally (manual close, OCO triggered)
-        # skip the DCA, mark the signal closed, and log clearly.
-        try:
-            _pos_chk = _trade_get("/api/v5/account/positions",
-                                  {"instType": "SWAP", "instId": _to_okx(sym)},
-                                  cfg)
-            if _pos_chk.get("code") == "0":
-                _live_pos = [p for p in _pos_chk.get("data", [])
-                             if float(p.get("pos", 0) or 0) != 0]
-                if not _live_pos:
-                    _append_error(
-                        "trade",
-                        f"DCA aborted for {sym} — no open OKX position found. "
-                        f"Position may have been closed externally (manual close "
-                        f"or OCO hit). Marking signal as closed.",
-                        symbol=sym,
-                        endpoint="/api/v5/account/positions",
-                    )
-                    sig["status"]      = "sl_hit"
-                    sig["close_price"] = float(sig.get("latest_price") or
-                                               sig.get("avg_entry") or
-                                               sig.get("entry") or 0)
-                    sig["close_time"]  = dubai_now().isoformat()
-                    sig.pop("_dca_pending", None)
-                    return False
-        except Exception as _pos_exc:
-            # Position check failed — proceed with DCA rather than blocking.
+        resp = _trade_post("/api/v5/trade/order", body, cfg)
+        if resp.get("code") != "0":
             _append_error("trade",
-                          f"DCA position pre-check failed for {sym}: {_pos_exc} "
-                          f"— proceeding with DCA anyway.",
-                          symbol=sym, endpoint="/api/v5/account/positions")
-
-        dca_usdt = _dca_next_usdt(sig)
-        if dca_usdt <= 0:
-            sig.pop("_dca_pending", None)
+                          f"{reason} close failed: {_okx_err(resp)}",
+                          symbol=sym, endpoint="/api/v5/trade/order")
             return False
-
-        result = place_okx_dca_order(sig, cfg, dca_usdt)
-        if result.get("status") != "placed":
-            # Leave _dca_pending=True so the next cycle retries? For safety,
-            # clear it to avoid hammering on a structural failure. User can
-            # see the error in the error log. Add it back as True only on
-            # retryable paths; for now clear unconditionally.
-            sig.pop("_dca_pending", None)
-            sig["_dca_last_error"] = result.get("error", "")
-            return False
-
-        fill_px   = float(result.get("actual_entry", 0) or 0)
-        fill_sz   = int(result.get("sz", 0) or 0)
-        fill_not  = float(result.get("notional", 0) or 0) or (dca_usdt * int(sig.get("trade_lev", 10) or 10))
-        fill_ordid = result.get("ordId", "")
-
-        # Append fill record
-        fills = sig.get("dca_fills") or []
-        next_idx = len(fills)  # 0-based; new fill is at index next_idx
-        fills.append({
-            "price":    fill_px,
-            "usdt":     dca_usdt,
-            "leverage": int(sig.get("trade_lev", 0) or 0),
-            "notional": fill_not,
-            "ts":       dubai_now().isoformat(),
-            "order_id": fill_ordid,
-            "dca_idx":  next_idx,
-        })
-        sig["dca_fills"] = fills
-
-        # Recompute blended average as notional-weighted mean of fills.
-        # If any fill is missing notional, fall back to equal weighting.
-        total_notional = 0.0
-        total_units    = 0.0
-        total_usdt     = 0.0
-        for f in fills:
-            px = float(f.get("price", 0) or 0)
-            nt = float(f.get("notional", 0) or 0)
-            ud = float(f.get("usdt", 0) or 0)
-            if px > 0 and nt > 0:
-                total_notional += nt
-                total_units    += nt / px
-                total_usdt     += ud
-        if total_units > 0:
-            avg_entry = total_notional / total_units
-        else:
-            # Fallback: straight arithmetic mean of prices
-            prices = [float(f.get("price", 0) or 0) for f in fills
-                      if float(f.get("price", 0) or 0) > 0]
-            avg_entry = sum(prices) / len(prices) if prices else float(sig.get("avg_entry", 0) or 0)
-
-        sig["avg_entry"]      = _pround(avg_entry)
-        sig["total_usdt"]     = total_usdt
-        sig["total_notional"] = total_notional
-        sig["dca_count"]      = next_idx  # fill 0 is entry; DCA count = fills-1
-
-        # Recompute TP from sidebar tp_pct and new blended avg
-        tp_pct = float(cfg.get("tp_pct", 1.5)) / 100.0
-        new_tp = _pround(sig["avg_entry"] * (1.0 + tp_pct))
-        sig["tp"] = new_tp
-
-        # Post-DCA SL recompute — single unified rule for ALL DCAs including
-        # the final one: sl = avg_entry × (1 − sl_distance_pct).
-        #
-        # sl_distance_pct is snapshotted at entry time:
-        #   • Isolated → 1 / leverage  (e.g. 20× = 0.05)
-        #   • Cross    → sl_pct / 100  (sidebar value)
-        #
-        # Using the same formula throughout ensures the SL always moves
-        # FURTHER from price as the blended average is pulled down by each
-        # DCA fill. The previous hardcoded −3% floor was replaced because it
-        # produced a HIGHER (tighter) SL than the normal formula for any
-        # isolated-mode trade below 33× leverage, causing the SL to jump
-        # upward after the final DCA — the opposite of intended behaviour.
-        #
-        # When the ladder is fully exhausted, final_sl_price is also set to
-        # the same value so breaches route to the DCA SL Hit table correctly.
-        # The NEXT-DCA-TRIGGER price lives in sig["next_dca_px"].
-        dca_max  = int(sig.get("dca_max", 0) or 0)
-        _sl_dist = float(sig.get("sl_distance_pct", 0.0) or 0.0)
-        if _sl_dist <= 0:
-            # Legacy fallback: derive from fills[0]
-            _f0 = (sig.get("dca_fills") or [{}])[0]
-            _p0 = float(_f0.get("price", 0) or 0)
-            _s0 = float(_f0.get("sl", 0) or 0)
-            if _p0 > 0 and 0 < _s0 < _p0:
-                _sl_dist = (_p0 - _s0) / _p0
-            else:
-                _sl_dist = float(cfg.get("sl_pct", 3.0) or 3.0) / 100.0
-        new_sl = _pround(sig["avg_entry"] * (1.0 - _sl_dist))
-        sig["sl"] = new_sl
-        if sig["dca_count"] >= dca_max:
-            # Ladder fully exhausted — mark final SL so UI routes breach
-            # to DCA SL Hit table; zero out next_dca_px (no more adds).
-            sig["final_sl_price"] = new_sl
-            sig["next_dca_px"]    = 0.0
-        else:
-            sig["final_sl_price"] = None
-            try:
-                sig["next_dca_px"] = float(_dca_compute_trigger(sig, cfg) or 0.0)
-            except Exception:
-                sig["next_dca_px"] = 0.0
-
-        # Snapshot the post-recompute Entry / TP / SL onto THIS DCA fill so
-        # the Trade History column always shows all three values for every row.
-        try:
-            fills[-1]["entry"] = float(sig.get("avg_entry", 0) or 0)
-            fills[-1]["tp"]    = float(sig.get("tp", 0) or 0)
-            fills[-1]["sl"]    = float(sig.get("sl", 0) or 0)
-        except Exception:
-            pass
-
-        # Update last-order/display fields so OKX Command / Order ID reflect
-        # the newest add.
-        sig["order_id"]       = fill_ordid or sig.get("order_id", "")
-        sig["order_sz"]       = fill_sz
-        sig["order_notional"] = fill_not
-        sig["order_status"]   = "placed"
-
-        # Cancel old OCO and place fresh one at new levels, sized to the
-        # TOTAL contract count across all fills.
-        # Change 2: per-fill reconstruction — use sz where captured (fill-0
-        # now carries sz since Change 1); fall back to notional math only for
-        # fills that still lack it (pre-Change-1 open trades in the log).
-        _ct_val = float(sig.get("order_ct_val", 0) or 0)
-        total_contracts = 0
-        for f in fills:
-            _fz = int(f.get("sz", 0) or 0)
-            if _fz > 0:
-                total_contracts += _fz
-            elif _ct_val > 0:
-                _fp = float(f.get("price", 0) or 0)
-                _fn = float(f.get("notional", 0) or 0)
-                if _fp > 0 and _fn > 0:
-                    total_contracts += max(1, int(_fn / (_ct_val * _fp)))
-        if total_contracts <= 0:
-            total_contracts = fill_sz   # last-resort: latest DCA fill only
-
-        _old_algo = sig.get("algo_id", "")
-        if _old_algo:
-            _cancel_algo_best_effort(_old_algo, sym, cfg)
-        new_algo = _place_dca_oco_algo(sig, cfg, sig["tp"], sig["sl"],
-                                       total_contracts)
-        if new_algo:
-            sig["algo_id"] = new_algo
-
-        sig.pop("_dca_pending", None)
-        sig.pop("_dca_trigger_px", None)
-        sig.pop("_dca_trigger_time", None)
+        _okx_log_entry(sig, f"MARKET CLOSE ({reason.upper()})",
+                       sz=sz, mode=mode)
         return True
-
     except Exception as exc:
-        _append_error("trade", f"DCA execute exception: {exc}",
-                      symbol=sym, endpoint="_execute_dca_fill")
-        sig.pop("_dca_pending", None)
+        _append_error("trade", f"{reason} close exception: {exc}",
+                      symbol=sym, endpoint="/api/v5/trade/order")
         return False
-
 
 def _update_one_signal(sig: dict) -> None:
     """Fetch candles for a single open signal and update its status in-place.
 
     Runs inside a ThreadPoolExecutor — must not hold any locks.
     All writes go directly into the signal dict (dicts are shared references).
-
-    Any exception is logged (not silently swallowed) so TP/SL detection
-    failures become visible in the API Error Log panel.
     """
     _sym = sig.get("symbol", "?")
     try:
-        # Snapshot cfg for DCA-trigger fallback chain. `_dca_compute_trigger`
-        # prefers the sig's own snapshot fields; cfg covers legacy trades
-        # created before those fields existed.
-        with _config_lock:
-            _cfg_snap = dict(_b._bsc_cfg)
-        # Robust timestamp parsing — tolerates Z-suffixed or naive strings
-        # that may exist in older log entries.
         sig_dt    = _parse_iso_safe(sig["timestamp"])
         sig_ts_ms = int(sig_dt.timestamp() * 1000)
         candles   = get_klines(sig["symbol"], "5m", 200)
         post      = [c for c in candles if c["time"] >= sig_ts_ms]
 
-        # ── DCA branch: trade has DCA ladder + unused slots ─────────────────
-        _dca_enabled = bool(sig.get("dca_enabled", False))
-        _dca_max     = int(sig.get("dca_max", 0) or 0)
-        _dca_count   = int(sig.get("dca_count", 0) or 0)
-        _ladder_slots_left = _dca_enabled and _dca_count < _dca_max
-
-        if _ladder_slots_left:
-            # While the ladder still has unused slots the sidebar SL is
-            # IGNORED — only TP exit or a DCA trigger can act on this trade.
-            _dca_trigger_price = _dca_compute_trigger(sig, _cfg_snap)
-            # Scan candles AFTER the last fill timestamp (entry or last DCA).
-            _last_fill_ts_ms = sig_ts_ms
-            _fills = sig.get("dca_fills") or []
-            if _fills:
-                _last_fill = _fills[-1]
-                try:
-                    _last_fill_ts_ms = int(_parse_iso_safe(
-                        _last_fill.get("ts") or sig["timestamp"]
-                    ).timestamp() * 1000)
-                except Exception:
-                    _last_fill_ts_ms = sig_ts_ms
-            _post_dca = [c for c in post if c["time"] >= _last_fill_ts_ms]
-            tp_time  = None
-            dca_time = None
-            for c in _post_dca:
-                if tp_time is None and c["high"] >= sig["tp"]:
-                    tp_time = c["time"]
-                if (dca_time is None and _dca_trigger_price > 0
-                        and c["low"] <= _dca_trigger_price):
-                    dca_time = c["time"]
-            if tp_time is not None and (dca_time is None or tp_time <= dca_time):
-                # TP wins — close (DCA trade closes via TP Hit table, which
-                # is shared; table layer recognises DCA from dca_count).
-                sig.update(status="tp_hit", close_price=sig["tp"],
-                           close_time=to_dubai(datetime.fromtimestamp(
-                               tp_time/1000, tz=timezone.utc)).isoformat())
-                sig.pop("price_alert", None)
-                sig.pop("_dca_pending", None)
-            elif dca_time is not None:
-                # DCA trigger fired — main loop will place the order.
-                sig["_dca_pending"]      = True
-                sig["_dca_trigger_px"]   = _dca_trigger_price
-                sig["_dca_trigger_time"] = to_dubai(datetime.fromtimestamp(
-                    dca_time/1000, tz=timezone.utc)).isoformat()
-                # Still update latest_price / Current Status for the table.
-                if candles:
-                    latest_price = candles[-1]["close"]
-                    sig["latest_price"] = float(latest_price)
-                    _avg = float(sig.get("avg_entry",
-                                         sig.get("entry", 0)) or 0)
-                    if _avg > 0:
-                        drop_pct = (_avg - latest_price) / _avg * 100
-                        sig["price_alert"]     = drop_pct >= _PRICE_ALERT_PCT
-                        sig["price_alert_pct"] = round(drop_pct, 2)
-            else:
-                # No trigger — display-only refresh using blended avg.
-                if candles:
-                    latest_price = candles[-1]["close"]
-                    sig["latest_price"] = float(latest_price)
-                    _avg = float(sig.get("avg_entry",
-                                         sig.get("entry", 0)) or 0)
-                    if _avg > 0:
-                        drop_pct = (_avg - latest_price) / _avg * 100
-                        sig["price_alert"]     = drop_pct >= _PRICE_ALERT_PCT
-                        sig["price_alert_pct"] = round(drop_pct, 2)
-                    else:
-                        sig["price_alert"]     = False
-                        sig["price_alert_pct"] = 0.0
-            return  # DCA branch done — do not fall through to legacy logic
-
-        # ── Legacy branch (no DCA) OR DCA ladder fully exhausted ────────────
-        # When ladder is exhausted, sig["sl"] == final_sl_price
-        # (blended avg × (1 − sl_distance_pct)) and a hit routes to
-        # "dca_sl_hit" instead of "sl_hit".
-        _ladder_full = _dca_enabled and _dca_max > 0 and _dca_count >= _dca_max
         tp_time = sl_time = None
         for c in post:
             if tp_time is None and c["high"] >= sig["tp"]: tp_time = c["time"]
-            if sl_time is None and c["low"]  <= sig["sl"]: sl_time = c["time"]
+            if sl_time is None and c["low"] <= sig["sl"]:  sl_time = c["time"]
         if tp_time is not None or sl_time is not None:
             if tp_time is not None and (sl_time is None or tp_time <= sl_time):
                 sig.update(status="tp_hit", close_price=sig["tp"],
                            close_time=to_dubai(datetime.fromtimestamp(
-                               tp_time/1000, tz=timezone.utc)).isoformat())
+                               tp_time/1000, tz=timezone.utc)).isoformat(),
+                           exit_indicators="TP Hit")
                 sig.pop("price_alert", None)
             else:
-                _close_status = "dca_sl_hit" if _ladder_full else "sl_hit"
-                sig.update(status=_close_status, close_price=sig["sl"],
+                sig.update(status="sl_hit", close_price=sig["sl"],
                            close_time=to_dubai(datetime.fromtimestamp(
-                               sl_time/1000, tz=timezone.utc)).isoformat())
+                               sl_time/1000, tz=timezone.utc)).isoformat(),
+                           exit_indicators="SL Hit")
                 sig.pop("price_alert", None)
         else:
-            # Trade still open — update price-drop alert flag
             if candles:
                 latest_price = candles[-1]["close"]
-                # Use blended avg if present (post-DCA), else original entry.
-                _ref = float(sig.get("avg_entry",
-                                     sig.get("entry", 0)) or 0)
-                # Store raw latest close — used by PnL $ column (avoids the
-                # precision loss of deriving from rounded price_alert_pct).
+                _ref = float(sig.get("entry", 0) or 0)
                 sig["latest_price"] = float(latest_price)
                 if _ref > 0:
                     drop_pct = (_ref - latest_price) / _ref * 100
@@ -3349,34 +2091,45 @@ def _update_one_signal(sig: dict) -> None:
                     sig["price_alert"]     = False
                     sig["price_alert_pct"] = 0.0
 
-            # ── ATR backfill: populate atr_ratio for signals that predate ATR ──
-            # If this open signal was created before ATR computation was added,
-            # its criteria dict will have atr_ratio == "—" or missing entirely.
-            # We fetch 15m candles here (one extra call per affected signal,
-            # only done once — result is stored so subsequent cycles skip it).
-            _crit = sig.get("criteria", {})
-            _stored_ratio = _crit.get("atr_ratio", "—")
-            if _stored_ratio in (None, "—", ""):
-                try:
-                    _m15_back = get_klines(sig["symbol"], "15m", 50)
-                    _atr_back = calc_atr(_m15_back, 14)
-                    _entry_b  = float(sig.get("entry", 0) or 0)
-                    if _atr_back and _entry_b > 0:
-                        _atr_val_b  = _atr_back[-1]
-                        _atr_pct_b  = (_atr_val_b / _entry_b) * 100.0
-                        _tp_b       = float(sig.get("tp", 0) or 0)
-                        _tp_pct_b   = ((_tp_b - _entry_b) / _entry_b * 100.0) if _tp_b > 0 else None
-                        _ratio_b    = (_tp_pct_b / _atr_pct_b) if (_tp_pct_b and _atr_pct_b > 0) else None
-                        if _ratio_b is not None:
-                            _crit["atr_15m"]   = round(_atr_val_b, 8)
-                            _crit["atr_ratio"] = round(_ratio_b, 3)
-                            sig["criteria"]    = _crit
-                except Exception:
-                    pass   # best-effort — leave "—" if fetch fails
+                # ── F2/F3/F4 Trend Exit — ANY ONE bearish flip on 15m ────────
+                with _config_lock:
+                    _te_cfg = dict(_b._bsc_cfg)
+                _use_st  = bool(_te_cfg.get("f2_supertrend", True))
+                _use_ce  = bool(_te_cfg.get("f3_chandelier", True))
+                _use_lux = bool(_te_cfg.get("f4_lux",        True))
+                if _use_st or _use_ce or _use_lux:
+                    _c15 = get_klines(sig["symbol"], "15m", 100)[:-1]
+
+                    # ── Backfill entry_indicators for legacy signals ──────────
+                    # Old signals created before this field existed show "—".
+                    # Re-compute which indicators currently agree on a bullish
+                    # trend and store it so the table shows useful data.
+                    if not sig.get("entry_indicators") or sig.get("entry_indicators") == "—":
+                        _, _cur_inds = _check_trend_confirmation(
+                            _c15, _use_st, _use_ce, _use_lux)
+                        sig["entry_indicators"] = (
+                            "+".join(_cur_inds) if _cur_inds else "F2/F3/F4 unclear"
+                        )
+
+                if _te_cfg.get("use_trend_exit", True):
+                    if _use_st or _use_ce or _use_lux:
+                        _exited, _exit_inds = _check_trend_exit(
+                            _c15, _use_st, _use_ce, _use_lux)
+                        if _exited:
+                            sig.update(
+                                status          = "trend_exit",
+                                close_price     = float(latest_price),
+                                close_time      = dubai_now().isoformat(),
+                                exit_indicators = "+".join(_exit_inds) if _exit_inds else "Trend Exit",
+                            )
+                            sig.pop("price_alert", None)
+                            # Place live market close if trade is live
+                            _is_live = (bool(_te_cfg.get("trade_enabled")) and
+                                        not bool(_te_cfg.get("demo_mode", True)) and
+                                        sig.get("order_id"))
+                            if _is_live:
+                                _place_market_close_order(sig, _te_cfg, "trend_exit")
     except Exception as _upd_exc:
-        # Previously swallowed silently — surfaced now so malformed signals
-        # (bad timestamp, missing tp/sl, OKX fetch failure) become visible
-        # in the API Error Log instead of leaving trades "open" forever.
         _append_error("signal_update",
                       f"{_sym}: {type(_upd_exc).__name__}: {_upd_exc}",
                       symbol=_sym)
@@ -3401,358 +2154,8 @@ def update_open_signals(signals):
 
     return signals
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Open-Trade Watcher thread (1-minute DCA/TP checker)
-# ─────────────────────────────────────────────────────────────────────────────
-# A lightweight second loop that polls every `watcher_minutes` minutes — much
-# faster than the main scan (`loop_minutes`). It only touches OPEN signals:
-# fetches 1m candles, detects TP hits (candle high) and DCA triggers
-# (candle LOW — the wick captures fast intra-candle drops), and executes the
-# full DCA pipeline inline. The main _bg_loop skips its own open-trade update
-# while the watcher is active, so there's no double-fetch and no race.
-# ─────────────────────────────────────────────────────────────────────────────
-def _watcher_update_one_signal(sig: dict) -> None:
-    """1-minute variant of `_update_one_signal`.
-
-    Fetches 1m candles and runs the same TP / DCA / SL detection logic, but
-    anchored on the last fill timestamp rather than the original entry. Uses
-    candle LOW (wick/tail) for DCA trigger — this catches fast downward spikes
-    that never print as a close. Mutates `sig` in place.
-    """
-    _sym = sig.get("symbol", "?")
-    try:
-        # Snapshot cfg so `_dca_compute_trigger` can fall back to the live
-        # sidebar value for any signals without a per-entry snapshot.
-        with _config_lock:
-            _cfg_snap = dict(_b._bsc_cfg)
-        sig_dt    = _parse_iso_safe(sig["timestamp"])
-        sig_ts_ms = int(sig_dt.timestamp() * 1000)
-        # 1m × 120 bars ≈ 2h history — enough to catch anything missed between
-        # watcher ticks even if the thread was momentarily delayed.
-        candles   = get_klines(sig["symbol"], "1m", 120)
-        if not candles:
-            return
-        post = [c for c in candles if c["time"] >= sig_ts_ms]
-
-        _dca_enabled = bool(sig.get("dca_enabled", False))
-        _dca_max     = int(sig.get("dca_max", 0) or 0)
-        _dca_count   = int(sig.get("dca_count", 0) or 0)
-        _ladder_slots_left = _dca_enabled and _dca_count < _dca_max
-
-        if _ladder_slots_left:
-            _dca_trigger_price = _dca_compute_trigger(sig, _cfg_snap)
-            _last_fill_ts_ms = sig_ts_ms
-            _fills = sig.get("dca_fills") or []
-            if _fills:
-                _last_fill = _fills[-1]
-                try:
-                    _last_fill_ts_ms = int(_parse_iso_safe(
-                        _last_fill.get("ts") or sig["timestamp"]
-                    ).timestamp() * 1000)
-                except Exception:
-                    _last_fill_ts_ms = sig_ts_ms
-            _post_dca = [c for c in post if c["time"] >= _last_fill_ts_ms]
-            tp_time  = None
-            dca_time = None
-            for c in _post_dca:
-                if tp_time is None and c["high"] >= sig["tp"]:
-                    tp_time = c["time"]
-                if (dca_time is None and _dca_trigger_price > 0
-                        and c["low"] <= _dca_trigger_price):
-                    dca_time = c["time"]
-            if tp_time is not None and (dca_time is None or tp_time <= dca_time):
-                sig.update(status="tp_hit", close_price=sig["tp"],
-                           close_time=to_dubai(datetime.fromtimestamp(
-                               tp_time/1000, tz=timezone.utc)).isoformat())
-                sig.pop("price_alert", None)
-                sig.pop("_dca_pending", None)
-            elif dca_time is not None:
-                sig["_dca_pending"]      = True
-                sig["_dca_trigger_px"]   = _dca_trigger_price
-                sig["_dca_trigger_time"] = to_dubai(datetime.fromtimestamp(
-                    dca_time/1000, tz=timezone.utc)).isoformat()
-                if candles:
-                    latest_price = candles[-1]["close"]
-                    sig["latest_price"] = float(latest_price)
-                    _avg = float(sig.get("avg_entry",
-                                         sig.get("entry", 0)) or 0)
-                    if _avg > 0:
-                        drop_pct = (_avg - latest_price) / _avg * 100
-                        sig["price_alert"]     = drop_pct >= _PRICE_ALERT_PCT
-                        sig["price_alert_pct"] = round(drop_pct, 2)
-            else:
-                if candles:
-                    latest_price = candles[-1]["close"]
-                    sig["latest_price"] = float(latest_price)
-                    _avg = float(sig.get("avg_entry",
-                                         sig.get("entry", 0)) or 0)
-                    if _avg > 0:
-                        drop_pct = (_avg - latest_price) / _avg * 100
-                        sig["price_alert"]     = drop_pct >= _PRICE_ALERT_PCT
-                        sig["price_alert_pct"] = round(drop_pct, 2)
-                    else:
-                        sig["price_alert"]     = False
-                        sig["price_alert_pct"] = 0.0
-            return
-
-        # ── Legacy branch OR DCA ladder fully exhausted ─────────────────────
-        _ladder_full = _dca_enabled and _dca_max > 0 and _dca_count >= _dca_max
-        tp_time = sl_time = None
-        for c in post:
-            if tp_time is None and c["high"] >= sig["tp"]: tp_time = c["time"]
-            if sl_time is None and c["low"]  <= sig["sl"]: sl_time = c["time"]
-        if tp_time is not None or sl_time is not None:
-            if tp_time is not None and (sl_time is None or tp_time <= sl_time):
-                sig.update(status="tp_hit", close_price=sig["tp"],
-                           close_time=to_dubai(datetime.fromtimestamp(
-                               tp_time/1000, tz=timezone.utc)).isoformat())
-                sig.pop("price_alert", None)
-            else:
-                _close_status = "dca_sl_hit" if _ladder_full else "sl_hit"
-                sig.update(status=_close_status, close_price=sig["sl"],
-                           close_time=to_dubai(datetime.fromtimestamp(
-                               sl_time/1000, tz=timezone.utc)).isoformat())
-                sig.pop("price_alert", None)
-        else:
-            if candles:
-                latest_price = candles[-1]["close"]
-                _ref = float(sig.get("avg_entry",
-                                     sig.get("entry", 0)) or 0)
-                sig["latest_price"] = float(latest_price)
-                if _ref > 0:
-                    drop_pct = (_ref - latest_price) / _ref * 100
-                    sig["price_alert"]     = drop_pct >= _PRICE_ALERT_PCT
-                    sig["price_alert_pct"] = round(drop_pct, 2)
-                else:
-                    sig["price_alert"]     = False
-                    sig["price_alert_pct"] = 0.0
-    except Exception as _upd_exc:
-        _append_error("signal_update",
-                      f"[watcher] {_sym}: {type(_upd_exc).__name__}: {_upd_exc}",
-                      symbol=_sym)
 
 
-def _watcher_update_open_signals(signals):
-    """Parallel 1m candle fetch for all open signals."""
-    open_sigs = [s for s in signals if s["status"] == "open"]
-    if not open_sigs:
-        return signals
-    with ThreadPoolExecutor(max_workers=min(len(open_sigs), 15)) as pool:
-        futs = [pool.submit(_watcher_update_one_signal, s) for s in open_sigs]
-        for f in as_completed(futs):
-            f.result()
-    return signals
-
-
-def _okx_sync_open_signals(open_snapshot: list, cfg: dict) -> bool:
-    """Sync open signals against OKX positions-history (one API call).
-
-    For each open signal that has an order_id (live OKX trade), checks whether
-    OKX has already closed that position (TP, SL, liquidation, or manual).
-    Mutates signals in-place and returns True if any signal was updated.
-
-    Close-type mapping (OKX positions-history 'type' field):
-        2 / 4         → tp_hit    (Take-Profit / Partial TP)
-        1 / 3 / 5     → sl_hit    (Stop-Loss / Liquidation / ADL)
-        anything else → closed_okx (manually closed on OKX)
-    """
-    # Only run when auto-trading is ON and credentials are present
-    if not cfg.get("trade_enabled"):
-        return False
-    if not (cfg.get("api_key") and cfg.get("api_secret") and cfg.get("api_passphrase")):
-        return False
-
-    # Only consider signals that have a live OKX order_id
-    live_sigs = [s for s in open_snapshot
-                 if s.get("status") == "open" and s.get("order_id")]
-    if not live_sigs:
-        return False
-
-    try:
-        ph_resp = _trade_get(
-            "/api/v5/account/positions-history",
-            {"instType": "SWAP", "limit": "50"},
-            cfg,
-        )
-        if ph_resp.get("code") != "0":
-            return False
-
-        ph_data = ph_resp.get("data", [])
-        if not ph_data:
-            return False
-
-        # Build lookup: instId → list of closed position records
-        ph_by_inst: dict = {}
-        for rec in ph_data:
-            inst = rec.get("instId", "")
-            if inst:
-                ph_by_inst.setdefault(inst, []).append(rec)
-
-        _updated = False
-        _close_type_map = {
-            "2": "tp_hit",
-            "4": "tp_hit",
-            "1": "sl_hit",
-            "3": "sl_hit",
-            "5": "sl_hit",
-        }
-
-        for sig in live_sigs:
-            sym      = sig.get("symbol", "")
-            inst_id  = _to_okx(sym)   # e.g. "BTCUSDT" → "BTC-USDT-SWAP"
-            records  = ph_by_inst.get(inst_id, [])
-            if not records:
-                continue
-
-            # Parse signal entry time as ms timestamp for comparison
-            try:
-                _entry_ms = int(_parse_iso_safe(sig["timestamp"]).timestamp() * 1000)
-            except Exception:
-                _entry_ms = 0
-
-            # Find the most recent closed record AFTER this signal's entry
-            _match = None
-            for rec in records:
-                try:
-                    _rec_ms = int(rec.get("uTime", 0) or 0)
-                except Exception:
-                    _rec_ms = 0
-                if _rec_ms > _entry_ms:
-                    if _match is None or _rec_ms > int(_match.get("uTime", 0) or 0):
-                        _match = rec
-
-            if _match is None:
-                continue
-
-            # Determine new status
-            _close_type  = str(_match.get("type", ""))
-            _new_status  = _close_type_map.get(_close_type, "closed_okx")
-            _close_px    = float(_match.get("closeAvgPx", 0) or 0) or None
-            _close_ts    = ""
-            try:
-                _close_ts = to_dubai(datetime.fromtimestamp(
-                    int(_match.get("uTime", 0)) / 1000, tz=timezone.utc
-                )).isoformat()
-            except Exception:
-                pass
-
-            # Guard: only update if still open (watcher may have already closed it)
-            if sig.get("status") != "open":
-                continue
-
-            sig["status"]      = _new_status
-            sig["close_price"] = _close_px if _close_px else sig.get("tp" if _new_status == "tp_hit" else "sl")
-            sig["close_time"]  = _close_ts
-            sig.pop("price_alert", None)
-            sig.pop("_dca_pending", None)
-            _append_error(
-                "trade",
-                f"OKX sync: {sym} marked {_new_status} "
-                f"(OKX type={_close_type}, closeAvgPx={_close_px})",
-                symbol=sym,
-            )
-            _updated = True
-
-        return _updated
-
-    except Exception as _sync_exc:
-        _append_error("watcher", f"OKX sync error: {_sync_exc}")
-        return False
-
-
-def _watcher_loop():
-    """Background thread: polls open trades every `watcher_minutes`.
-
-    Skips its own work when:
-      • scanner is paused (manual or circuit breaker)
-      • watcher_minutes is 0 or >= loop_minutes (main loop handles it)
-    Otherwise fetches 1m candles, detects TP/DCA/SL, and executes DCA fills
-    inline — same pipeline the main loop uses, just on a faster interval.
-    """
-    while True:
-        try:
-            if not _scanner_running.is_set() or getattr(_b, "_bsc_sl_paused", False):
-                time.sleep(2); continue
-
-            with _config_lock:
-                cfg = dict(_b._bsc_cfg)
-
-            _watcher_min = int(cfg.get("watcher_minutes", 1) or 0)
-            _loop_min    = int(cfg.get("loop_minutes", 5) or 5)
-
-            # Watcher is only ACTIVE if it ticks faster than the main loop.
-            # Otherwise, idle — main loop does the work.
-            if _watcher_min <= 0 or _watcher_min >= _loop_min:
-                # Recheck every 10s — the user might change the sidebar value.
-                _b._bsc_watcher_event.wait(timeout=10)
-                _b._bsc_watcher_event.clear()
-                continue
-
-            t0 = time.time()
-            try:
-                with _log_lock:
-                    _open_snapshot = [s for s in _b._bsc_log["signals"]
-                                      if s.get("status") == "open"]
-                if _open_snapshot:
-                    _watcher_update_open_signals(_open_snapshot)
-
-                    # ── OKX sync: close signals whose positions OKX already closed ──
-                    # Runs one positions-history API call to catch TP/SL/manual
-                    # closures that happened on OKX but weren't detected by candles.
-                    _sync_updated = _okx_sync_open_signals(_open_snapshot, cfg)
-                    if _sync_updated:
-                        with _log_lock:
-                            save_log(_b._bsc_log)
-
-                    # Execute any DCA triggers inline. Uses the REAL fill
-                    # pipeline when auto-trading is ON and the signal has a
-                    # live OKX order to anchor to; otherwise falls through to
-                    # the PAPER simulator which runs the same math (blended
-                    # avg, tp, sl, dca_count) without any exchange calls.
-                    _dca_pending_sigs = [s for s in _open_snapshot
-                                         if s.get("_dca_pending")]
-                    if _dca_pending_sigs:
-                        for _dsig in _dca_pending_sigs:
-                            # Change 4: if live trading is ON but order_id is
-                            # missing the entry order failed — skip DCA and log
-                            # clearly rather than silently paper-simulating.
-                            if cfg.get("trade_enabled") and not _dsig.get("order_id"):
-                                _append_error(
-                                    "trade",
-                                    f"DCA skipped for {_dsig.get('symbol','?')} — "
-                                    f"trade_enabled is ON but order_id is empty. "
-                                    f"Entry order may have failed. Check Error Log.",
-                                    symbol=_dsig.get("symbol", ""),
-                                )
-                                _dsig.pop("_dca_pending", None)
-                                continue
-                            _is_paper = (not cfg.get("trade_enabled")
-                                         or not _dsig.get("order_id"))
-                            if _is_paper:
-                                _execute_dca_fill_paper(_dsig, cfg)
-                            else:
-                                _execute_dca_fill(_dsig, cfg)
-                        with _log_lock:
-                            save_log(_b._bsc_log)
-                    else:
-                        # No DCA to place — still persist closed trades
-                        # (TP/SL) if any flipped during this tick.
-                        if any(s.get("status") != "open"
-                               for s in _open_snapshot):
-                            with _log_lock:
-                                save_log(_b._bsc_log)
-            except Exception as e:
-                _append_error("watcher", str(e))
-
-            elapsed = time.time() - t0
-            _b._bsc_watcher_last_ts  = int(time.time())
-            _b._bsc_watcher_last_dur = round(elapsed, 2)
-            sleep_sec = max(0, _watcher_min * 60 - elapsed)
-            _b._bsc_watcher_event.wait(timeout=sleep_sec)
-            _b._bsc_watcher_event.clear()
-        except Exception as e:
-            _append_error("watcher", f"outer loop: {e}")
-            time.sleep(5)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -3795,52 +2198,11 @@ def _bg_loop():
             # snapshot even if the user flushes mid-cycle. Any dicts that
             # got removed from the live list won't be re-added — we only
             # mutate dict fields, never reassign the list.
-            # When the watcher is ACTIVE (ticks faster than the main loop)
-            # it takes over open-trade updates + DCA execution — skip this
-            # block entirely to avoid duplicate candle fetches & double DCA.
-            _watcher_min = int(cfg.get("watcher_minutes", 1) or 0)
-            _loop_min    = int(cfg.get("loop_minutes", 5) or 5)
-            _watcher_active = 0 < _watcher_min < _loop_min
-
             with _log_lock:
                 _open_snapshot = [s for s in _b._bsc_log["signals"]
                                   if s.get("status") == "open"]
-            if _open_snapshot and not _watcher_active:
+            if _open_snapshot:
                 update_open_signals(_open_snapshot)   # in-place dict mutations
-
-                # ── DCA execution pass ───────────────────────────────────────
-                # _update_one_signal flags any signal whose price has crossed
-                # its DCA trigger with sig["_dca_pending"] = True. We now place
-                # those DCA market orders sequentially (network I/O) under the
-                # same auto-trading gating as normal entries. Skipped entirely
-                # when auto-trading is disabled.
-                _dca_pending_sigs = [s for s in _open_snapshot
-                                     if s.get("_dca_pending")]
-                if _dca_pending_sigs:
-                    # Real fill when auto-trading is ON AND the sig has a
-                    # live OKX order_id to anchor to; otherwise paper sim.
-                    for _dsig in _dca_pending_sigs:
-                        # Change 4: if live trading is ON but order_id is
-                        # missing the entry order failed — skip DCA and log
-                        # clearly rather than silently paper-simulating.
-                        if cfg.get("trade_enabled") and not _dsig.get("order_id"):
-                            _append_error(
-                                "trade",
-                                f"DCA skipped for {_dsig.get('symbol','?')} — "
-                                f"trade_enabled is ON but order_id is empty. "
-                                f"Entry order may have failed. Check Error Log.",
-                                symbol=_dsig.get("symbol", ""),
-                            )
-                            _dsig.pop("_dca_pending", None)
-                            continue
-                        _is_paper = (not cfg.get("trade_enabled")
-                                     or not _dsig.get("order_id"))
-                        if _is_paper:
-                            _execute_dca_fill_paper(_dsig, cfg)
-                        else:
-                            _execute_dca_fill(_dsig, cfg)
-                    with _log_lock:
-                        save_log(_b._bsc_log)
 
             # ── Circuit breaker: check AFTER updating signals so newly-closed
             # sl_hit trades are counted immediately ─────────────────────────
@@ -3848,35 +2210,19 @@ def _bg_loop():
                 _b._bsc_sl_paused = True
                 continue   # halt this cycle; UI will show the resume banner
 
-            # ── Super Setup cap: count currently-open Super trades ───────────
-            # and compute how many additional Super slots are available this cycle.
-            with _log_lock:
-                _current_supers = sum(
-                    1 for s in _b._bsc_log["signals"]
-                    if s.get("status") == "open" and s.get("is_super_setup")
-                )
-            _super_cap        = max(0, int(cfg.get("max_super_trades", 5)))
-            _super_slots_left = max(0, _super_cap - _current_supers)
 
-            # ── Cooldown windows (TP — minutes; SL — hours, universal blackout) ─
-            # Compute BEFORE scan() so the skip set can be passed in and SL-cooldown
-            # coins never consume Super slots or trigger any candle fetches.
+            # ── Cooldown windows (TP — minutes; SL — hours) ─────────────────
             now_dubai   = dubai_now()
             tp_cutoff   = now_dubai - timedelta(minutes=int(cfg["cooldown_minutes"]))
             sl_cd_hours = max(1, int(cfg.get("sl_cooldown_hours", 24)))
             sl_cutoff   = now_dubai - timedelta(hours=sl_cd_hours)
 
             with _log_lock:
-                # TP cooldown — short (minutes), blocks re-entry after a TP close
                 cooled_tp = {s["symbol"] for s in _b._bsc_log["signals"]
                              if s.get("close_time")
                              and s.get("status") == "tp_hit"
                              and datetime.fromisoformat(
                                  s["close_time"].replace("Z","+00:00")) >= tp_cutoff}
-                # SL cooldown — long (hours, default 24), applies UNIVERSALLY
-                # including to Super Setups. A stopped-out coin is blacklisted
-                # for the full sl_cooldown_hours window regardless of what new
-                # setup it might qualify for.
                 cooled_sl = {s["symbol"] for s in _b._bsc_log["signals"]
                              if s.get("close_time")
                              and s.get("status") == "sl_hit"
@@ -3885,36 +2231,21 @@ def _bg_loop():
                 cooled = cooled_tp | cooled_sl
                 active = {s["symbol"] for s in _b._bsc_log["signals"] if s["status"]=="open"}
 
-            # ── Hours of operation gate ──────────────────────────────────────
-            # If the user has enabled the hours filter, skip the new-signal
-            # scan phase when we are outside the configured GST window.
-            # Open-trade monitoring (Phase 1 above + watcher thread) is NOT
-            # gated — it continues around the clock regardless of this setting.
             if cfg.get("scan_hour_enabled", False):
                 _now_h   = dubai_now().hour
                 _h_start = int(cfg.get("scan_hour_start", 0))
                 _h_end   = int(cfg.get("scan_hour_end", 23))
                 if _h_start <= _h_end:
                     _in_window = _h_start <= _now_h <= _h_end
-                else:          # window crosses midnight (e.g. 22 → 06)
+                else:
                     _in_window = _now_h >= _h_start or _now_h <= _h_end
                 if not _in_window:
-                    # Use the rescan event so a Save & Apply that changes the
-                    # window re-checks immediately rather than waiting 60 s.
-                    # If the event fires but we're still outside the window,
-                    # the next loop cycle will hit this gate again straight away.
                     _rescan_event.wait(timeout=60)
                     _rescan_event.clear()
-                    continue         # skip scan, keep loop alive
+                    continue
 
-            # Pass the full skip set (TP cooldown ∪ SL cooldown ∪ currently open)
-            # into scan() so these coins are dropped pre-deep-scan.
             _pre_scan_skip = cooled | active
-            new_sigs, errors = scan(
-                cfg,
-                super_slots_remaining=_super_slots_left,
-                skip_symbols=_pre_scan_skip,
-            )
+            new_sigs, errors = scan(cfg, skip_symbols=_pre_scan_skip)
 
             with _log_lock:
                 # ── Queue-limit check ─────────────────────────────────────────
@@ -3956,12 +2287,6 @@ def _bg_loop():
                             # queue_limit entries within the same scan batch.
                             skip.add(sig["symbol"])
                         else:
-                            # Snapshot trade + DCA config onto EVERY new signal,
-                            # regardless of whether an OKX order will be placed.
-                            # This guarantees paper-mode / credential-less signals
-                            # still carry dca_enabled / dca_max / drop % so the
-                            # Next DCA column and paper DCA simulator work.
-                            _init_signal_trade_snapshot(sig, cfg)
                             _b._bsc_log["signals"].append(sig)
                             skip.add(sig["symbol"])
                             _added_syms.append(sig["symbol"])
@@ -3998,6 +2323,12 @@ def _bg_loop():
                     sig["order_sz"]          = result.get("sz", 0)
                     sig["order_status"]      = result.get("status", "")
                     sig["order_error"]       = result.get("error", "")
+                    # ── Fix: mark failed entries so watcher excludes them ──────
+                    # Without this, order_id="" signals stay "open" forever and
+                    # hit the DCA guard every tick in Demo/Live mode, permanently
+                    # blocking DCA while paper mode works fine.
+                    if result.get("status") == "error":
+                        sig["status"] = "entry_failed"
                     sig["trade_usdt"]        = float(cfg.get("trade_usdt_amount", 0))
                     sig["trade_lev"]         = int(cfg.get("trade_leverage", 10))
                     sig["demo_mode"]         = bool(cfg.get("demo_mode", True))
@@ -4012,6 +2343,8 @@ def _bg_loop():
                         or cfg.get("trade_margin_mode", "isolated")
                     )
                     sig["order_is_hedge"]    = bool(result.get("is_hedge", False))
+                    # Cross mode TP algo id
+                    sig["tp_algo_id"]        = result.get("tp_algo_id", "")
                     # Overwrite entry/TP/SL with actual fill values if available.
                     # Market orders fill at the live price, not the signal price —
                     # the OCO algo order was placed using these corrected levels.
@@ -4020,19 +2353,43 @@ def _bg_loop():
                         sig["tp"]           = result["actual_tp"]
                         sig["sl"]           = result["actual_sl"]
                         sig["signal_entry"] = sig.get("entry")  # keep original for reference
-                    # ── DCA state (re)initialization ────────────────────────
-                    # The helper was already called once before append() with the
-                    # scanner's signal price. Now that OKX has filled and
-                    # (potentially) corrected `entry`, re-run it so fill 0 /
-                    # avg_entry / original_entry reflect the ACTUAL execution
-                    # price, and trade_usdt / trade_lev / order_margin_mode are
-                    # left as-is (setdefault preserves the values set above from
-                    # cfg / OKX result).
-                    _init_signal_trade_snapshot(sig, cfg)
-                    # ── Change 1: backfill sz into fill-0 so OCO contract
-                    # count is exact on every future DCA for this trade.
-                    if sig.get("dca_fills") and sig.get("order_sz"):
-                        sig["dca_fills"][0]["sz"] = int(sig["order_sz"])
+                    if result.get("tp_algo_id"):
+                        sig["tp_algo_id"] = result["tp_algo_id"]
+                    # ── OKX Command log — entry order ──────────────────────────
+                    _env_tag = "DEMO" if sig.get("demo_mode") else "LIVE"
+                    if result.get("status") in ("placed", "partial", "error"):
+                        _okx_log_entry(
+                            sig, f"ENTRY [{_env_tag}]",
+                            instId   = _to_okx(sig.get("symbol", "")),
+                            ordType  = "market",
+                            tdMode   = sig.get("order_margin_mode", ""),
+                            sz       = f"{sig.get('order_sz', 0)} contracts",
+                            ordId    = result.get("ordId", "—"),
+                            entry_px = result.get("actual_entry", sig.get("entry", "")),
+                            status   = result.get("status", ""),
+                        )
+                    # ── OKX Command log — TP/OCO algo ─────────────────────────
+                    _algo_placed = result.get("algoId", "") or result.get("tp_algo_id", "")
+                    if _algo_placed:
+                        _is_cross_log = (sig.get("order_margin_mode", "").strip().lower() == "cross")
+                        if _is_cross_log:
+                            _okx_log_entry(
+                                sig, f"TP ALGO [{_env_tag}]",
+                                ordType  = "conditional",
+                                tpTriggerPx = result.get("actual_tp", sig.get("tp", "")),
+                                tpTriggerPxType = "mark",
+                                algoId   = _algo_placed,
+                            )
+                        else:
+                            _okx_log_entry(
+                                sig, f"OCO ALGO [{_env_tag}]",
+                                ordType  = "oco",
+                                tpTriggerPx = result.get("actual_tp", sig.get("tp", "")),
+                                slTriggerPx = result.get("actual_sl", sig.get("sl", "")),
+                                tpTriggerPxType = "mark",
+                                slTriggerPxType = "mark",
+                                algoId   = _algo_placed,
+                            )
                 with _log_lock:
                     save_log(_b._bsc_log)
             _b._bsc_last_error = ""
@@ -4049,11 +2406,15 @@ def _ensure_scanner():
     if _b._bsc_thread is None or not _b._bsc_thread.is_alive():
         t = threading.Thread(target=_bg_loop, daemon=True, name="okx-scanner")
         t.start(); _b._bsc_thread = t
-    # ── Start/restart the 1-minute open-trade watcher thread ─────────────────
-    if _b._bsc_watcher_thread is None or not _b._bsc_watcher_thread.is_alive():
-        wt = threading.Thread(target=_watcher_loop, daemon=True,
-                              name="okx-watcher")
-        wt.start(); _b._bsc_watcher_thread = wt
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Market Condition Analyser — backend (on-demand, called from bottom of page)
+# ─────────────────────────────────────────────────────────────────────────────
+def _analyze_market_conditions(cfg: dict, symbols: list,
+                                progress_bar, status_text) -> dict:
+    """Stub — all F2-F10 filters removed."""
+    return {"recommendations": {}, "total_coins": 0, "valid_coins": 0, "errors": 0}
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # STREAMLIT UI
@@ -4072,27 +2433,27 @@ st.markdown("""
 /* ── Global base ──────────────────────────────────────────────────────────── */
 html, body, [class*="css"] {
     font-family: 'Sora', sans-serif !important;
-    color: #F9FAFB !important;
+    color: #062020 !important;
 }
 
 /* ── App background ───────────────────────────────────────────────────────── */
 .stApp {
-    background-color: #0A0F1E !important;
+    background-color: #E8F7F7 !important;
 }
 
 /* ── Sidebar ──────────────────────────────────────────────────────────────── */
 [data-testid="stSidebar"] {
-    background-color: #0D1424 !important;
-    border-right: 1px solid #C9A84C33 !important;
+    background-color: #C8EDED !important;
+    border-right: 1px solid #005F6544 !important;
 }
 [data-testid="stSidebar"] * {
-    color: #F9FAFB !important;
+    color: #062020 !important;
 }
 [data-testid="stSidebar"] .stMarkdown h2 {
-    color: #C9A84C !important;
+    color: #005F65 !important;
     font-weight: 700 !important;
     letter-spacing: 0.04em !important;
-    border-bottom: 1px solid #C9A84C55 !important;
+    border-bottom: 1px solid #005F6566 !important;
     padding-bottom: 6px !important;
 }
 
@@ -4101,35 +2462,35 @@ h1 {
     font-family: 'Sora', sans-serif !important;
     font-weight: 700 !important;
     font-size: 1.9rem !important;
-    color: #C9A84C !important;
+    color: #005F65 !important;
     letter-spacing: 0.05em !important;
-    border-bottom: 2px solid #C9A84C55 !important;
+    border-bottom: 2px solid #005F6566 !important;
     padding-bottom: 8px !important;
     margin-bottom: 12px !important;
 }
 h2, h3 {
     font-family: 'Sora', sans-serif !important;
     font-weight: 600 !important;
-    color: #F9FAFB !important;
+    color: #062020 !important;
     letter-spacing: 0.03em !important;
 }
 
 /* ── Metrics ──────────────────────────────────────────────────────────────── */
 [data-testid="stMetric"] {
-    background-color: #111827 !important;
-    border: 1px solid #C9A84C44 !important;
+    background-color: #D0EEEE !important;
+    border: 1px solid #005F6566 !important;
     border-radius: 8px !important;
     padding: 10px 14px !important;
 }
 [data-testid="stMetricLabel"] {
-    color: #C9A84C !important;
+    color: #005F65 !important;
     font-size: 0.72rem !important;
     font-weight: 600 !important;
     text-transform: uppercase !important;
     letter-spacing: 0.08em !important;
 }
 [data-testid="stMetricValue"] {
-    color: #F9FAFB !important;
+    color: #062020 !important;
     font-family: 'JetBrains Mono', monospace !important;
     font-size: 1.4rem !important;
     font-weight: 500 !important;
@@ -4137,7 +2498,7 @@ h2, h3 {
 
 /* ── Dataframes ───────────────────────────────────────────────────────────── */
 [data-testid="stDataFrame"] {
-    border: 1px solid #C9A84C33 !important;
+    border: 1px solid #005F6544 !important;
     border-radius: 8px !important;
     overflow: hidden !important;
 }
@@ -4148,9 +2509,9 @@ h2, h3 {
 
 /* ── Buttons ──────────────────────────────────────────────────────────────── */
 .stButton > button {
-    background-color: #111827 !important;
-    color: #F9FAFB !important;
-    border: 1px solid #C9A84C66 !important;
+    background-color: #D0EEEE !important;
+    color: #062020 !important;
+    border: 1px solid #005F6588 !important;
     border-radius: 6px !important;
     font-family: 'Sora', sans-serif !important;
     font-weight: 600 !important;
@@ -4159,28 +2520,28 @@ h2, h3 {
     transition: all 0.15s ease !important;
 }
 .stButton > button:hover {
-    background-color: #C9A84C !important;
-    color: #0A0F1E !important;
-    border-color: #C9A84C !important;
+    background-color: #005F65 !important;
+    color: #E8F7F7 !important;
+    border-color: #005F65 !important;
 }
 .stButton > button[kind="primary"] {
-    background-color: #C9A84C !important;
-    color: #0A0F1E !important;
-    border-color: #C9A84C !important;
+    background-color: #005F65 !important;
+    color: #E8F7F7 !important;
+    border-color: #005F65 !important;
     font-weight: 700 !important;
 }
 .stButton > button[kind="primary"]:hover {
-    background-color: #E0BE6A !important;
+    background-color: #005A60 !important;
 }
 
 /* ── Expanders ────────────────────────────────────────────────────────────── */
 [data-testid="stExpander"] {
-    background-color: #111827 !important;
-    border: 1px solid #C9A84C33 !important;
+    background-color: #D0EEEE !important;
+    border: 1px solid #005F6544 !important;
     border-radius: 8px !important;
 }
 [data-testid="stExpander"] summary {
-    color: #C9A84C !important;
+    color: #005F65 !important;
     font-weight: 600 !important;
     font-size: 0.85rem !important;
     letter-spacing: 0.03em !important;
@@ -4188,34 +2549,34 @@ h2, h3 {
 
 /* ── Dividers ─────────────────────────────────────────────────────────────── */
 hr {
-    border-color: #C9A84C33 !important;
+    border-color: #005F6544 !important;
 }
 
 /* ── Captions & info boxes ────────────────────────────────────────────────── */
 [data-testid="stCaptionContainer"] {
-    color: #9CA3AF !important;
+    color: #1E4848 !important;
     font-size: 0.74rem !important;
 }
 [data-testid="stInfo"] {
-    background-color: #111827 !important;
-    border-left: 3px solid #C9A84C !important;
-    color: #F9FAFB !important;
+    background-color: #C8EDED !important;
+    border-left: 3px solid #005F65 !important;
+    color: #062020 !important;
     border-radius: 6px !important;
 }
 [data-testid="stSuccess"] {
-    background-color: #052E16 !important;
-    border-left: 3px solid #10B981 !important;
-    color: #D1FAE5 !important;
+    background-color: #D8EED8 !important;
+    border-left: 3px solid #2E7D32 !important;
+    color: #1B4A1B !important;
 }
 [data-testid="stWarning"] {
-    background-color: #1C1508 !important;
-    border-left: 3px solid #FBBF24 !important;
-    color: #FEF3C7 !important;
+    background-color: #FFF3CD !important;
+    border-left: 3px solid #A07828 !important;
+    color: #5C4010 !important;
 }
 [data-testid="stError"] {
-    background-color: #2D0B0B !important;
-    border-left: 3px solid #F43F5E !important;
-    color: #FFE4E6 !important;
+    background-color: #FDECEA !important;
+    border-left: 3px solid #C0392B !important;
+    color: #5C1A1A !important;
 }
 
 /* ── Inputs / selects / checkboxes ───────────────────────────────────────── */
@@ -4223,57 +2584,30 @@ hr {
 [data-testid="stNumberInput"] input,
 [data-testid="stTextArea"] textarea,
 [data-testid="stSelectbox"] select {
-    background-color: #111827 !important;
-    color: #F9FAFB !important;
-    border: 1px solid #C9A84C44 !important;
+    background-color: #D8F0F0 !important;
+    color: #062020 !important;
+    border: 1px solid #005F6566 !important;
     border-radius: 6px !important;
     font-family: 'JetBrains Mono', monospace !important;
 }
 [data-testid="stCheckbox"] label {
-    color: #F9FAFB !important;
+    color: #062020 !important;
     font-size: 0.82rem !important;
 }
 
 /* ── Plotly chart backgrounds ─────────────────────────────────────────────── */
 .js-plotly-plot .plotly .bg {
-    fill: #111827 !important;
+    fill: #E8F7F7 !important;
 }
 
 /* ── Scrollbar ────────────────────────────────────────────────────────────── */
 ::-webkit-scrollbar { width: 6px; height: 6px; }
-::-webkit-scrollbar-track { background: #0A0F1E; }
-::-webkit-scrollbar-thumb { background: #C9A84C55; border-radius: 3px; }
-::-webkit-scrollbar-thumb:hover { background: #C9A84C; }
+::-webkit-scrollbar-track { background: #E8F7F7; }
+::-webkit-scrollbar-thumb { background: #005F6566; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #005F65; }
 </style>
 """, unsafe_allow_html=True)
 
-# ── Legacy-signal migration ─────────────────────────────────────────────────
-# Runs on EVERY Streamlit script execution. The internal `_missing_dca` guard
-# inside `_migrate_legacy_signals` ensures already-migrated signals are left
-# untouched (the function only rewrites signals that still lack dca_enabled /
-# dca_fills / original_entry). Running on every load means that as soon as
-# the new code is loaded — even without a full Python restart — the next
-# page view will backfill any pre-existing open signals.
-try:
-    with _log_lock, _config_lock:
-        _migrated = _migrate_legacy_signals(_b._bsc_log, _b._bsc_cfg)
-        if _migrated > 0:
-            save_log(_b._bsc_log)
-    _b._bsc_legacy_migration_last_count = _migrated
-    _b._bsc_legacy_migration_last_ts    = dubai_now().isoformat()
-    if _migrated > 0:
-        _append_error(
-            "loop",
-            f"Legacy DCA snapshot migration: backfilled {_migrated} "
-            f"open signal(s) with current sidebar DCA config.",
-        )
-except Exception as _mig_exc:
-    # Never block page render over a migration error.
-    try:
-        _append_error("loop", f"Legacy migration failed: {_mig_exc}")
-    except Exception:
-        pass
-    _b._bsc_legacy_migration_last_count = -1
 
 _ensure_scanner()
 
@@ -4385,7 +2719,8 @@ with st.sidebar:
 
     new_api_key = st.text_input(
         "API Key", value=_key_display,
-        key="cfg_api_key", disabled=not new_trade_enabled or _env_has["api_key"],
+        key="cfg_api_key", type="password",
+        disabled=not new_trade_enabled or _env_has["api_key"],
         placeholder=("Loaded from OKX_API_KEY env var" if _env_has["api_key"]
                      else "Your OKX API key"),
         help=(
@@ -4416,9 +2751,8 @@ with st.sidebar:
     # ── Size / Leverage / Margin Mode ────────────────────────────────────────
     # These fields are EDITABLE even when Auto-Trading is OFF, because they
     # drive display-only calculations too:
-    #   • Est Liquidity column    — uses leverage + margin mode
-    #   • PnL $ column        — uses size × leverage as notional
-    #   • Super / normal SL   — uses leverage to derive isolated SL (1 / lev)
+    #   • PnL $ column — uses size × leverage as notional
+    #   • Notional preview below
     # The user needs to be able to tune these to preview what a live trade
     # would look like without having to enable live trading first.
     ta1, ta2 = st.columns(2)
@@ -4442,124 +2776,16 @@ with st.sidebar:
             "Leverage applied (capped by OKX max for each coin).\n\n"
             "Used by:\n"
             "  • Live order leverage (when Auto-Trading is enabled)\n"
-            "  • Est Liquidity column — isolated liq ≈ entry × (1 − 1/lev)\n"
-            "  • PnL $ column — notional = Size × Leverage\n"
-            "  • Isolated SL level — SL = entry × (1 − 1/lev)\n\n"
+            "  • PnL $ column — notional = Size × Leverage\n\n"
             "Editable whether or not Auto-Trading is enabled."
         ))
-    new_margin_mode = st.selectbox(
-        "Margin Mode", ["isolated", "cross"],
-        index=0 if _snap_cfg.get("trade_margin_mode", "isolated") == "isolated" else 1,
-        key="cfg_margin_mode",
-        help=(
-            "Margin mode for futures positions.\n\n"
-            "  • isolated — each position uses its own collateral; SL is "
-            "pinned at the liquidation price (1/leverage below entry). "
-            "Est Liquidity column shows the per-trade liq price.\n"
-            "  • cross    — positions share account equity as collateral; SL "
-            "uses the configured SL %. Est Liquidity column shows '—'.\n\n"
-            "Editable whether or not Auto-Trading is enabled — affects display "
-            "columns (Est Liquidity) and SL placement logic."
-        ))
-
-    # ── Max DCA per Trade ─────────────────────────────────────────────────────
-    # Dropdown (0-6). Doubling ladder; each add placed as a real market order.
-    # Trigger math differs for isolated vs cross — see DEFAULT_CONFIG docstring.
-    _dca_opts = [0, 1, 2, 3, 4, 5, 6]
-    _cur_dca  = int(_snap_cfg.get("trade_max_dca", 1))
-    if _cur_dca not in _dca_opts:
-        _cur_dca = 1
-    new_trade_max_dca = st.selectbox(
-        "Max DCA per Trade", _dca_opts,
-        index=_dca_opts.index(_cur_dca),
-        key="cfg_trade_max_dca",
-        help=(
-            "How many automated DCA (Dollar-Cost Averaging) adds are allowed "
-            "per trade.\n\n"
-            "  • 0 — DCA OFF. Legacy behavior: sidebar TP/SL apply as usual.\n"
-            "  • 1-6 — Allow up to N DCA adds. Each DCA doubles the previous "
-            "add's margin (base → base → 2× → 4× → 8× …).\n\n"
-            "Trigger:\n"
-            "  • Isolated — DCA fires at 70% of the distance from blended "
-            "average to current liquidation price.\n"
-            "  • Cross — DCA fires at −7% below the current blended average.\n\n"
-            "After N DCAs are consumed, the final SL sits at −3% below the "
-            "blended average. Such closures route to the dedicated DCA SL Hit "
-            "table. When DCA > 0 the sidebar SL % is IGNORED; only TP or the "
-            "final −3% rule can close the position.\n\n"
-            "Editable whether or not Auto-Trading is enabled."
-        ))
-
-    # ── DCA trigger drop percentages ─────────────────────────────────────────
-    # Two fields, shown based on margin mode. Both are snapshotted onto the
-    # signal at entry time so sidebar changes don't retroactively alter
-    # already-open trades.
-    if new_margin_mode == "isolated":
-        # Fixed dropdown — % distance FROM liquidation price toward entry.
-        # 10% = DCA fires close to liquidation (aggressive); 95% = fires
-        # very close to entry (conservative).
-        _iso_options = list(range(10, 100, 5))  # 10, 15, …, 95
-        _cur_iso_pct = float(_snap_cfg.get("dca_iso_distance_pct", 70.0) or 70.0)
-        # Snap the saved value to the nearest dropdown option so the widget
-        # can always render (free-input legacy values get normalized).
-        _cur_iso_int = int(round(_cur_iso_pct / 5.0) * 5)
-        _cur_iso_int = max(10, min(95, _cur_iso_int))
-        try:
-            _cur_iso_idx = _iso_options.index(_cur_iso_int)
-        except ValueError:
-            _cur_iso_idx = _iso_options.index(70)
-        new_dca_iso_distance_pct = float(st.selectbox(
-            "DCA Trigger — Isolated (% distance from liquidation)",
-            options=_iso_options,
-            index=_cur_iso_idx,
-            format_func=lambda v: f"{v}%",
-            key="cfg_dca_iso_distance_pct",
-            help=(
-                "Only applies when Max DCA > 0 AND Margin Mode = Isolated.\n\n"
-                "Meaning: DCA fires at the chosen % DISTANCE ABOVE the "
-                "liquidation price (toward entry). Lower % = closer to "
-                "liquidation (aggressive — you sit deep in the hole before "
-                "averaging). Higher % = closer to entry (conservative — "
-                "average down quickly on small drawdowns).\n\n"
-                "Formula:\n"
-                "  dca_drop %  = (1 / leverage) × (1 − chosen_pct / 100)\n"
-                "  DCA price   = entry × (1 − dca_drop %)\n\n"
-                "Example — Entry $100, 10× leverage → liquidation ≈ $90:\n"
-                "  • 10% → DCA fires at $91   (10% above liq, toward entry)\n"
-                "  • 50% → DCA fires at $95   (midpoint)\n"
-                "  • 70% → DCA fires at $97   (70% above liq, toward entry)\n"
-                "  • 95% → DCA fires at $99.50 (very close to entry)\n\n"
-                "The chosen value is snapshotted onto each signal at entry "
-                "time, so changing it later does not retroactively move the "
-                "trigger on already-open trades."
-            )))
-        new_dca_cross_drop_pct = float(_snap_cfg.get("dca_cross_drop_pct", 7.0) or 7.0)
-    else:
-        _cur_cross_pct = float(_snap_cfg.get("dca_cross_drop_pct", 7.0) or 7.0)
-        _cur_cross_pct = max(0.1, min(50.0, _cur_cross_pct))
-        new_dca_cross_drop_pct = st.number_input(
-            "DCA Trigger — Cross (% fixed drop below avg)",
-            min_value=0.1, max_value=50.0,
-            value=float(_cur_cross_pct), step=0.5,
-            key="cfg_dca_cross_drop_pct",
-            help=(
-                "Only applies when Max DCA > 0 AND Margin Mode = Cross.\n\n"
-                "DCA fires at a fixed percentage drop below the current "
-                "blended average entry. Default 7%.\n\n"
-                "Example: avg entry $100, drop % = 7 → DCA triggers at $93. "
-                "After the fill, the next DCA uses the new (lower) blended "
-                "avg × (1 - drop%) as its trigger.\n\n"
-                "Higher values = wait for a deeper drawdown before adding."
-            ))
-        new_dca_iso_distance_pct = float(_snap_cfg.get("dca_iso_distance_pct", 70.0) or 70.0)
+    new_margin_mode = "cross"
+    st.info("🔒 **Margin Mode: Cross** — all trades use cross margin only.")
 
     # Notional preview — always shown (even when Auto-Trading is off) so the
     # user can see the effective trade size driven by Size × Leverage.
-    notional_usdt = new_trade_usdt * new_trade_lev
-    _liq_pct_cap  = round(100 / new_trade_lev, 2) if new_trade_lev > 0 else 0
-    _sl_caption   = (f"SL @ liq ~{_liq_pct_cap:.1f}% below entry"
-                     if new_margin_mode == "isolated"
-                     else f"SL -${notional_usdt * _snap_cfg.get('sl_pct',3.0)/100:.2f}")
+    notional_usdt   = new_trade_usdt * new_trade_lev
+    _sl_caption     = f"SL -${notional_usdt * _snap_cfg.get('sl_pct', 3.0) / 100:.2f}"
     _preview_prefix = "📐" if new_trade_enabled else "📐 *(preview)*"
     st.caption(f"{_preview_prefix} Notional per trade: ~${notional_usdt:,.0f} USDT   "
                f"| TP +${notional_usdt * _snap_cfg.get('tp_pct',1.5)/100:.2f}   "
@@ -4688,25 +2914,14 @@ with st.sidebar:
 
     st.markdown("**📊 Trade Settings**")
     c1, c2 = st.columns(2)
-    new_tp = c1.number_input("TP %", min_value=0.1, max_value=20.0, step=0.1, value=float(_snap_cfg["tp_pct"]),    key="cfg_tp")
-    _isolated_active = _snap_cfg.get("trade_margin_mode", "isolated") == "isolated"
+    new_tp = c1.number_input("TP %", min_value=0.1, max_value=20.0, step=0.1, value=float(_snap_cfg.get("tp_pct", 1.5)),    key="cfg_tp")
     new_sl = c2.number_input(
-        "SL % (Cross only)", min_value=0.1, max_value=20.0, step=0.1,
-        value=float(_snap_cfg["sl_pct"]), key="cfg_sl",
-        disabled=_isolated_active,
+        "SL %", min_value=0.1, max_value=20.0, step=0.1,
+        value=float(_snap_cfg.get("sl_pct", 3.0)), key="cfg_sl",
         help=(
-            "Applies only to CROSS margin trades.\n\n"
-            "• Cross mode → SL = entry × (1 − SL%/100). "
-            "After each DCA, SL = blended_avg × (1 − SL%/100), "
-            "so the stop moves down with the new average.\n\n"
-            "• Isolated mode → SL is pinned to the liquidation price "
-            "(entry × (1 − 1/leverage)). This field is ignored. "
-            "After each DCA, SL = blended_avg × (1 − 1/leverage), "
-            "which equals the NEW liquidation of the averaged position.\n\n"
-            "Final DCA rule (both modes): once the ladder is fully "
-            "consumed, SL continues using the same formula as all earlier "
-            "DCAs (blended_avg × (1 − sl_distance_pct)) and a breach "
-            "routes the trade into the DCA SL Hit table."
+            "Stop-loss distance from entry.\n\n"
+            "SL = entry × (1 − SL%/100).\n\n"
+            "All trades use cross margin — this SL is always active as a safety net."
         )
     )
     st.divider()
@@ -4727,224 +2942,70 @@ with st.sidebar:
         st.caption("✅ Vol ≥ 100k USDT · Price ≥ 24h Low × 1.005")
     st.divider()
 
-    # ── F2: PDZ 15m ────────────────────────────────────────────────────────────
-    st.markdown("**🎯 F2 — PDZ Zones** (15m)")
-    new_use_pdz_15m = st.checkbox(
-        "Enable F2 — PDZ Filter (15m)",
-        value=bool(_snap_cfg.get("use_pdz_15m", True)), key="cfg_use_pdz_15m",
+    # ── F2/F3/F4: Trend Cross-Confirmation (15m) ──────────────────────────────
+    st.markdown(
+        "**📈 F2/F3/F4 — Trend Cross-Confirmation (15m)**",
         help=(
-            "F2 — Premium / Discount / Equilibrium Zone Filter (15m)\n\n"
-            "Same DZSAFM zone logic as F3, applied to last 50 × 15m candles.\n\n"
-            "Passing both F3 (5m) and F2 (15m) confirms the coin is in a\n"
-            "favourable Smart Money zone on both timeframes simultaneously.\n\n"
-            "✅ Qualifies: Discount zone · Band A/B with ≥1.5% room to next zone\n"
-            "❌ Rejected:  Equilibrium (indecision) · Premium (no upward room)"
-        ))
-    if new_use_pdz_15m:
-        st.caption("✅ Discount · BandA(≥1.5%↓Premium) · BandB(≥1.5%↓Equilibrium) | ❌ Premium · Equilibrium")
-    st.divider()
-
-    # ── F3: PDZ 5m ─────────────────────────────────────────────────────────────
-    st.markdown("**🎯 F3 — PDZ Zones** (5m)")
-    new_use_pdz_5m = st.checkbox(
-        "Enable F3 — PDZ Filter (5m)",
-        value=bool(_snap_cfg.get("use_pdz_5m", True)), key="cfg_use_pdz_5m",
-        help=(
-            "F3 — Premium / Discount / Equilibrium Zone Filter (5m)\n\n"
-            "DZSAFM Smart Money zones on last 50 × 5m candles.\n"
-            "Zones from swing High (H) and Low (L):\n"
-            "  Premium bottom = 0.95×H + 0.05×L\n"
-            "  Equilibrium    = middle band around midpoint\n"
-            "  Discount top   = 0.05×H + 0.95×L\n\n"
-            "✅ Qualifies: Discount zone · Band A/B with ≥1.5% room to next zone\n"
-            "❌ Rejected:  Equilibrium (indecision) · Premium (no upward room)"
-        ))
-    if new_use_pdz_5m:
-        st.caption("✅ Discount · BandA(≥1.5%↓Premium) · BandB(≥1.5%↓Equilibrium) | ❌ Premium · Equilibrium")
-    st.divider()
-
-    # ── F4: 5m RSI ─────────────────────────────────────────────────────────────
-    st.markdown("**📈 F4 — 5m RSI**")
-    new_use_rsi_5m = st.checkbox(
-        "Enable F4 — 5m RSI",
-        value=bool(_snap_cfg.get("use_rsi_5m", True)), key="cfg_use_rsi_5m",
-        help=(
-            "F4 — 5-Minute RSI Filter\n\n"
-            "RSI(14) on the last 50 × 5m candles must be ≥ the minimum threshold.\n"
-            "This is a fast Stage-1 exit — coins failing here skip all further fetches.\n\n"
-            "A low RSI signals weak short-term momentum — not suitable for a long entry."
-        ))
-    new_rsi5_min = st.number_input("5m RSI min", min_value=0, max_value=100, step=1,
-                                    value=int(_snap_cfg["rsi_5m_min"]), key="cfg_rsi5",
-                                    disabled=not new_use_rsi_5m)
-    st.divider()
-
-    # ── F5: 1h RSI ─────────────────────────────────────────────────────────────
-    st.markdown("**📈 F5 — 1h RSI**")
-    new_use_rsi_1h = st.checkbox(
-        "Enable F5 — 1h RSI",
-        value=bool(_snap_cfg.get("use_rsi_1h", True)), key="cfg_use_rsi_1h",
-        help=(
-            "F5 — 1-Hour RSI Filter\n\n"
-            "RSI(14) on the 1h timeframe must fall within the Min–Max band.\n\n"
-            "Min: ensures real hourly momentum exists (coin is not dead).\n"
-            "Max: avoids entries when the coin is already overbought on the higher timeframe."
-        ))
-    c3, c4 = st.columns(2)
-    new_rsi1h_min = c3.number_input("1h min", min_value=0, max_value=100, step=1,
-                                     value=int(_snap_cfg["rsi_1h_min"]), key="cfg_rsi1h_min",
-                                     disabled=not new_use_rsi_1h)
-    new_rsi1h_max = c4.number_input("1h max", min_value=0, max_value=100, step=1,
-                                     value=int(_snap_cfg["rsi_1h_max"]), key="cfg_rsi1h_max",
-                                     disabled=not new_use_rsi_1h)
-    st.divider()
-
-    # ── F5b: ATR(14) 15m TP-Reachability Filter ────────────────────────────────
-    st.markdown("**📐 F5b — ATR Filter** (15m TP reachability)",
-                help=(
-                    "F5b — ATR(14) TP-Reachability Filter\n\n"
-                    "Rejects coins whose TP target is too far relative to the current "
-                    "Average True Range (ATR) on the 15m timeframe.\n\n"
-                    "Formula: ratio = TP% / ATR%\n\n"
-                    "  • Strict  (≤1.5×) — TP must be within 1.5× the ATR. "
-                    "Only coins where the market regularly moves at least TP/1.5 per candle pass.\n"
-                    "  • Normal  (≤2.0×) — TP within 2× ATR. Balanced setting.\n"
-                    "  • Relaxed (≤3.0×) — TP within 3× ATR. Accepts coins with lower volatility.\n\n"
-                    "A higher ratio means TP is harder to reach given current market movement. "
-                    "ATR is computed on 15m candles (already fetched) — no extra API call."
-                ))
-    new_use_atr_filter = st.checkbox(
-        "Enable F5b — ATR Filter",
-        value=bool(_snap_cfg.get("use_atr_filter", False)), key="cfg_use_atr_filter")
-    new_atr_mode = st.selectbox(
-        "ATR Mode",
-        options=["Strict", "Normal", "Relaxed"],
-        index=["Strict", "Normal", "Relaxed"].index(_snap_cfg.get("atr_mode", "Normal")),
-        key="cfg_atr_mode",
-        disabled=not new_use_atr_filter,
-        help="Strict=ratio≤1.5  ·  Normal=ratio≤2.0  ·  Relaxed=ratio≤3.0")
-    _atr_thresh_disp = {"Strict": "≤1.5×", "Normal": "≤2.0×", "Relaxed": "≤3.0×"}.get(new_atr_mode, "≤2.0×")
-    if new_use_atr_filter:
-        st.caption(f"✅ ATR filter ON — {new_atr_mode} mode: TP%/ATR% {_atr_thresh_disp}")
-    else:
-        st.caption("⚫ ATR filter disabled")
-    st.divider()
-
-    # ── F6: EMA Selection ──────────────────────────────────────────────────────
-    st.markdown("**📉 F6 — EMA Selection** (price must be above EMA)",
-                help=(
-                    "F6 — EMA Selection Filter\n\n"
-                    "Entry price must be ABOVE the chosen EMA on each enabled timeframe.\n"
-                    "Being above the EMA confirms the short-term trend is bullish.\n\n"
-                    "Each timeframe (3m, 5m, 15m) is independently toggleable.\n"
-                    "Default EMA period: 12. Adjust per timeframe using the number input."
-                ))
-    ea1, ea2 = st.columns([1,2])
-    new_use_ema_3m    = ea1.checkbox("3m EMA", value=bool(_snap_cfg.get("use_ema_3m",False)), key="cfg_use_ema_3m")
-    new_ema_period_3m = ea2.number_input("P##3m", min_value=2, max_value=500, step=1,
-                                         value=int(_snap_cfg.get("ema_period_3m",12)),
-                                         key="cfg_ema_period_3m", disabled=not new_use_ema_3m,
-                                         label_visibility="collapsed")
-    eb1, eb2 = st.columns([1,2])
-    new_use_ema_5m    = eb1.checkbox("5m EMA", value=bool(_snap_cfg.get("use_ema_5m",True)), key="cfg_use_ema_5m")
-    new_ema_period_5m = eb2.number_input("P##5m", min_value=2, max_value=500, step=1,
-                                         value=int(_snap_cfg.get("ema_period_5m",12)),
-                                         key="cfg_ema_period_5m", disabled=not new_use_ema_5m,
-                                         label_visibility="collapsed")
-    ec1, ec2 = st.columns([1,2])
-    new_use_ema_15m    = ec1.checkbox("15m EMA", value=bool(_snap_cfg.get("use_ema_15m",True)), key="cfg_use_ema_15m")
-    new_ema_period_15m = ec2.number_input("P##15m", min_value=2, max_value=500, step=1,
-                                          value=int(_snap_cfg.get("ema_period_15m",12)),
-                                          key="cfg_ema_period_15m", disabled=not new_use_ema_15m,
-                                          label_visibility="collapsed")
-    st.divider()
-
-    # ── F7: MACD ───────────────────────────────────────────────────────────────
-    _macd_help = (
-        "F7 — MACD Dark Green Histogram Filter\n\n"
-        "Each timeframe is checked independently. Enable only the timeframes you want.\n\n"
-        "For each enabled timeframe ALL of the following must be true:\n"
-        "  • MACD line > 0\n"
-        "  • Signal line > 0\n"
-        "  • Histogram > 0 AND increasing (dark green — not fading)\n"
-        "  • Bullish crossover within the last 12 candles"
+            "Cross-confirms a new entry using three ATR-band trend indicators "
+            "computed on 15m candles (separate from the 5m entry candle).\n\n"
+            "Rule: at least 2 of the 3 enabled indicators must have fired a "
+            "buySignal (trend flipped -1 to +1) within the last 2 completed 15m "
+            "candles.\n\n"
+            "F2 SuperTrend — ATR 10, mult 3.0  (most reactive)\n"
+            "F3 Chandelier Exit — ATR 22, mult 3.0  (close-anchored, stable)\n"
+            "F4 Lux Trend — ATR 14, mult 2.0  (intermediate sensitivity)\n\n"
+            "If fewer than 2 indicators are enabled the filter is bypassed."
+        )
     )
-    st.markdown("**📊 F7 — MACD** (dark 🟢 histogram — per timeframe)", help=_macd_help)
-    fm1, fm2, fm3 = st.columns(3)
-    new_use_macd_3m  = fm1.checkbox("3m MACD",  value=bool(_snap_cfg.get("use_macd_3m",  True)), key="cfg_use_macd_3m")
-    new_use_macd_5m  = fm2.checkbox("5m MACD",  value=bool(_snap_cfg.get("use_macd_5m",  True)), key="cfg_use_macd_5m")
-    new_use_macd_15m = fm3.checkbox("15m MACD", value=bool(_snap_cfg.get("use_macd_15m", True)), key="cfg_use_macd_15m")
-    _macd_on_tfs = [tf for tf, on in [("3m", new_use_macd_3m), ("5m", new_use_macd_5m), ("15m", new_use_macd_15m)] if on]
-    if _macd_on_tfs:
-        st.caption(f"✅ Checking MACD on: {' · '.join(_macd_on_tfs)}  |  MACD>0 · Signal>0 · Histogram 🟢↑ · Crossover ≤12")
-    else:
-        st.caption("⚫ MACD filter disabled (all timeframes off)")
-    st.divider()
-
-    # ── F8: Parabolic SAR ──────────────────────────────────────────────────────
-    _sar_help = (
-        "F8 — Parabolic SAR Filter\n\n"
-        "Each timeframe is checked independently. Enable only the timeframes you want.\n\n"
-        "For each enabled timeframe:\n"
-        "  SAR must be positioned BELOW current price (bullish mode).\n"
-        "  SAR above price = bearish trend → coin rejected on that timeframe."
+    new_f2_st = st.checkbox(
+        "F2 — SuperTrend",
+        value=bool(_snap_cfg.get("f2_supertrend", True)), key="cfg_f2_st",
     )
-    st.markdown("**🪂 F8 — Parabolic SAR** (per timeframe)", help=_sar_help)
-    fs1, fs2, fs3 = st.columns(3)
-    new_use_sar_3m  = fs1.checkbox("3m SAR",  value=bool(_snap_cfg.get("use_sar_3m",  True)), key="cfg_use_sar_3m")
-    new_use_sar_5m  = fs2.checkbox("5m SAR",  value=bool(_snap_cfg.get("use_sar_5m",  True)), key="cfg_use_sar_5m")
-    new_use_sar_15m = fs3.checkbox("15m SAR", value=bool(_snap_cfg.get("use_sar_15m", True)), key="cfg_use_sar_15m")
-    _sar_on_tfs = [tf for tf, on in [("3m", new_use_sar_3m), ("5m", new_use_sar_5m), ("15m", new_use_sar_15m)] if on]
-    if _sar_on_tfs:
-        st.caption(f"✅ Checking SAR on: {' · '.join(_sar_on_tfs)}  |  SAR must be below price (bullish)")
+    st.caption("ATR 10, mult 3.0 — trend flip signal using hl2 source.")
+    new_f3_ce = st.checkbox(
+        "F3 — Chandelier Exit",
+        value=bool(_snap_cfg.get("f3_chandelier", True)), key="cfg_f3_ce",
+    )
+    st.caption("ATR 22, mult 3.0 — close-anchored, slower & more stable.")
+    new_f4_lux = st.checkbox(
+        "F4 — Lux Trend",
+        value=bool(_snap_cfg.get("f4_lux", True)), key="cfg_f4_lux",
+    )
+    st.caption("ATR 14, mult 2.0 — intermediate sensitivity between F2 and F3.")
+    _n_tf_enabled = sum([new_f2_st, new_f3_ce, new_f4_lux])
+    if _n_tf_enabled >= 2:
+        st.caption(f"✅ {_n_tf_enabled} indicators active — any 2 must have an active buy signal")
+    elif _n_tf_enabled == 1:
+        st.caption("⚠️ Only 1 enabled — need ≥2 for cross-confirm; filter inactive")
     else:
-        st.caption("⚫ SAR filter disabled (all timeframes off)")
+        st.caption("⚠️ All disabled — trend filter bypassed")
     st.divider()
 
-    # ── F9: Volume Spike ───────────────────────────────────────────────────────
-    st.markdown("**📦 F9 — Volume Spike** (15m)")
-    new_use_vol_spike = st.checkbox(
-        "Enable F9 — Volume Spike",
-        value=bool(_snap_cfg.get("use_vol_spike",False)), key="cfg_use_vol_spike",
+    # ── Trend Exit (auto-close on 15m bearish flip) ───────────────────────────
+    st.markdown(
+        "**🚨 Trend Exit — Auto-Close on Reversal**",
         help=(
-            "F9 — Volume Spike Filter (disabled by default)\n\n"
-            "Most recent 15m candle volume must be ≥ Mult × average of prior Lookback candles.\n\n"
-            "Confirms strong buying pressure behind the move.\n"
-            "Mult: spike multiplier (e.g. 2.0 = must be 2× average).\n"
-            "Lookback: number of prior candles used to compute the average."
-        ))
-    vx1, vx2 = st.columns(2)
-    new_vol_mult     = vx1.number_input("Mult (X×)", min_value=1.0, max_value=20.0, step=0.5,
-                                         value=float(_snap_cfg.get("vol_spike_mult",2.0)), key="cfg_vol_mult",
-                                         disabled=not new_use_vol_spike)
-    new_vol_lookback = vx2.number_input("Lookback (N)", min_value=2, max_value=100, step=1,
-                                         value=int(_snap_cfg.get("vol_spike_lookback",20)), key="cfg_vol_lookback",
-                                         disabled=not new_use_vol_spike)
-    st.divider()
-
-    # ── F10: 15m EMA Crossover ───────────────────────────────────────────────
-    st.markdown("**📉 F10 — 15m EMA Crossover** (fast > slow)")
-    new_use_ema_cross_15m = st.checkbox(
-        "Enable F10 — 15m EMA Crossover",
-        value=bool(_snap_cfg.get("use_ema_cross_15m", True)), key="cfg_use_ema_cross_15m",
-        help=(
-            "F10 — 15m EMA Crossover Filter\n\n"
-            "On the 15m timeframe, the FAST EMA must be ABOVE the SLOW EMA.\n"
-            "This confirms short-to-medium term bullish alignment before entry.\n\n"
-            "Default: fast=12, slow=21 (both configurable below).\n"
-            "Uses 15m candles already fetched — no extra API call."
-        ))
-    ex1, ex2 = st.columns(2)
-    new_ema_cross_fast_15m = ex1.number_input(
-        "Fast EMA (15m)", min_value=2, max_value=500, step=1,
-        value=int(_snap_cfg.get("ema_cross_fast_15m", 12)),
-        key="cfg_ema_cross_fast_15m", disabled=not new_use_ema_cross_15m)
-    new_ema_cross_slow_15m = ex2.number_input(
-        "Slow EMA (15m)", min_value=2, max_value=500, step=1,
-        value=int(_snap_cfg.get("ema_cross_slow_15m", 21)),
-        key="cfg_ema_cross_slow_15m", disabled=not new_use_ema_cross_15m)
-    if new_use_ema_cross_15m:
-        st.caption(f"✅ EMA{new_ema_cross_fast_15m} > EMA{new_ema_cross_slow_15m} on 15m required")
+            "When enabled, each open long signal is checked every scan cycle "
+            "against the same F2/F3/F4 indicators on 15m candles.\n\n"
+            "If ≥2 of the 3 enabled indicators flip bearish (-1) within the "
+            "last 2 completed 15m candles, the position is closed immediately "
+            "at the current market price — before the hard SL is hit.\n\n"
+            "In Live mode a market SELL order is placed on OKX automatically. "
+            "In Demo mode the close is recorded in the log only.\n\n"
+            "⚠️ Whipsaw risk: a momentary bearish flip on choppy candles can "
+            "trigger a premature exit — any ONE indicator firing is enough to close."
+        )
+    )
+    new_use_trend_exit = st.checkbox(
+        "Enable Trend Exit",
+        value=bool(_snap_cfg.get("use_trend_exit", True)),
+        key="cfg_use_trend_exit",
+        help="Auto-close open longs when ANY ONE trend indicator flips bearish on the last closed 15m candle."
+    )
+    if new_use_trend_exit:
+        st.caption("✅ Open longs closed when ANY ONE indicator flips bearish on last 15m candle")
+    else:
+        st.caption("⚠️ Disabled — positions held until hard TP/SL price is hit")
     st.divider()
 
     # ── Queue Size (max concurrent open trades) ──────────────────────────────
@@ -4990,7 +3051,7 @@ with st.sidebar:
     c5, c6 = st.columns(2)
     new_loop = c5.number_input(
         "Loop (min)", min_value=1, max_value=60, step=1,
-        value=int(_snap_cfg["loop_minutes"]), key="cfg_loop",
+        value=int(_snap_cfg.get("loop_minutes", 4)), key="cfg_loop",
         help=(
             "How often the scanner runs a full watchlist cycle.\n\n"
             "Every N minutes the scanner will:\n"
@@ -5002,34 +3063,13 @@ with st.sidebar:
         ))
     new_cool = c6.number_input(
         "Cooldown (TP, min)", min_value=1, max_value=120, step=1,
-        value=int(_snap_cfg["cooldown_minutes"]), key="cfg_cool",
+        value=int(_snap_cfg.get("cooldown_minutes", 2)), key="cfg_cool",
         help=(
             "After a TP or SL close, skip this coin for N minutes before "
             "allowing re-entry.\n\n"
             "⚠️ Note: This is the **short TP cooldown**. SL losses have a "
             "separate, longer cooldown ('SL Cooldown (hrs)') so a freshly "
             "stopped-out coin is not re-entered too quickly."
-        ))
-    # ── Open-Trade Watcher interval ──────────────────────────────────────────
-    # Runs a dedicated short-interval thread that only updates OPEN trades
-    # (1m candles, with tail/wick captured). When watcher < loop, the main
-    # loop skips its open-trade update so there's no duplicate work.
-    new_watcher_minutes = st.number_input(
-        "Open-Trade Check Interval (min)", min_value=0, max_value=60, step=1,
-        value=int(_snap_cfg.get("watcher_minutes", 1) or 0),
-        key="cfg_watcher_minutes",
-        help=(
-            "How often the 1-minute watcher checks open trades for TP hits "
-            "and DCA triggers, INDEPENDENTLY of the main scan.\n\n"
-            "  • 0  — Disabled. The main scan loop handles everything (legacy).\n"
-            "  • 1+ (but less than 'Loop (min)') — ACTIVE. A dedicated thread "
-            "polls open trades every N minutes using 1-minute candles. This "
-            "catches fast price spikes (via candle tail/wick) between main "
-            "scans and fires DCA / TP much sooner.\n\n"
-            "When ACTIVE, the main loop stops updating open trades itself — "
-            "no duplicate fetches, no double DCA execution.\n"
-            "When ≥ 'Loop (min)', this setting is ignored and the main loop "
-            "handles opens as before."
         ))
     # ── SL-specific cooldown (per-coin blackout after SL hit) ────────────────
     new_sl_cooldown_hours = st.number_input(
@@ -5047,8 +3087,9 @@ with st.sidebar:
         ))
     st.divider()
 
+
     st.markdown("**📋 Watchlist** (one symbol per line)")
-    wl_text = st.text_area("wl", value="\n".join(_snap_cfg["watchlist"]),
+    wl_text = st.text_area("wl", value="\n".join(_snap_cfg.get("watchlist", [])),
                             height=180, label_visibility="collapsed", key="cfg_wl")
 
     # Highlight any watchlist coins absent from the OKX live SWAP instrument list
@@ -5168,6 +3209,7 @@ with st.sidebar:
         with getattr(_b, "_bsc_error_log_lock", threading.Lock()):
             if hasattr(_b, "_bsc_error_log"):
                 _b._bsc_error_log.clear()
+        _b._bsc_error_log_cleared_at = dubai_now().isoformat()
         # 4 — last trade debug panel + manual/test trade session results
         _b._bsc_last_trade_raw = {}
         _b._bsc_last_error     = ""
@@ -5208,34 +3250,14 @@ with st.sidebar:
             "tp_pct": new_tp, "sl_pct": new_sl,
             # enable/disable flags
             "use_pre_filter":      bool(new_use_pre_filter),
-            "use_rsi_5m":          bool(new_use_rsi_5m),
-            "use_rsi_1h":          bool(new_use_rsi_1h),
-            "use_atr_filter":      bool(new_use_atr_filter),
-            "atr_mode":            new_atr_mode,
-            # filter parameters
-            "rsi_5m_min": int(new_rsi5_min),
-            "rsi_1h_min": int(new_rsi1h_min), "rsi_1h_max": int(new_rsi1h_max),
+            "use_trend_exit":      bool(new_use_trend_exit),
+            "f2_supertrend":       bool(new_f2_st),
+            "f3_chandelier":       bool(new_f3_ce),
+            "f4_lux":              bool(new_f4_lux),
             "loop_minutes": int(new_loop), "cooldown_minutes": int(new_cool),
-            "use_ema_3m": bool(new_use_ema_3m), "ema_period_3m": int(new_ema_period_3m),
-            "use_ema_5m": bool(new_use_ema_5m), "ema_period_5m": int(new_ema_period_5m),
-            "use_ema_15m": bool(new_use_ema_15m), "ema_period_15m": int(new_ema_period_15m),
-            "use_macd_3m":  bool(new_use_macd_3m),
-            "use_macd_5m":  bool(new_use_macd_5m),
-            "use_macd_15m": bool(new_use_macd_15m),
-            "use_sar_3m":   bool(new_use_sar_3m),
-            "use_sar_5m":   bool(new_use_sar_5m),
-            "use_sar_15m":  bool(new_use_sar_15m),
-            "use_vol_spike": bool(new_use_vol_spike),
-            "vol_spike_mult": float(new_vol_mult), "vol_spike_lookback": int(new_vol_lookback),
-            "use_pdz_5m": bool(new_use_pdz_5m),
-            "use_pdz_15m": bool(new_use_pdz_15m),
-            "use_ema_cross_15m":  bool(new_use_ema_cross_15m),
-            "ema_cross_fast_15m": int(new_ema_cross_fast_15m),
-            "ema_cross_slow_15m": int(new_ema_cross_slow_15m),
             "max_open_trades":    max(1, int(new_max_open_trades)),
-            "max_super_trades":   max(1, int(new_max_super_trades)),
             "sl_cooldown_hours":  max(1, int(new_sl_cooldown_hours)),
-            "watcher_minutes":    max(0, min(60, int(new_watcher_minutes))),
+            "sl_cooldown_hours":  max(1, int(new_sl_cooldown_hours)),
             "scan_hour_enabled":  bool(new_scan_hour_enabled),
             "scan_hour_start":    int(new_scan_hour_start),
             "scan_hour_end":      int(new_scan_hour_end),
@@ -5255,9 +3277,6 @@ with st.sidebar:
             "trade_usdt_amount": float(new_trade_usdt),
             "trade_leverage":    int(new_trade_lev),
             "trade_margin_mode": new_margin_mode,
-            "trade_max_dca":     max(0, min(6, int(new_trade_max_dca))),
-            "dca_iso_distance_pct": max(10.0, min(95.0, float(new_dca_iso_distance_pct))),
-            "dca_cross_drop_pct":   max(0.1, min(50.0,  float(new_dca_cross_drop_pct))),
         }
         with _config_lock: _b._bsc_cfg.clear(); _b._bsc_cfg.update(new_cfg)
         save_config(new_cfg)
@@ -5265,13 +3284,13 @@ with st.sidebar:
         if new_wl != _snap_cfg.get("watchlist", []):
             _b._bsc_symbol_cache["fetched_at"] = 0
         _b._bsc_rescan_event.set()   # wake bg thread immediately — no waiting for next cycle
-        _b._bsc_watcher_event.set()  # wake watcher so new watcher_minutes applies right away
         st.success(f"✅ Saved — {len(new_wl)} coins — rescanning now…"); st.rerun()
 
 # ─────────────────────────────────────────────────────────────────────────────
 # MAIN AREA
 # ─────────────────────────────────────────────────────────────────────────────
-st.title("S&R — Crypto Intelligent Portal")
+_NOW_GST = dubai_now().strftime("%d %b %Y  %H:%M GST")
+st.title(f"S&R — Crypto Intelligent Portal   ·   🕐 {_NOW_GST}")
 
 # ── Total Realized PnL computation ─────────────────────────────────────────────
 # Moved above the account summary box so _total_pnl is available for the
@@ -5310,11 +3329,10 @@ _total_pnl_wins  = 0.0
 _total_pnl_loss  = 0.0
 _total_tp_ct     = 0
 _total_sl_ct     = 0
-_total_dca_sl_ct = 0
 _cfg_usdt_fb_top = float(_snap_cfg.get("trade_usdt_amount", 0) or 0)
 _cfg_lev_fb_top  = int(_snap_cfg.get("trade_leverage", 10) or 0)
 for _s in signals:
-    if _s.get("status") not in ("tp_hit", "sl_hit", "dca_sl_hit"):
+    if _s.get("status") not in ("tp_hit", "sl_hit", "dca_sl_hit", "trend_exit"):
         continue
     _v = _pnl_topline(_s, _cfg_usdt_fb_top, _cfg_lev_fb_top)
     if _v is None:
@@ -5323,9 +3341,6 @@ for _s in signals:
     if _s["status"] == "tp_hit":
         _total_pnl_wins += _v
         _total_tp_ct    += 1
-    elif _s["status"] == "dca_sl_hit":
-        _total_pnl_loss  += _v
-        _total_dca_sl_ct += 1
     else:
         _total_pnl_loss += _v
         _total_sl_ct    += 1
@@ -5368,19 +3383,18 @@ if _acct_has_creds:
 # _pnl_topline() and accumulation loop moved above the account summary box
 # so _total_pnl is available for the Realized PnL metric card.
 # Display banner only — computation already done above.
-_closed_total = _total_tp_ct + _total_sl_ct + _total_dca_sl_ct
+_closed_total = _total_tp_ct + _total_sl_ct
 if _closed_total == 0:
-    _total_color = "#9CA3AF"
+    _total_color = "#1E4848"
     _total_prefix = "💼"
     _total_sub    = "no closed trades yet"
 else:
-    _total_color  = "#22C55E" if _total_pnl >= 0 else "#EF4444"
+    _total_color  = "#2E7D32" if _total_pnl >= 0 else "#C0392B"
     _total_prefix = "💼" if _total_pnl >= 0 else "📉"
     _total_sub    = (
         f"{_closed_total} closed trades  ·  "
         f"{_total_tp_ct} TP (+\\${_total_pnl_wins:,.2f})  |  "
-        f"{_total_sl_ct} SL  |  "
-        f"{_total_dca_sl_ct} DCA-SL (\\${_total_pnl_loss:,.2f})"
+        f"{_total_sl_ct} SL / Trend Exit (\\${_total_pnl_loss:,.2f})"
     )
 
 st.markdown(
@@ -5431,15 +3445,15 @@ if _trade_on and _api_stat == "ok":
     st.caption(f"🤖 Auto-Trading active · {_api_cs.get('message','')} · tested {_tested_str}")
 
 # ── Capital requirement summary ────────────────────────────────────────────────
-_cap_base      = float(_snap_cfg.get("trade_usdt_amount", 5.0))
-_cap_dca_max   = int(_snap_cfg.get("trade_max_dca", 3))
-_cap_pool      = int(_snap_cfg.get("max_open_trades", 7))
-_cap_per_trade = _cap_base * (2 ** _cap_dca_max)   # original + all DCA adds
-_cap_minimum   = _cap_per_trade * _cap_pool
-_cap_buffer    = _cap_minimum * 0.25
-_cap_total     = _cap_minimum + _cap_buffer
+# Formula: each trade commits trade_usdt_amount as margin (cross mode).
+# Minimum = margin_per_trade × max_open_trades
+_cap_base    = float(_snap_cfg.get("trade_usdt_amount", 5.0))
+_cap_pool    = int(_snap_cfg.get("max_open_trades", 7))
+_cap_minimum = _cap_base * _cap_pool
+_cap_buffer  = _cap_minimum * 0.25
+_cap_total   = _cap_minimum + _cap_buffer
 st.markdown(
-    f"<p style='color:#4da6ff;font-weight:700;margin:2px 0;font-size:14px;'>"
+    f"<p style='color:#005F65;font-weight:700;margin:2px 0;font-size:14px;'>"
     f"💰 Minimum Required: <span style='font-size:15px'>${_cap_minimum:,.2f} USDT</span>"
     f"&nbsp;&nbsp;|&nbsp;&nbsp;"
     f"🛡️ Buffer (25%): <span style='font-size:15px'>${_cap_buffer:,.2f} USDT</span>"
@@ -5452,9 +3466,9 @@ st.markdown(
 # ── Health metrics ─────────────────────────────────────────────────────────────
 open_count     = sum(1 for s in signals if s["status"]=="open")
 tp_count       = sum(1 for s in signals if s["status"]=="tp_hit")
-sl_count       = sum(1 for s in signals if s["status"]=="sl_hit")
-dca_sl_count   = sum(1 for s in signals if s["status"]=="dca_sl_hit")
-queue_count    = sum(1 for s in signals if s["status"]=="queue_limit")
+sl_count          = sum(1 for s in signals if s["status"]=="sl_hit")
+trend_exit_count  = sum(1 for s in signals if s["status"]=="trend_exit")
+queue_count       = sum(1 for s in signals if s["status"]=="queue_limit")
 
 # ── Warn if log loaded from a previous session already exceeds the cap
 # (e.g. migrating from v1 which had no limit). No new trades will fire until
@@ -5471,17 +3485,67 @@ if open_count > _max_open_cap:
 pre_out     = health.get("pre_filtered_out", 0)
 deep_sc     = health.get("deep_scanned",     0)
 
-m1,m2,m3,m4,m5c,m6,m7,m8,m8b,m9 = st.columns(10)
-m1.metric("Cycles",        health.get("total_cycles",0))
-m2.metric("Scan Time",     f"{health.get('last_scan_duration_s',0)}s")
-m3.metric("API Errors",    health.get("total_api_errors",0))
-m4.metric("Pre-filtered ⚡", pre_out, help="Coins removed by bulk ticker pre-filter (saves API calls)")
-m5c.metric("Deep Scanned", deep_sc, help="Coins that passed pre-filter and received full candle analysis")
-m6.metric("Open",          open_count,  help=f"Active open trades (max {_max_open_cap} allowed simultaneously — configurable in sidebar)")
-m7.metric("TP Hit ✅",     tp_count)
-m8.metric("SL Hit ❌",     sl_count,   help="Regular SL hits (non-DCA trades, or DCA disabled)")
-m8b.metric("DCA-SL ❌",    dca_sl_count, help="Ladder-exhausted SL hits — DCA trade closed at final SL (blended avg × (1 − sl_distance_pct)) after max DCAs were consumed")
-m9.metric("⏳ Queued",     queue_count, help=f"Signals detected while the {_max_open_cap}-trade limit was reached — no order placed, coin rescanned each cycle")
+# ── Row 1: Scanner health ────────────────────────────────────────────────────
+m1, m2, m3, m4, m5c = st.columns(5)
+m1.metric("Cycles",          health.get("total_cycles", 0),          help="How many full watchlist scan cycles have completed since startup")
+m2.metric("Scan Time",       f"{health.get('last_scan_duration_s', 0)}s", help="Duration of the last completed scan cycle in seconds")
+m3.metric("API Errors",      health.get("total_api_errors", 0),      help="Cumulative OKX API errors logged since startup")
+m4.metric("Pre-filtered ⚡", pre_out,  help="Coins removed by bulk ticker pre-filter (saves API calls)")
+m5c.metric("Deep Scanned",   deep_sc,  help="Coins that passed pre-filter and received full candle analysis")
+
+# ── Row 2: Trade results ──────────────────────────────────────────────────────
+m6, m7, m8, m9 = st.columns(4)
+# ── Open — large green ──────────────────────────────────────────────────
+with m6:
+    st.markdown(
+        f"""<div style="background:#FFFDE7;border:1px solid #F9A82566;border-radius:8px;
+                        padding:12px 16px 10px 16px;min-height:88px;"
+             title="Active open trades (max {_max_open_cap} allowed simultaneously — configurable in sidebar)">
+            <p style="margin:0 0 4px 0;font-size:0.72rem;font-weight:700;
+                      color:#E65100;letter-spacing:.05em;line-height:1.2;">OPEN</p>
+            <p style="margin:0;font-size:1.9rem;font-weight:700;
+                      color:#E65100;line-height:1.1;">{open_count}</p>
+        </div>""",
+        unsafe_allow_html=True,
+    )
+# ── TP Hit — large green ─────────────────────────────────────────────────
+with m7:
+    st.markdown(
+        f"""<div style="background:#D8EED8;border:1px solid #2E7D3266;border-radius:8px;
+                        padding:12px 16px 10px 16px;min-height:88px;"
+             title="Signals closed at Take-Profit price since startup">
+            <p style="margin:0 0 4px 0;font-size:0.72rem;font-weight:600;
+                      color:#2E7D32;letter-spacing:.05em;line-height:1.2;">TP HIT ✅</p>
+            <p style="margin:0;font-size:1.9rem;font-weight:700;
+                      color:#2E7D32;line-height:1.1;">{tp_count}</p>
+        </div>""",
+        unsafe_allow_html=True,
+    )
+# ── SL Hit — large red ───────────────────────────────────────────────────
+with m8:
+    st.markdown(
+        f"""<div style="background:#FDECEA;border:1px solid #C0392B66;border-radius:8px;
+                        padding:12px 16px 10px 16px;min-height:88px;"
+             title="Regular SL hits (non-DCA trades, or DCA disabled)">
+            <p style="margin:0 0 4px 0;font-size:0.72rem;font-weight:600;
+                      color:#C0392B;letter-spacing:.05em;line-height:1.2;">SL HIT ❌</p>
+            <p style="margin:0;font-size:1.9rem;font-weight:700;
+                      color:#C0392B;line-height:1.1;">{sl_count}</p>
+        </div>""",
+        unsafe_allow_html=True,
+    )
+with m9:
+    st.markdown(
+        f"""<div style="background:#F0F0F0;border:1px solid #9E9E9E66;border-radius:8px;
+                        padding:12px 16px 10px 16px;min-height:88px;"
+             title="Signals detected while the {_max_open_cap}-trade limit was reached — no order placed, coin rescanned each cycle">
+            <p style="margin:0 0 4px 0;font-size:0.72rem;font-weight:700;
+                      color:#424242;letter-spacing:.05em;line-height:1.2;">⏳ QUEUED</p>
+            <p style="margin:0;font-size:1.9rem;font-weight:700;
+                      color:#424242;line-height:1.1;">{queue_count}</p>
+        </div>""",
+        unsafe_allow_html=True,
+    )
 
 if getattr(_b, "_bsc_last_error", ""):
     st.warning(f"⚠️ {_b._bsc_last_error}")
@@ -5493,25 +3557,36 @@ def _cfg_panel(cfg: dict) -> str:
 
     # ── helpers ────────────────────────────────────────────────────────────────
     def _pill(text, active=True):
-        bg  = "#1f3d5c" if active else "#21262d"
-        col = "#79c0ff" if active else "#8b949e"
+        if active:
+            bg     = "#C8F5C8"
+            col    = "#1B5E20"
+            border = "1px solid #2E7D32"
+            shadow = "0 0 7px rgba(46,125,50,0.55)"
+            fw     = "700"
+        else:
+            bg     = "#D4ECEC"
+            col    = "#1A4A4A"
+            border = "1px solid #7ABCBC"
+            shadow = "none"
+            fw     = "500"
         return (f"<span style='display:inline-block;font-size:11px;"
-                f"padding:2px 9px;border-radius:12px;margin:2px 3px 2px 0;"
-                f"background:{bg};color:{col};font-weight:500'>{text}</span>")
+                f"padding:3px 10px;border-radius:12px;margin:2px 4px 2px 0;"
+                f"background:{bg};color:{col};font-weight:{fw};"
+                f"border:{border};box-shadow:{shadow}'>{text}</span>")
 
     def _pill_off(text):
         return _pill(text, active=False)
 
     def _kv_cell(label, value, highlight=False):
-        vc = "#79c0ff" if highlight else "#e6edf3"
+        vc = "#005F65" if highlight else "#062020"
         return (f"<td style='padding:6px 8px 6px 0;vertical-align:top;white-space:nowrap;'>"
-                f"<span style='font-size:11px;color:#8b949e'>{label}</span><br>"
+                f"<span style='font-size:11px;color:#1E4848'>{label}</span><br>"
                 f"<span style='font-size:13px;font-weight:500;color:{vc}'>{value}</span></td>")
 
     def _section(title):
         return (f"<tr><td colspan='20' style='padding:10px 0 4px 0;"
-                f"font-size:11px;font-weight:500;color:#8b949e;"
-                f"border-top:1px solid #30363d;letter-spacing:0.05em'>"
+                f"font-size:11px;font-weight:500;color:#1E4848;"
+                f"border-top:1px solid #005F6566;letter-spacing:0.05em'>"
                 f"{title}</td></tr>")
 
     # ── collect values ─────────────────────────────────────────────────────────
@@ -5527,44 +3602,34 @@ def _cfg_panel(cfg: dict) -> str:
     cooldown = int(_c.get("cooldown_minutes", 2))
     sl_cool  = float(_c.get("sl_cooldown_hours", 6))
 
-    dca_en   = bool(_c.get("dca_enabled", True))
-    dca_max  = int(_c.get("trade_max_dca", 4))
-    iso_dist = float(_c.get("dca_iso_distance_pct", 70.0))
-    cross_d  = float(_c.get("dca_cross_drop_pct", 7.0))
-    pdz_buf  = tp_pct   # buffer = tp_pct (Change #1)
-
     # liq distance for isolated
     liq_pct  = round(1.0 / lev * 100, 1)
-    dca_trig = round((1.0 / lev) * (iso_dist / 100.0) * 100, 2)
 
     # ── filter badge lists ─────────────────────────────────────────────────────
     filter_pills = []
     def _fpill(text, on): filter_pills.append(_pill(text, on))
-    _fpill(f"F2 PDZ 15m",                       _c.get("use_pdz_15m", True))
-    _fpill(f"F3 PDZ 5m",                        _c.get("use_pdz_5m",  True))
-    _fpill(f"F4 RSI5m ≥{_c.get('rsi_5m_min',30)}",  _c.get("use_rsi_5m",  True))
-    _fpill(f"F5 RSI1h {_c.get('rsi_1h_min',30)}–{_c.get('rsi_1h_max',95)}", _c.get("use_rsi_1h", True))
-    _fpill(f"F5b ATR {_c.get('atr_mode','Normal')}", _c.get("use_atr_filter", False))
-    _fpill(f"F6 EMA{_c.get('ema_period_3m',12)} 3m",  _c.get("use_ema_3m"))
-    _fpill(f"F6 EMA{_c.get('ema_period_5m',12)} 5m",  _c.get("use_ema_5m"))
-    _fpill(f"F6 EMA{_c.get('ema_period_15m',12)} 15m", _c.get("use_ema_15m"))
-    _macd_on = [tf for tf, k in [("3m","use_macd_3m"),("5m","use_macd_5m"),("15m","use_macd_15m")] if _c.get(k, True)]
-    _fpill(f"F7 MACD {' · '.join(_macd_on) if _macd_on else 'off'}", bool(_macd_on))
-    _sar_on  = [tf for tf, k in [("3m","use_sar_3m"),("5m","use_sar_5m"),("15m","use_sar_15m")] if _c.get(k, True)]
-    _fpill(f"F8 SAR {' · '.join(_sar_on) if _sar_on else 'off'}", bool(_sar_on))
-    _fpill(f"F9 Vol ≥{_c.get('vol_spike_mult',2.0)}× / {_c.get('vol_spike_lookback',20)}",
-           _c.get("use_vol_spike"))
-    _fpill(f"F10 EMA{_c.get('ema_cross_fast_15m',12)}>EMA{_c.get('ema_cross_slow_15m',21)} 15m",
-           _c.get("use_ema_cross_15m", True))
+
+    _fpill("F1 Pre-filter",   bool(_c.get("use_pre_filter",  True)))
+    _fpill("F2 SuperTrend",   bool(_c.get("f2_supertrend",   True)))
+    _fpill("F3 Chandelier",   bool(_c.get("f3_chandelier",   True)))
+    _fpill("F4 Lux Trend",    bool(_c.get("f4_lux",          True)))
+    _fpill("Trend Exit",      bool(_c.get("use_trend_exit",  True)))
+    _n_trend = sum([
+        bool(_c.get("f2_supertrend", True)),
+        bool(_c.get("f3_chandelier", True)),
+        bool(_c.get("f4_lux",        True)),
+    ])
+    _fpill(f"{_n_trend} trend indicators active", _n_trend >= 2)
+    _fpill("Cross Margin", _c.get("trade_margin_mode", "cross") == "cross")
 
     # ── build HTML ─────────────────────────────────────────────────────────────
-    _mode_col = "#f85149" if demo else "#3fb950"
+    _mode_col = "#005F65" if demo else "#2E7D32"
     _mode_lbl = "DEMO" if demo else "LIVE"
     _html = (
-        f"<div style='background:#161b22;border:1px solid #30363d;"
+        f"<div style='background:#D0EEEE;border:1px solid #005F6566;"
         f"border-radius:8px;padding:14px 18px;margin-bottom:12px;'>"
         f"<div style='display:flex;align-items:center;gap:10px;margin-bottom:10px;'>"
-        f"<span style='font-size:13px;font-weight:500;color:#e6edf3'>Scanner Config</span>"
+        f"<span style='font-size:13px;font-weight:500;color:#062020;font-weight:700'>Scanner Config</span>"
         f"<span style='font-size:11px;font-weight:500;padding:2px 8px;"
         f"border-radius:10px;background:{_mode_col}22;color:{_mode_col}'>{_mode_lbl}</span>"
         f"</div>"
@@ -5588,20 +3653,7 @@ def _cfg_panel(cfg: dict) -> str:
     _html += _kv_cell("SL cooldown",   f"{sl_cool}h")
     _html += "</tr>"
 
-    # Row 2 — DCA setup
-    _html += _section("DCA SETUP")
-    _html += "<tr>"
-    _dca_col = "#3fb950" if dca_en else "#8b949e"
-    _html += _kv_cell("DCA enabled",   f"<span style='color:{_dca_col}'>"
-                                        f"{'YES' if dca_en else 'NO'}</span>")
-    _html += _kv_cell("Max DCAs",      str(dca_max),     highlight=True)
-    _html += _kv_cell("Trigger (iso)", f"{iso_dist}%",   highlight=True)
-    _html += _kv_cell("Trigger drop",  f"{dca_trig}% below avg entry")
-    _html += _kv_cell("Trigger (cross)", f"{cross_d}% drop")
-    _html += _kv_cell("PDZ buffer",    f"{pdz_buf}% (= TP%)")
-    _html += "</tr>"
-
-    # Row 3 — Active filters
+    # Row 2 — Active filters
     _html += _section("ACTIVE FILTERS")
     _html += f"<tr><td colspan='20' style='padding:4px 0 2px 0'>{''.join(filter_pills)}</td></tr>"
 
@@ -5660,11 +3712,10 @@ _pnl_24h_wins      = 0.0
 _pnl_24h_loss      = 0.0
 _pnl_24h_tp_ct     = 0
 _pnl_24h_sl_ct     = 0
-_pnl_24h_dca_sl_ct = 0
 _cfg_usdt_fallback = float(_snap_cfg.get("trade_usdt_amount", 0) or 0)
 _cfg_lev_fallback  = int(_snap_cfg.get("trade_leverage", 10) or 0)
 for _s in signals:
-    if _s.get("status") not in ("tp_hit", "sl_hit", "dca_sl_hit"):
+    if _s.get("status") not in ("tp_hit", "sl_hit", "dca_sl_hit", "trend_exit"):
         continue
     _ct_raw = _s.get("close_time")
     if not _ct_raw:
@@ -5683,28 +3734,24 @@ for _s in signals:
     if _s["status"] == "tp_hit":
         _pnl_24h_wins  += _pnl_val
         _pnl_24h_tp_ct += 1
-    elif _s["status"] == "dca_sl_hit":
-        _pnl_24h_loss      += _pnl_val      # negative
-        _pnl_24h_dca_sl_ct += 1
     else:
         _pnl_24h_loss  += _pnl_val      # negative for SL hits
         _pnl_24h_sl_ct += 1
 
 # Color based on sign: green for gain, red for loss, grey for exact zero / empty
-if _pnl_24h_tp_ct == 0 and _pnl_24h_sl_ct == 0 and _pnl_24h_dca_sl_ct == 0:
-    _pnl_color   = "#9CA3AF"  # grey
+if _pnl_24h_tp_ct == 0 and _pnl_24h_sl_ct == 0:
+    _pnl_color   = "#1E4848"  # muted teal
     _pnl_prefix  = "💰"
     _pnl_summary = "no closed trades in the last 24 h"
 else:
-    _pnl_color   = "#22C55E" if _pnl_24h_total >= 0 else "#EF4444"
+    _pnl_color   = "#2E7D32" if _pnl_24h_total >= 0 else "#C0392B"
     _pnl_prefix  = "💰" if _pnl_24h_total >= 0 else "📉"
     # Use backslash-escaped $ so Streamlit's markdown engine doesn't treat
     # pairs of dollar signs as LaTeX math delimiters (which would otherwise
     # swallow the inline <span> HTML between them).
     _pnl_summary = (
         f"{_pnl_24h_tp_ct} TP (+\\${_pnl_24h_wins:,.2f})  |  "
-        f"{_pnl_24h_sl_ct} SL  |  "
-        f"{_pnl_24h_dca_sl_ct} DCA-SL (\\${_pnl_24h_loss:,.2f})"
+        f"{_pnl_24h_sl_ct} SL (\\${_pnl_24h_loss:,.2f})"
     )
 st.markdown(
     f"{_pnl_prefix} **24h Realized PnL:** "
@@ -5723,16 +3770,6 @@ elif open_count > 0:
     _queue_indicator += f"  ({_slots_left} slot{'s' if _slots_left != 1 else ''} free)"
 st.markdown(_queue_indicator)
 
-# ── Super Setup cap indicator (current Super trades / max) ─────────────────
-_max_super_cap = max(0, int(_snap_cfg.get("max_super_trades", 5)))
-_open_super_count = sum(
-    1 for s in signals
-    if s.get("status") == "open" and s.get("is_super_setup")
-)
-_super_indicator = f"⭐ **Super Cap:** {_open_super_count} / {_max_super_cap}"
-if _max_super_cap > 0 and _open_super_count >= _max_super_cap:
-    _super_indicator += "  *— new Super-eligible coins will fall through to F3-F10*"
-st.caption(_super_indicator)
 
 # ── SL Cooldown indicator ──────────────────────────────────────────────────
 _sl_cd_hours_display = int(_snap_cfg.get("sl_cooldown_hours", 24))
@@ -5781,57 +3818,8 @@ def _fmt_px_auto(px) -> str:
 
 
 def _fmt_trade_history(s: dict) -> str:
-    """Render a multi-line Trade History string for the Open / TP Hit /
-    SL Hit / DCA SL Hit tables.
-
-    Format (one line per fill — Entry then DCA 1, DCA 2, …):
-
-        Entry : $<price> | TP $<tp> | SL $<sl> | MM/DD HH:MM
-        DCA 1 : $<price> | TP $<tp> | SL $<sl> | MM/DD HH:MM
-        DCA 2 : $<price> | TP $<tp> | SL $<sl> | MM/DD HH:MM
-
-    Past fills that were recorded BEFORE we started storing per-fill TP/SL
-    show the abbreviated form (price + time only). Newer fills show the
-    full Entry/TP/SL/time line.
-
-    Returns "—" if there's nothing to show (no fills AND no entry data).
-    """
-    fills = s.get("dca_fills") or []
-    lines: list = []
-
-    if fills:
-        _last_idx = len(fills) - 1
-        for i, f in enumerate(fills):
-            idx   = int(f.get("dca_idx", 0) or 0)
-            label = "Entry" if idx == 0 else f"DCA {idx}"
-            px_s  = _fmt_px_auto(f.get("price", 0))
-            ts_s  = fmt_dubai(f.get("ts", "")) or "—"
-            tp_v  = f.get("tp")
-            sl_v  = f.get("sl")
-            # Fallback ONLY for the most recent fill: sig["tp"]/sig["sl"]
-            # reflect the state immediately after this fill (no later DCAs
-            # have rewritten them yet), so they're accurate for this row.
-            # Older fills can't borrow from sig — the values would be wrong.
-            if i == _last_idx:
-                if tp_v is None or _fmt_px_auto(tp_v) == "—":
-                    tp_v = s.get("tp")
-                if sl_v is None or _fmt_px_auto(sl_v) == "—":
-                    sl_v = s.get("sl")
-            _has_tp = tp_v is not None and _fmt_px_auto(tp_v) != "—"
-            _has_sl = sl_v is not None and _fmt_px_auto(sl_v) != "—"
-            if _has_tp and _has_sl:
-                lines.append(
-                    f"{label:<6}: ${px_s} | TP ${_fmt_px_auto(tp_v)} | "
-                    f"SL ${_fmt_px_auto(sl_v)} | {ts_s}"
-                )
-            else:
-                # Pre-migration fill with no reliable TP/SL — price + time only.
-                lines.append(f"{label:<6}: ${px_s} | {ts_s}")
-        return "\n".join(lines)
-
-    # No dca_fills array at all (legacy signal, never snapshotted). Fall
-    # back to sig-level entry/tp/sl for a single-line display.
-    _ent = s.get("original_entry") or s.get("signal_entry") or s.get("entry")
+    """Render the Trade History string showing the entry fill."""
+    _ent = s.get("signal_entry") or s.get("entry")
     _tp  = s.get("tp")
     _sl  = s.get("sl")
     _ts  = fmt_dubai(s.get("timestamp", "")) or "—"
@@ -5885,6 +3873,8 @@ def _build_signal_row(s: dict, is_open_table: bool = False,
         "tp_hit":      "✅ TP Hit",
         "sl_hit":      "❌ SL Hit",
         "dca_sl_hit":  "❌ DCA SL Hit",
+        "trend_exit":  "🚨 Trend Exit",
+        "fc_hit":      "🟣 FC Hit",
         "queue_limit": "⏳ Queue Limit",
         "closed_okx":  "🟠 Closed on OKX",
     }.get(status, status)
@@ -5894,26 +3884,18 @@ def _build_signal_row(s: dict, is_open_table: bool = False,
     # DCA state (DCA-1, DCA-2, …) and supersedes the DL/TL tags so users can
     # tell at a glance that the trade has been averaged down.
     alert_col = ""
-    _dca_count_row = int(s.get("dca_count", 0) or 0)
     if status == "open":
-        if _dca_count_row > 0:
-            alert_col = f"DCA-{_dca_count_row}"
-        else:
-            _dl = s.get("price_alert", False)
-            _tl = False
-            if s.get("timestamp"):
-                try:
-                    _t_open = datetime.fromisoformat(s["timestamp"].replace("Z", "+00:00"))
-                    _tl = (dubai_now() - _t_open).total_seconds() >= 7200
-                except Exception:
-                    pass
-            if _dl and _tl:   alert_col = "🔴 DL / TL"
-            elif _dl:          alert_col = "🔴 DL"
-            elif _tl:          alert_col = "🔴 TL"
-    elif status in ("tp_hit", "sl_hit", "dca_sl_hit") and _dca_count_row > 0:
-        # Preserve the DCA-N tag on closed DCA trades so TP Hit / DCA SL Hit
-        # tables show it clearly.
-        alert_col = f"DCA-{_dca_count_row}"
+        _dl = s.get("price_alert", False)
+        _tl = False
+        if s.get("timestamp"):
+            try:
+                _t_open = datetime.fromisoformat(s["timestamp"].replace("Z", "+00:00"))
+                _tl = (dubai_now() - _t_open).total_seconds() >= 7200
+            except Exception:
+                pass
+        if _dl and _tl:   alert_col = "🔴 DL / TL"
+        elif _dl:          alert_col = "🔴 DL"
+        elif _tl:          alert_col = "🔴 TL"
 
     # Current Status column — signed % change from entry for EVERY open trade
     # (previously "Current Drop", gated on DL/TL alerts — now always shown so
@@ -5936,34 +3918,33 @@ def _build_signal_row(s: dict, is_open_table: bool = False,
             except (TypeError, ValueError):
                 current_status_col = "—"
 
-    # ── Est Liquidity column (Open Signals only) ────────────────────────────
-    # Estimated liquidation price + % distance from entry (negative, since liq
-    # is below entry for LONG). Shown only for isolated trades. Cross-margin
-    # trades show "—" because their liquidation depends on account-wide equity
-    # and cannot be computed from per-trade info alone.
-    #
-    # Formula (LONG isolated, approximate):
-    #     liq ≈ entry × (1 − 1/leverage)
-    #     liq% from entry = -100 / leverage  (e.g. 10× → -10%, 20× → -5%)
-    est_liq_col = "—"
-    if status == "open":
-        _margin_mode_rm = (s.get("order_margin_mode") or
-                           _snap_cfg.get("trade_margin_mode", "isolated") or
-                           "isolated").lower()
-        # For DCA trades use the blended average; otherwise the original entry.
-        _entry_liq = float(s.get("avg_entry", s.get("entry", 0)) or 0)
-        _lev_liq   = int(s.get("trade_lev", _snap_cfg.get("trade_leverage", 10)) or 0)
-        if _margin_mode_rm == "isolated" and _entry_liq > 0 and _lev_liq > 0:
-            _liq_price = _entry_liq * (1.0 - 1.0 / _lev_liq)
-            _liq_pct   = -100.0 / _lev_liq
-            # Format liq price with enough precision for low-value coins
-            if _liq_price >= 1:
-                _liq_str = f"{_liq_price:.4f}"
-            elif _liq_price >= 0.01:
-                _liq_str = f"{_liq_price:.6f}"
+    # ── Entry Signals column — which F2/F3/F4 indicators triggered the buy ──
+    entry_signals_col = s.get("entry_indicators", "—") or "—"
+
+    # ── Exit Reason column (closed trades only) ───────────────────────────────
+    exit_reason_col = "—"
+    if status != "open":
+        _stored = s.get("exit_indicators", "")
+        if _stored:
+            exit_reason_col = _stored
+        elif status == "tp_hit":
+            exit_reason_col = "✅ TP Hit"
+        elif status == "sl_hit":
+            exit_reason_col = "❌ SL Hit"
+        elif status == "trend_exit":
+            exit_reason_col = "🚨 Trend Exit"
+        elif status == "dca_sl_hit":
+            exit_reason_col = "❌ DCA SL Hit"
+        elif status == "closed_okx":
+            exit_reason_col = "🟠 Closed on OKX"
+        # Format stored exit_indicators to add emoji prefix
+        if exit_reason_col not in ("—",) and not exit_reason_col.startswith(("✅","❌","🚨","🟠")):
+            if "TP Hit" in exit_reason_col:
+                exit_reason_col = "✅ " + exit_reason_col
+            elif "SL Hit" in exit_reason_col:
+                exit_reason_col = "❌ " + exit_reason_col
             else:
-                _liq_str = f"{_liq_price:.8f}"
-            est_liq_col = f"{_liq_str} ({_liq_pct:+.2f}%)"
+                exit_reason_col = "🚨 " + exit_reason_col
 
     # ── PnL $ column ─────────────────────────────────────────────────────────
     # Dollar PnL. Uses the per-signal trade_usdt and trade_lev stored at entry
@@ -5978,59 +3959,50 @@ def _build_signal_row(s: dict, is_open_table: bool = False,
     #   • sl_hit  → sig["close_price"] (= SL level — realized loss)
     #   • queue   → "—" (no trade was ever opened)
     pnl_col = "—"
-    if status in ("open", "tp_hit", "sl_hit", "dca_sl_hit"):
+    if status in ("open", "tp_hit", "sl_hit", "dca_sl_hit", "fc_hit", "trend_exit"):
         if status == "open":
             _ref_pnl = s.get("latest_price")
             if _ref_pnl is None:
-                # Fall back to deriving from price_alert_pct if latest_price
-                # not stored yet (first cycle, before update_open_signals ran).
-                # For DCA trades the pct is computed from blended avg; use
-                # avg_entry as the reference too.
                 _pa = s.get("price_alert_pct")
-                _ref_entry_pnl = float(s.get("avg_entry",
-                                             s.get("entry", 0)) or 0)
+                _ref_entry_pnl = float(s.get("entry", 0) or 0)
                 if _pa is not None and _ref_entry_pnl > 0:
                     try:
                         _ref_pnl = _ref_entry_pnl * (1.0 - float(_pa) / 100.0)
                     except (TypeError, ValueError):
                         _ref_pnl = None
         else:
-            # tp_hit / sl_hit / dca_sl_hit — close_price is the realized exit
+            # tp_hit / sl_hit / dca_sl_hit / fc_hit — close_price is the realized exit
             _ref_pnl = s.get("close_price")
         # Use the shared helper — single source of truth for PnL math.
         _pnl_val = _calc_pnl_usd(s, _ref_pnl, _cfg_usdt_fallback, _cfg_lev_fallback)
         if _pnl_val is not None:
             pnl_col = f"{_pnl_val:+.2f} $"
 
+    # ── Exit % column (TP Hit / SL Hit / DCA SL Hit / FC Hit) ─────────────────
+    # Signed percentage of close_price vs the effective entry (blended avg for
+    # DCA trades, original entry otherwise).
+    #   Positive = closed above entry (TP or FC)  Negative = closed below (SL)
+    exit_pct_col = "—"
+    if status in ("tp_hit", "sl_hit", "dca_sl_hit", "fc_hit", "trend_exit"):
+        try:
+            _close_ep  = float(s.get("close_price", 0) or 0)
+            _ref_ep    = float(s.get("signal_entry", s.get("entry", 0)) or 0)
+            if _close_ep > 0 and _ref_ep > 0:
+                _ep_pct = (_close_ep - _ref_ep) / _ref_ep * 100.0
+                exit_pct_col = f"{_ep_pct:+.2f}%"
+        except (TypeError, ValueError):
+            exit_pct_col = "—"
+
+    fc_trig_col = "—"
+
     ts_str    = fmt_dubai(s.get("timestamp", ""))
     close_str = fmt_dubai(s["close_time"]) if s.get("close_time") else "—"
     crit      = s.get("criteria", {})
-    pdz_5m_val  = crit.get("pdz_zone_5m",  "—") or "—"
-    pdz_15m_val = crit.get("pdz_zone_15m", "—") or "—"
-    crit_str = (
-        f"• RSI 5m    : {crit.get('rsi_5m','—')}\n"
-        f"• RSI 1h    : {crit.get('rsi_1h','—')}\n"
-        f"• EMA 3m    : {_cv(crit.get('ema_3m','—'))}\n"
-        f"• EMA 5m    : {_cv(crit.get('ema_5m','—'))}\n"
-        f"• EMA 15m   : {_cv(crit.get('ema_15m','—'))}\n"
-        f"• MACD 3m   : {_cv(crit.get('macd_3m'))}\n"
-        f"• MACD 5m   : {_cv(crit.get('macd_5m'))}\n"
-        f"• MACD 15m  : {_cv(crit.get('macd_15m'))}\n"
-        f"• SAR 3m    : {_cv(crit.get('sar_3m'))}\n"
-        f"• SAR 5m    : {_cv(crit.get('sar_5m'))}\n"
-        f"• SAR 15m   : {_cv(crit.get('sar_15m'))}\n"
-        f"• Vol ×avg  : {_cv(crit.get('vol_ratio'))}\n"
-        f"• PDZ 5m    : {pdz_5m_val}\n"
-        f"• PDZ 15m   : {pdz_15m_val}\n"
-        f"• EMA12 15m : {_cv(crit.get('ema_cross_12_15m'))}\n"
-        f"• EMA21 15m : {_cv(crit.get('ema_cross_21_15m'))}\n"
-        f"• ATR 15m   : {_cv(crit.get('atr_15m'))}\n"
-        f"• ATR ratio : {_cv(crit.get('atr_ratio'))}"
-    ) if crit else "—"
+    crit_str = "—"
 
     max_lev   = s.get("max_lev", get_max_leverage(s.get("symbol", "")))
     sl_reason = analyze_sl_reason(s) if status == "sl_hit" else "—"
-    setup_type = "⭐ Super" if s.get("is_super_setup") else "Normal"
+    setup_type = "Normal"
 
     _usdt    = float(s.get("trade_usdt", _snap_cfg.get("trade_usdt_amount", 0)))
     _lev     = int(s.get("trade_lev",   _snap_cfg.get("trade_leverage", 10)))
@@ -6061,52 +4033,53 @@ def _build_signal_row(s: dict, is_open_table: bool = False,
     ord_env     = "🟡 Demo" if s.get("demo_mode") else "🔴 Live"
     ord_status  = s.get("order_status", "")
     ord_err     = s.get("order_error",  "")
-    if   ord_status == "placed":  ord_status_str = f"✅ Entry+OCO {ord_env}"
+    _is_cross_ord = (s.get("order_margin_mode") or
+                     _snap_cfg.get("trade_margin_mode","isolated")).strip().lower() == "cross"
+    if   ord_status == "placed":
+        ord_status_str = (f"✅ Entry+TP {ord_env}" if _is_cross_ord
+                          else f"✅ Entry+OCO {ord_env}")
     elif ord_status == "partial": ord_status_str = f"⚠️ Entry only {ord_env} · {ord_err[:80]}"
     elif ord_status == "error":   ord_status_str = f"❌ {ord_err[:80]}" if ord_err else "❌ Error"
     else:                         ord_status_str = "—"
 
-    # ── OKX Command column — shows exact parameters sent to OKX ──────────────
-    # A real order was placed iff we have an ordId OR order_status indicates
-    # the call reached OKX (placed / partial / error — an explicit rejection
-    # counts because OKX did see the request). Signals without these hallmarks
-    # never actually talked to OKX (auto-trading OFF, creds missing, or the
-    # pre-flight validation in place_okx_order short-circuited); we must not
-    # display a fabricated command string for them.
-    _ord_sz       = int(s.get("order_sz", 0) or 0)
-    _ct_val       = float(s.get("order_ct_val", 0) or 0)
-    _notional     = float(s.get("order_notional", 0) or 0)
-    _is_hedge     = bool(s.get("order_is_hedge", False))
-    _order_id     = (s.get("order_id") or "").strip()
-    _ord_status   = (s.get("order_status") or "").strip()
-    _order_sent   = bool(_order_id) or _ord_status in ("placed", "partial", "error")
-    # Fallback margin mode reflects the CURRENT sidebar setting — this matches
-    # what `place_okx_order` would send RIGHT NOW, and keeps the Margin Mode
-    # column (which uses the same fallback) in sync.
-    _margin_mode  = (s.get("order_margin_mode") or "").strip().lower()
-    if _margin_mode not in ("isolated", "cross"):
-        _margin_mode = (_snap_cfg.get("trade_margin_mode") or "isolated").strip().lower()
-    if not _notional and _usdt > 0 and _lev > 0:
-        _notional = _usdt * _lev   # reconstruct for older signals without stored notional
-    if status == "queue_limit":
-        okx_cmd_str = "No order placed — Queue Limit"
-    elif not _order_sent:
-        # Signal fired but no OKX order was ever placed (auto-trading off,
-        # missing creds, or early-return). Don't manufacture a fake command.
-        okx_cmd_str = "No order placed — auto-trading off or rejected pre-flight"
-    elif _usdt > 0 or _ord_sz > 0:
-        _sym_okx = _to_okx(s.get("symbol", ""))
-        _ps_part = " | posSide: long" if _is_hedge else ""
-        _ct_part = f" | ctVal: {_ct_val}" if _ct_val else ""
-        okx_cmd_str = (
-            f"instId: {_sym_okx} | ordType: market"
-            f" | tdMode: {_margin_mode}{_ps_part}"
-            f" | sz: {_ord_sz} contracts"
-            f" | collateral: ${_usdt:.2f} | lev: {_lev}×"
-            f" | notional: ${_notional:.2f}{_ct_part}"
-        )
+    # ── OKX Command column ────────────────────────────────────────────────────
+    # Prefer the structured okx_log list (appended at every real OKX call).
+    # Fall back to the legacy static string for older signals that pre-date
+    # the log (no okx_log key or empty list).
+    _okx_log_list = s.get("okx_log")
+    if isinstance(_okx_log_list, list) and _okx_log_list:
+        okx_cmd_str = "\n########\n".join(_okx_log_list)
     else:
-        okx_cmd_str = "—"
+        # ── Legacy fallback: reconstruct a single summary line ─────────────
+        _ord_sz       = int(s.get("order_sz", 0) or 0)
+        _ct_val       = float(s.get("order_ct_val", 0) or 0)
+        _notional     = float(s.get("order_notional", 0) or 0)
+        _is_hedge     = bool(s.get("order_is_hedge", False))
+        _order_id     = (s.get("order_id") or "").strip()
+        _ord_status   = (s.get("order_status") or "").strip()
+        _order_sent   = bool(_order_id) or _ord_status in ("placed", "partial", "error")
+        _margin_mode  = (s.get("order_margin_mode") or "").strip().lower()
+        if _margin_mode not in ("isolated", "cross"):
+            _margin_mode = (_snap_cfg.get("trade_margin_mode") or "isolated").strip().lower()
+        if not _notional and _usdt > 0 and _lev > 0:
+            _notional = _usdt * _lev
+        if status == "queue_limit":
+            okx_cmd_str = "No order placed — Queue Limit"
+        elif not _order_sent:
+            okx_cmd_str = "No order placed — auto-trading off or rejected pre-flight"
+        elif _usdt > 0 or _ord_sz > 0:
+            _sym_okx = _to_okx(s.get("symbol", ""))
+            _ps_part = " | posSide: long" if _is_hedge else ""
+            _ct_part = f" | ctVal: {_ct_val}" if _ct_val else ""
+            okx_cmd_str = (
+                f"instId: {_sym_okx} | ordType: market"
+                f" | tdMode: {_margin_mode}{_ps_part}"
+                f" | sz: {_ord_sz} contracts"
+                f" | collateral: ${_usdt:.2f} | lev: {_lev}×"
+                f" | notional: ${_notional:.2f}{_ct_part}"
+            )
+        else:
+            okx_cmd_str = "—"
 
     duration_str = "—"
     if s.get("timestamp"):
@@ -6159,16 +4132,8 @@ def _build_signal_row(s: dict, is_open_table: bool = False,
             _os_notional = _os_usdt * _os_lev
     order_size_col = f"${_os_notional:,.2f}" if _os_notional > 0 else "—"
 
-    # Signal Entry displays the latest working entry price:
-    #   • DCA trades (dca_count > 0) → blended average (avg_entry)
-    #   • Non-DCA / pre-first-DCA → signal_entry (actual fill) or entry
-    # The Original Entry column (inserted right after Signal Entry) holds
-    # the very first fill price so the original reference is never lost.
-    if _dca_count_row > 0:
-        _sig_entry_display = s.get("avg_entry",
-                                   s.get("signal_entry", s.get("entry", "")))
-    else:
-        _sig_entry_display = s.get("signal_entry", s.get("entry", ""))
+    # Signal Entry: use signal_entry (actual fill) or entry fallback.
+    _sig_entry_display = s.get("signal_entry", s.get("entry", ""))
     _orig_entry_display = s.get("original_entry",
                                 s.get("signal_entry", s.get("entry", ""))) \
         if s.get("original_entry") is not None \
@@ -6196,43 +4161,9 @@ def _build_signal_row(s: dict, is_open_table: bool = False,
             except (TypeError, ValueError):
                 pass
 
-    # ── Next DCA price column (Open Signals only) ────────────────────────────
-    # Shows the price at which the NEXT DCA add would trigger, using the
-    # signal's own snapshotted drop percentages (isolated / cross) so the
-    # value is consistent with what the watcher/main loop will actually use.
-    # Displayed ONLY when:
-    #   • Trade is still open
-    #   • DCA is enabled on the signal (dca_enabled=True)
-    #   • Ladder has slots left (dca_count < dca_max)
-    # Otherwise shown as "—".
+    dca_levels_col = "—"
+
     next_dca_col = "—"
-    if status == "open":
-        _dca_en_row  = bool(s.get("dca_enabled", False))
-        _dca_max_row = int(s.get("dca_max", 0) or 0)
-        if _dca_en_row and _dca_max_row > 0 and _dca_count_row < _dca_max_row:
-            try:
-                # Prefer the stored sig["next_dca_px"] (set on each DCA
-                # fill + at signal open). Fall back to live computation
-                # for legacy signals that predate the field.
-                _next_dca_px = float(s.get("next_dca_px", 0) or 0)
-                if _next_dca_px <= 0:
-                    _next_dca_px = _dca_compute_trigger(s, _snap_cfg)
-                if _next_dca_px and _next_dca_px > 0:
-                    # Auto-precision formatting matches Est Liquidity so low-
-                    # value coins (BASEDUSDT, etc.) show enough digits.
-                    if _next_dca_px >= 1:
-                        next_dca_col = f"{_next_dca_px:.4f}"
-                    elif _next_dca_px >= 0.01:
-                        next_dca_col = f"{_next_dca_px:.6f}"
-                    else:
-                        next_dca_col = f"{_next_dca_px:.8f}"
-                    # Append the ladder progress (e.g. "DCA 2/3") for context.
-                    next_dca_col = (
-                        f"{next_dca_col} "
-                        f"(DCA {_dca_count_row + 1}/{_dca_max_row})"
-                    )
-            except Exception:
-                next_dca_col = "—"
 
     # ── Trade History column ────────────────────────────────────────────────
     # Multi-line lifecycle: Entry line + one line per DCA fill. Each line
@@ -6244,139 +4175,102 @@ def _build_signal_row(s: dict, is_open_table: bool = False,
     except Exception:
         trade_history_col = "—"
 
-    # ── Difficulty column (Open Signals only) ────────────────────────────────
-    # Ratio = (remaining TP distance %) / (ATR% at entry time)
-    # Uses atr_ratio stored in criteria at signal open. Difficulty reflects
-    # how far price still needs to travel vs. typical 15m market movement:
-    #   🟢 Easy   — ratio ≤ 1.5  (TP within 1.5× ATR — market moves this far routinely)
-    #   🟡 Medium — ratio ≤ 2.5  (moderate stretch — achievable but needs a push)
-    #   🔴 Hard   — ratio >  2.5 (TP far beyond typical volatility)
-    diff_col = "—"
-    if status == "open":
-        _atr_ratio_s = crit.get("atr_ratio")
-        _entry_d = float(s.get("entry", 0) or 0)
-        _tp_d    = float(s.get("tp",    0) or 0)
-        _latest  = s.get("latest_price")
-        try:
-            # Try to use live ratio (remaining TP% vs stored ATR%)
-            # Fall back to the stored atr_ratio if live price unavailable
-            if _atr_ratio_s not in (None, "—") and _latest is not None and _entry_d > 0:
-                _latest_f  = float(_latest)
-                _rem_tp_pct = ((_tp_d - _latest_f) / _latest_f * 100.0) if _latest_f > 0 else None
-                # Reconstruct ATR% from stored ratio and TP% at entry
-                _tp_pct_orig = ((_tp_d - _entry_d) / _entry_d * 100.0) if _entry_d > 0 else None
-                _ratio_orig  = float(_atr_ratio_s)
-                _atr_pct_orig = (_tp_pct_orig / _ratio_orig) if (_tp_pct_orig and _ratio_orig > 0) else None
-                if _rem_tp_pct is not None and _atr_pct_orig and _atr_pct_orig > 0:
-                    _live_ratio = _rem_tp_pct / _atr_pct_orig
-                    if _live_ratio <= 1.5:   diff_col = "🟢 Easy"
-                    elif _live_ratio <= 2.5: diff_col = "🟡 Medium"
-                    else:                    diff_col = "🔴 Hard"
-            elif _atr_ratio_s not in (None, "—"):
-                _r = float(_atr_ratio_s)
-                if _r <= 1.5:   diff_col = "🟢 Easy"
-                elif _r <= 2.5: diff_col = "🟡 Medium"
-                else:           diff_col = "🔴 Hard"
-        except (TypeError, ValueError):
-            diff_col = "—"
-
     if is_open_table:
-        # Open-Signals-specific column order — adds Difficulty as first column
-        # and Original Entry after Signal Entry for DCA trade visibility.
-        # TP Hit / SL Hit / DCA SL Hit / Queue Limit tables use the non-Open
-        # branch below.
         row: dict = {
-            "Difficulty":      diff_col,
-            "Time (GST)":      ts_str,
-            "Symbol":          s.get("symbol", ""),
-            "Alert":           alert_col,
-            "Setup":           setup_type,
-            "PnL $":           pnl_col,
-            "Margin Mode":     _mm_val,
-            "Current Status":  current_status_col,
-            "Signal Entry":    _sig_entry_display,
-            "Original Entry":  _orig_entry_display,
-            "Current Price":   current_price_col,
-            "Next DCA":        next_dca_col,
-            "TP":              s.get("tp", ""),
-            "SL":              s.get("sl", ""),
-            "Trade History":   trade_history_col,
-            "Est Liquidity":   est_liq_col,
-            "Duration":        duration_str,
-            "TP $":            tp_usd_str,
-            "SL $":            sl_usd_str,
-            "Status":          status_icon,
-            "Close Time":      close_str,
-            "Sector":          s.get("sector", "Other"),
-            "Close $":         s.get("close_price") or "—",
-            "Max Lev":         f"{max_lev}×",
-            "Order":           ord_status_str,
-            "OKX Command":     okx_cmd_str,
-            "Entry Criteria":  crit_str,
-            "Order ID":        ord_id_str,
-            "Algo ID":         algo_id_str,
-            "⚠️ SL Reason":   sl_reason,
-            "Order Size":      order_size_col,
+            "Time (GST)":        ts_str,
+            "Symbol":            s.get("symbol", ""),
+            "Alert":             alert_col,
+            "Setup":             setup_type,
+            "Entry Signals":     entry_signals_col,
+            "PnL $":             pnl_col,
+            "Margin Mode":       _mm_val,
+            "Current Status":    current_status_col,
+            "Signal Entry":      _sig_entry_display,
+            "Original Entry":    _orig_entry_display,
+            "Current Price":     current_price_col,
+            "TP":                s.get("tp", ""),
+            "SL":                s.get("sl", ""),
+            "Trade History":     trade_history_col,
+            "Duration":          duration_str,
+            "TP $":              tp_usd_str,
+            "SL $":              sl_usd_str,
+            "Status":            status_icon,
+            "Close Time":        close_str,
+            "Sector":            s.get("sector", "Other"),
+            "Close $":           s.get("close_price") or "—",
+            "Max Lev":           f"{max_lev}×",
+            "Order":             ord_status_str,
+            "OKX Command":       okx_cmd_str,
+            "Entry Criteria":    crit_str,
+            "Order ID":          ord_id_str,
+            "Algo ID":           algo_id_str,
+            "⚠️ SL Reason":     sl_reason,
+            "Order Size":        order_size_col,
         }
         return row
 
-    # ── Non-Open tables (TP Hit, SL Hit, Queue Limit) — unchanged ordering ──
-    # Optional columns (inserted via the flags):
-    #   • "Margin Mode"  → right after Setup — only when show_pnl=True
-    #                       (TP Hit and SL Hit tables set show_pnl=True;
-    #                        Queue Limit table leaves it False, since queued
-    #                        signals never actually placed a trade.)
-    #   • "PnL $"        → right after Sector — only when show_pnl=True
+    # ── Non-Open tables (TP Hit, SL Hit, Trend Exit, Queue Limit) ────────────
     row = {
         "Time (GST)":     ts_str,
         "Alert":          alert_col,
     }
-    row["Symbol"] = s.get("symbol", "")
-    row["Setup"]  = setup_type
+    row["Symbol"]          = s.get("symbol", "")
+    row["Entry Signals"]   = entry_signals_col
+    row["Exit Reason"]     = exit_reason_col
+    row["Setup"]           = setup_type
     if show_pnl:
         row["Margin Mode"] = _mm_val
     row["Sector"] = s.get("sector", "Other")
     if show_pnl:
         row["PnL $"] = pnl_col
+    if show_pnl:
+        row["Exit %"] = exit_pct_col
     row.update({
-        "Signal Entry":   _sig_entry_display,
-        "Original Entry": _orig_entry_display,
-        "Fill $":         s.get("entry", "") if s.get("signal_entry") else "—",
-        "TP":             s.get("tp", ""),
-        "TP $":           tp_usd_str,
-        "SL":             s.get("sl", ""),
-        "SL $":           sl_usd_str,
-        "Trade History":  trade_history_col,
-        "Status":         status_icon,
-        "Duration":       duration_str,
-        "Close Time":     close_str,
-        "Close $":        s.get("close_price") or "—",
-        "Max Lev":        f"{max_lev}×",
-        "Order":          ord_status_str,
-        "OKX Command":    okx_cmd_str,
-        "Order ID":       ord_id_str,
-        "Algo ID":        algo_id_str,
-        "Entry Criteria": crit_str,
-        "⚠️ SL Reason":  sl_reason,
+        "Signal Entry":      _sig_entry_display,
+        "Original Entry":    _orig_entry_display,
+        "Fill $":            s.get("entry", "") if s.get("signal_entry") else "—",
+        "TP":                s.get("tp", ""),
+        "TP $": tp_usd_str,
+        "Trade History":     trade_history_col,
+        "Status":            status_icon,
+        "Duration":          duration_str,
+        "Close Time":        close_str,
+        "Close $":           s.get("close_price") or "—",
+        "Max Lev":           f"{max_lev}×",
+        "Order":             ord_status_str,
+        "OKX Command":       okx_cmd_str,
+        "Order ID":          ord_id_str,
+        "Algo ID":           algo_id_str,
+        "Entry Criteria":    crit_str,
     })
-    # For TP Hit / SL Hit / DCA SL Hit, surface the cumulative Order Size so
-    # DCA-exhausted closures show the full committed notional.
+    row["SL"]             = s.get("sl", "")
+    row["SL $"]           = sl_usd_str
+    row["⚠️ SL Reason"]  = sl_reason
+    # Order Size for trades that had real positions
     if show_pnl:
         row["Order Size"] = order_size_col
     return row
 
 # Shared column_config used by all four tables
 _SIG_COL_CFG = {
-    "Difficulty":     st.column_config.TextColumn(
-                          "🎯 Difficulty", width="small",
-                          help="TP reachability relative to ATR(14) on 15m at entry time.\n\n"
-                               "🟢 Easy   — TP within 1.5× ATR (market moves this far routinely)\n"
-                               "🟡 Medium — TP within 2.5× ATR (achievable with a good push)\n"
-                               "🔴 Hard   — TP beyond 2.5× ATR (needs unusually strong move)\n\n"
-                               "Updates live: ratio is recomputed from remaining TP distance "
-                               "vs. the ATR% measured at entry, so it gets easier as price "
-                               "moves toward TP. Shows '—' when ATR was not computed (ATR "
-                               "filter disabled at entry time)."),
+    "Entry Signals":  st.column_config.TextColumn(
+                          "📊 Entry Signals", width="small",
+                          help="Which F2/F3/F4 indicators had an active buy signal "
+                               "when this trade was entered.\n\n"
+                               "F2 = SuperTrend (ATR 10, mult 3.0)\n"
+                               "F3 = Chandelier Exit (ATR 22, mult 3.0)\n"
+                               "F4 = Lux Trend (ATR 14, mult 2.0)\n\n"
+                               "Example: 'F2+F4' means SuperTrend and Lux Trend "
+                               "both had active bullish flips with no sell between them.\n"
+                               "'—' for signals created before this feature was added."),
+    "Exit Reason":    st.column_config.TextColumn(
+                          "🚪 Exit Reason", width="small",
+                          help="Why this trade was closed.\n\n"
+                               "✅ TP Hit — price reached the take-profit level\n"
+                               "❌ SL Hit — price hit the hard stop-loss\n"
+                               "🚨 F2/F3/F4 — one or more trend indicators flipped "
+                               "bearish on the last 15m candle (Trend Exit)\n"
+                               "'—' for open trades or legacy signals."),
     "Alert":          st.column_config.TextColumn(
                           "🚨 Alert", width="small",
                           help="🔴 DL = price ≥3% below entry  |  🔴 TL = open ≥2 hours"),
@@ -6388,16 +4282,6 @@ _SIG_COL_CFG = {
                                "latest close price; rows show \"—\" only when "
                                "live price data hasn't landed yet (typically "
                                "the very first cycle after a signal fires)."),
-    "Est Liquidity":  st.column_config.TextColumn(
-                          "💥 Est Liquidity", width="medium",
-                          help="Estimated liquidation price for isolated trades, "
-                               "with % distance from entry in parentheses.\n\n"
-                               "Formula (LONG isolated, approximate): "
-                               "liq ≈ entry × (1 − 1/leverage).\n"
-                               "Distance from entry = -100 / leverage "
-                               "(e.g. 10× → -10%, 20× → -5%).\n\n"
-                               "Cross-margin trades show \"—\" because liquidation "
-                               "depends on account-wide equity, not per-trade info."),
     "Order Size":     st.column_config.TextColumn(
                           "💵 Order Size", width="small",
                           help="Total dollar notional for this trade "
@@ -6471,25 +4355,26 @@ _SIG_COL_CFG = {
                                "Shows \"—\" only on the very first cycle after "
                                "a signal fires, before any candle fetch has "
                                "populated the field."),
-    "Next DCA":       st.column_config.TextColumn(
-                          "🪜 Next DCA", width="medium",
-                          help="Price at which the NEXT DCA add will trigger "
-                               "on this trade, plus the ladder slot "
-                               "(e.g. \"DCA 2/3\" means the upcoming fire "
-                               "will be the 2nd DCA of a max-3 ladder).\n\n"
-                               "Computed from the blended average and the "
-                               "% snapshotted onto the signal at entry:\n"
-                               "  • Isolated → `dca_iso_distance_pct` = "
-                               "% DISTANCE ABOVE LIQUIDATION toward entry. "
-                               "Higher = conservative (fires near entry), "
-                               "lower = aggressive (fires near liq).\n"
-                               "     e.g. entry $100 · 10× · 70% → $97\n"
-                               "  • Cross    → `dca_cross_drop_pct` % fixed "
-                               "drop below avg.\n\n"
-                               "Shown only when DCA is enabled on the trade "
-                               "and ladder slots remain (dca_count < dca_max). "
-                               "Otherwise \"—\"."),
-    "Fill $":         st.column_config.NumberColumn(format="%.8f",
+
+
+    "Exit %":           st.column_config.TextColumn(
+                          "📊 Exit %", width="small",
+                          help="Signed % of close_price vs effective entry price.\n\n"
+                               "  • Positive → closed above entry (TP or FC hit)\n"
+                               "  • Negative → closed below entry (SL hit)\n\n"
+                               "Entry reference:\n"
+                               "  • DCA trades  → blended avg_entry (reflects actual cost)\n"
+                               "  • Non-DCA     → signal_entry (actual market fill)\n\n"
+                               "Useful for spotting consistent TP distance vs SL distance "
+                               "across your trade history."),
+    "Max TP $":         st.column_config.TextColumn(
+                          "🎯 Max TP $", width="small",
+                          help="Dollar gain that WOULD have been realized at the planned TP "
+                               "price — this target was NOT reached (the trade was closed "
+                               "earlier by the FC mechanism).\n\n"
+                               "Compare this against PnL $ to see how much of the planned "
+                               "gain was captured by the FC close vs what was left on the table."),
+    "Fill $":           st.column_config.NumberColumn(format="%.8f",
                           help="Actual market fill price (may differ from signal entry)"),
     "Trade History":  st.column_config.TextColumn(
                           "📜 Trade History", width="large",
@@ -6541,54 +4426,87 @@ def _style_alert_cell(val) -> str:
     return ""
 
 
+def _style_pnl_cell(val) -> str:
+    """Return CSS for the PnL $ column: green for positive, red for negative."""
+    try:
+        if val is None or str(val).strip() in ("—", "", "N/A"):
+            return ""
+        s = str(val).strip()
+        if s.startswith("-"):
+            return "color: #C0392B; font-weight: 600;"   # red
+        if s.startswith("+"):
+            return "color: #2E7D32; font-weight: 600;"   # green
+    except Exception:
+        pass
+    return ""
+
+
 def _render_sig_table(sig_list: list, header: str, empty_msg: str,
                       auto_height: bool = False, is_open_table: bool = False,
-                      show_pnl: bool = False, scroll_height: int = None):
+                      show_pnl: bool = False, scroll_height: int = None,
+                      use_expander: bool = False, expander_open: bool = True,
+                      show_header: bool = True):
+    """Render a signal table.
+
+    Parameters
+    ----------
+    use_expander  : wrap the whole table in a collapsed st.expander whose label
+                    is the header string + row count.  The internal ### markdown
+                    heading is suppressed to avoid duplication with the expander
+                    label.  expander_open controls whether it starts expanded.
+    show_header   : when False, suppresses the ### markdown heading.  Useful
+                    when the caller wraps the table in its own st.expander and
+                    wants to avoid a redundant heading inside.
+    """
     rows = [_build_signal_row(s, is_open_table=is_open_table, show_pnl=show_pnl)
             for s in sig_list]
-    st.markdown(f"### {header} ({len(rows)})")
-    if rows:
-        # Wrap the rows in a pandas DataFrame so we can apply Styler to color
-        # the whole Alert cell orange+bold when it contains DCA text. Fall
-        # back to plain dict rendering if pandas styling fails for any
-        # reason — keeps the table visible even on a styling hiccup.
-        try:
-            import pandas as _pd
-            _df = _pd.DataFrame(rows)
-            if "Alert" in _df.columns:
-                _styled = _df.style.applymap(
-                    _style_alert_cell, subset=["Alert"]
-                )
-                _render_obj = _styled
-            else:
-                _render_obj = _df
-        except Exception:
-            _render_obj = rows
 
-        if scroll_height is not None:
-            # Fixed-height scrollable table — internal vertical scroll bar,
-            # the rest of the page stays still.
-            st.dataframe(_render_obj, use_container_width=True,
-                         hide_index=True,
-                         height=scroll_height,
-                         column_config=_SIG_COL_CFG)
-        elif auto_height:
-            # Expand so ALL rows are visible without internal scrolling.
-            # Each row ≈ 35 px, header ≈ 38 px, +10 px buffer. Streamlit's
-            # dataframe auto-expands individual cells that contain newlines
-            # (Trade History column) — we do NOT inflate the fixed per-row
-            # height globally, since that would add empty whitespace for
-            # rows whose Trade History is short.
-            st.dataframe(_render_obj, use_container_width=True,
-                         hide_index=True,
-                         height=len(rows) * 35 + 48,
-                         column_config=_SIG_COL_CFG)
+    def _draw_table_content():
+        # Heading is shown in non-expander mode (unless explicitly suppressed).
+        if show_header and not use_expander:
+            st.markdown(f"### {header} ({len(rows)})")
+        if rows:
+            # Wrap the rows in a pandas DataFrame so we can apply Styler to
+            # color the Alert cell orange+bold when it contains DCA text.
+            # Fall back to plain dict rendering if pandas styling fails.
+            try:
+                import pandas as _pd
+                _df = _pd.DataFrame(rows)
+                _styled = _df.style
+                if "Alert" in _df.columns:
+                    _styled = _styled.applymap(_style_alert_cell, subset=["Alert"])
+                if "PnL $" in _df.columns:
+                    _styled = _styled.applymap(_style_pnl_cell, subset=["PnL $"])
+                _render_obj = _styled
+            except Exception:
+                _render_obj = rows
+
+            if scroll_height is not None:
+                # Fixed-height scrollable table — internal vertical scroll bar,
+                # the rest of the page stays still.
+                st.dataframe(_render_obj, use_container_width=True,
+                             hide_index=True,
+                             height=scroll_height,
+                             column_config=_SIG_COL_CFG)
+            elif auto_height:
+                # Expand so ALL rows are visible without internal scrolling.
+                st.dataframe(_render_obj, use_container_width=True,
+                             hide_index=True,
+                             height=len(rows) * 35 + 48,
+                             column_config=_SIG_COL_CFG)
+            else:
+                st.dataframe(_render_obj, use_container_width=True,
+                             hide_index=True,
+                             column_config=_SIG_COL_CFG)
         else:
-            st.dataframe(_render_obj, use_container_width=True,
-                         hide_index=True,
-                         column_config=_SIG_COL_CFG)
+            st.info(empty_msg)
+
+    if use_expander:
+        # Expander label carries the count so it's visible while collapsed.
+        with st.expander(f"{header} ({len(rows)})", expanded=expander_open):
+            _draw_table_content()
     else:
-        st.info(empty_msg)
+        _draw_table_content()
 
 # ── Signal tables — auto-refresh fragment ──────────────────────────────────────
 # Wrapped in @st.fragment(run_every=30) so Streamlit re-renders ONLY this
@@ -6610,16 +4528,46 @@ def _signal_tables_fragment():
                [s for s in _frag_signals if s.get("sector") == _frag_sector]
     filtered_sorted = sorted(filtered, key=lambda x: x.get("timestamp", ""), reverse=True)
 
-    _open_sigs      = [s for s in filtered_sorted if s.get("status") == "open"]
-    _tp_sigs        = [s for s in filtered_sorted if s.get("status") == "tp_hit"]
-    _sl_sigs        = [s for s in filtered_sorted if s.get("status") == "sl_hit"]
-    _dca_sl_sigs    = [s for s in filtered_sorted if s.get("status") == "dca_sl_hit"]
-    _queue_sigs     = [s for s in filtered_sorted if s.get("status") == "queue_limit"]
+    _open_sigs       = [s for s in filtered_sorted if s.get("status") == "open"]
+    _tp_sigs         = [s for s in filtered_sorted if s.get("status") == "tp_hit"]
+    _sl_sigs         = [s for s in filtered_sorted if s.get("status") == "sl_hit"]
+    _trend_exit_sigs = [s for s in filtered_sorted if s.get("status") == "trend_exit"]
+    _queue_sigs      = [s for s in filtered_sorted if s.get("status") == "queue_limit"]
     _closed_okx_sigs = [s for s in filtered_sorted if s.get("status") == "closed_okx"]
 
     # ── Table 1: Open Signals ───────────────────────────────────────────────────────
-    _render_sig_table(_open_sigs,  "🔵 Open Signals",  "No open signals right now.",
-                      scroll_height=450, is_open_table=True, show_pnl=True)
+    # ── Open Signals table with row selection + Force Close ─────────────────────
+    st.markdown(f"### 🔵 Open Signals ({len(_open_sigs)})")
+    if _open_sigs:
+        try:
+            import pandas as _pd
+            _open_rows = [_build_signal_row(s, is_open_table=True, show_pnl=True)
+                          for s in _open_sigs]
+            _open_df   = _pd.DataFrame(_open_rows)
+            _open_styled = _open_df.style
+            if "Alert" in _open_df.columns:
+                _open_styled = _open_styled.applymap(_style_alert_cell, subset=["Alert"])
+            if "PnL $" in _open_df.columns:
+                _open_styled = _open_styled.applymap(_style_pnl_cell, subset=["PnL $"])
+            _open_render = _open_styled
+        except Exception:
+            _open_rows   = [_build_signal_row(s, is_open_table=True, show_pnl=True)
+                            for s in _open_sigs]
+            _open_render = _open_rows
+
+        _open_event = st.dataframe(
+            _open_render,
+            use_container_width=True,
+            hide_index=True,
+            height=450,
+            column_config=_SIG_COL_CFG,
+            selection_mode="single-row",
+            on_select="rerun",
+            key="open_signals_table",
+        )
+
+    else:
+        st.info("No open signals right now.")
 
     # ── OKX Live Positions (inline, auto-fetch) ────────────────────────────────────
     # Shown only when auto-trading is ON. Fetches on every render using a dedicated
@@ -6686,7 +4634,7 @@ def _signal_tables_fragment():
                         _ghost_syms.append(_inst)
                     _inline_rows.append({
                         "Symbol":     _inst,
-                        "Contracts":  int(_p.get("pos", 0) or 0),
+                        "Contracts":  int(float(_p.get("pos", 0) or 0)),
                         "Avg Entry":  float(_p.get("avgPx",       0) or 0),
                         "Mark Price": float(_p.get("markPx",      0) or 0),
                         "Unreal PnL": round(_upnl, 4),
@@ -6794,69 +4742,71 @@ def _signal_tables_fragment():
         _hist_ts_tp   = st.session_state.get("okx_hist_ts", "")
         _env_hist     = "🟡 Demo" if _snap_cfg.get("demo_mode", True) else "🔴 Live"
 
-        st.markdown(
-            f"**📋 OKX Fulfilled Orders**"
-            f"<span style='font-size:0.8em; color:gray; margin-left:12px;'>"
-            f"auto-fetched · {_hist_ts_tp} · {_env_hist}</span>",
-            unsafe_allow_html=True,
-        )
-
-        if _tp_hist is None:
-            st.warning("⚠️ Could not fetch OKX position history — check Error Log.")
-        elif not _tp_hist:
-            st.info("No fulfilled (TP-closed) positions found in the last 100 records.")
-        else:
-            # Build set of TP signal symbols for the Match column.
-            _tp_sig_syms = {s.get("symbol", "") for s in _tp_sigs}
-            _tp_close_map = {
-                "2": "Take Profit",
-                "4": "Partial TP",
-            }
-            _tp_rows = []
-            _tp_ghost_syms = []
+        # Filter to last 24 hours using the position uTime (ms epoch).
+        _24h_cutoff_ms = (time.time() - 86400) * 1000
+        _tp_hist_24h = []
+        if _tp_hist:
             for _ph in _tp_hist:
-                _inst_tp   = _ph.get("instId", "")
-                _sym_tp    = _inst_tp.replace("-USDT-SWAP", "USDT").replace("-", "")
-                _rpnl_tp   = float(_ph.get("realizedPnl", 0) or 0)
-                _close_ts_tp = ""
                 try:
-                    _close_ts_tp = datetime.fromtimestamp(
-                        int(_ph.get("uTime", 0)) / 1000,
-                        tz=dubai_now().tzinfo
-                    ).strftime("%d %b %Y  %H:%M GST")
+                    if int(_ph.get("uTime", 0)) >= _24h_cutoff_ms:
+                        _tp_hist_24h.append(_ph)
                 except Exception:
                     pass
-                _matched_tp = _sym_tp in _tp_sig_syms or _inst_tp in _tp_sig_syms
-                if not _matched_tp:
-                    _tp_ghost_syms.append(_inst_tp)
-                _tp_rows.append({
-                    "Symbol":       _inst_tp,
-                    "Direction":    _ph.get("direction", "").capitalize(),
-                    "Close Reason": _tp_close_map.get(_ph.get("type", ""), "TP"),
-                    "Contracts":    int(float(_ph.get("closeTotalPos", 0) or 0)),
-                    "Avg Entry":    float(_ph.get("openAvgPx",  0) or 0),
-                    "Close Price":  float(_ph.get("closeAvgPx", 0) or 0),
-                    "Realized PnL": round(_rpnl_tp, 4),
-                    "Close Time":   _close_ts_tp,
-                    "Match":        "✅" if _matched_tp else "⚠️ no signal",
-                })
 
-            st.dataframe(
-                _tp_rows,
-                use_container_width=True,
-                hide_index=True,
-                height=len(_tp_rows) * 35 + 48,
-                column_config={
-                    "Avg Entry":    st.column_config.NumberColumn(format="%.6f"),
-                    "Close Price":  st.column_config.NumberColumn(format="%.6f"),
-                    "Realized PnL": st.column_config.NumberColumn(
-                                        "Realized PnL $", format="%.4f"),
-                },
-            )
-            if _tp_ghost_syms:
-                st.caption(
-                    f"⚠️ {len(_tp_ghost_syms)} OKX fulfilled position(s) have no matching TP signal: "
-                    + ", ".join(_tp_ghost_syms)
+        _fulfilled_count = len(_tp_hist_24h) if _tp_hist else 0
+        _exp_label_tp = (
+            f"📋 OKX Fulfilled Orders — last 24 h ({_fulfilled_count})"
+            f"   ·   {_hist_ts_tp} · {_env_hist}"
+        )
+        with st.expander(_exp_label_tp, expanded=False):
+            if _tp_hist is None:
+                st.warning("⚠️ Could not fetch OKX position history — check Error Log.")
+            elif not _tp_hist_24h:
+                st.info("No fulfilled (TP-closed) positions in the last 24 hours.")
+            else:
+                # Build set of TP signal symbols for the Match column.
+                _tp_sig_syms = {s.get("symbol", "") for s in _tp_sigs}
+                _tp_close_map = {
+                    "2": "Take Profit",
+                    "4": "Partial TP",
+                }
+                _tp_rows = []
+                for _ph in _tp_hist_24h:
+                    _inst_tp     = _ph.get("instId", "")
+                    _sym_tp      = _inst_tp.replace("-USDT-SWAP", "USDT").replace("-", "")
+                    _rpnl_tp     = float(_ph.get("realizedPnl", 0) or 0)
+                    _close_ts_tp = ""
+                    try:
+                        _close_ts_tp = datetime.fromtimestamp(
+                            int(_ph.get("uTime", 0)) / 1000,
+                            tz=dubai_now().tzinfo
+                        ).strftime("%d %b %Y  %H:%M GST")
+                    except Exception:
+                        pass
+                    _matched_tp = _sym_tp in _tp_sig_syms or _inst_tp in _tp_sig_syms
+                    _tp_rows.append({
+                        "Symbol":       _inst_tp,
+                        "Direction":    _ph.get("direction", "").capitalize(),
+                        "Close Reason": _tp_close_map.get(_ph.get("type", ""), "TP"),
+                        "Contracts":    int(float(_ph.get("closeTotalPos", 0) or 0)),
+                        "Avg Entry":    float(_ph.get("openAvgPx",  0) or 0),
+                        "Close Price":  float(_ph.get("closeAvgPx", 0) or 0),
+                        "Realized PnL": round(_rpnl_tp, 4),
+                        "Close Time":   _close_ts_tp,
+                        "Match":        "✅" if _matched_tp else "⚠️ no signal",
+                    })
+
+                st.dataframe(
+                    _tp_rows,
+                    use_container_width=True,
+                    hide_index=True,
+                    height=len(_tp_rows) * 35 + 48,
+                    column_config={
+                        "Avg Entry":    st.column_config.NumberColumn(format="%.6f"),
+                        "Close Price":  st.column_config.NumberColumn(format="%.6f"),
+                        "Realized PnL": st.column_config.NumberColumn(
+                                            "Realized PnL $", format="%.4f"),
+                    },
                 )
 
     st.divider()
@@ -6866,6 +4816,10 @@ def _signal_tables_fragment():
     # the dedicated "DCA SL Hit" table below, not this one.
     _render_sig_table(_sl_sigs,    "❌ SL Hit",         "No SL hits yet.",
                       show_pnl=True)
+
+    # ── Table 3b: Trend Exit ────────────────────────────────────────────────
+    _render_sig_table(_trend_exit_sigs, "🚨 Trend Exit",
+                      "No trend exits yet.", show_pnl=True)
 
     # ── OKX Liquidated / SL Closed Orders (auto-trading only) ───────────────────────
     if _hist_trade_on and _hist_has_creds:
@@ -6886,7 +4840,7 @@ def _signal_tables_fragment():
             st.info("No SL-closed or liquidated positions found in the last 100 records.")
         else:
             # Build combined set of SL signal symbols for the Match column.
-            _sl_sig_syms = {s.get("symbol", "") for s in _sl_sigs + _dca_sl_sigs}
+            _sl_sig_syms = {s.get("symbol", "") for s in _sl_sigs}
             _sl_close_map = {
                 "1": "Stop-Loss",
                 "3": "Manual Close",
@@ -6942,29 +4896,24 @@ def _signal_tables_fragment():
 
     st.divider()
 
-    # ── Table 4: DCA SL Hit (ladder-exhausted closures) ────────────────────────────
-    # Dedicated table for trades that consumed every allowed DCA add and then hit
-    # the final −3%-below-blended-average SL. Keeping these separate from regular
-    # SL hits makes it easy to audit DCA-strategy performance in isolation.
-    _render_sig_table(_dca_sl_sigs, "❌ DCA SL Hit (ladder exhausted)",
-                      "No DCA ladder-exhausted SL hits yet.",
-                      show_pnl=True)
-    st.divider()
 
     # ── Table 5: Queue Limit ────────────────────────────────────────────────────────
     # No PnL shown — queue_limit signals never opened a real trade.
-    _render_sig_table(_queue_sigs, "⏳ Queue Limit",    "No queued signals.")
-
-    if _queue_sigs:
-        if st.button("🗑️ Clear Queue Limit Records", key="clear_queue_limit"):
-            with _log_lock:
-                _b._bsc_log["signals"] = [
-                    s for s in _b._bsc_log["signals"]
-                    if s.get("status") != "queue_limit"
-                ]
-                save_log(_b._bsc_log)
-            st.success("✅ Queue Limit records cleared.")
-            st.rerun()
+    # Collapsed by default; clear button lives inside the same expander.
+    _ql_count = len(_queue_sigs)
+    with st.expander(f"⏳ Queue Limit ({_ql_count})", expanded=False):
+        _render_sig_table(_queue_sigs, "⏳ Queue Limit", "No queued signals.",
+                          show_header=False)
+        if _queue_sigs:
+            if st.button("🗑️ Clear Queue Limit Records", key="clear_queue_limit"):
+                with _log_lock:
+                    _b._bsc_log["signals"] = [
+                        s for s in _b._bsc_log["signals"]
+                        if s.get("status") != "queue_limit"
+                    ]
+                    save_log(_b._bsc_log)
+                st.success("✅ Queue Limit records cleared.")
+                st.rerun()
 
     # ── Table 6: Closed on OKX ─────────────────────────────────────────────────────
     # Positions that OKX closed (manually or otherwise) but weren't caught by the
@@ -6983,11 +4932,11 @@ _signal_tables_fragment()
 _filtered_pg   = signals if st.session_state.get("sector_filter","All") == "All" else \
                  [s for s in signals if s.get("sector") == st.session_state.get("sector_filter","All")]
 _fsorted_pg    = sorted(_filtered_pg, key=lambda x: x.get("timestamp",""), reverse=True)
-_open_sigs      = [s for s in _fsorted_pg if s.get("status") == "open"]
-_tp_sigs        = [s for s in _fsorted_pg if s.get("status") == "tp_hit"]
-_sl_sigs        = [s for s in _fsorted_pg if s.get("status") == "sl_hit"]
-_dca_sl_sigs    = [s for s in _fsorted_pg if s.get("status") == "dca_sl_hit"]
-_queue_sigs     = [s for s in _fsorted_pg if s.get("status") == "queue_limit"]
+_open_sigs       = [s for s in _fsorted_pg if s.get("status") == "open"]
+_tp_sigs         = [s for s in _fsorted_pg if s.get("status") == "tp_hit"]
+_sl_sigs          = [s for s in _fsorted_pg if s.get("status") == "sl_hit"]
+_trend_exit_sigs  = [s for s in _fsorted_pg if s.get("status") == "trend_exit"]
+_queue_sigs       = [s for s in _fsorted_pg if s.get("status") == "queue_limit"]
 _closed_okx_sigs = [s for s in _fsorted_pg if s.get("status") == "closed_okx"]
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -7058,7 +5007,7 @@ with st.expander("📡 OKX Live Positions", expanded=False):
                             "Symbol":        _p.get("instId", ""),
                             "Side":          _p.get("posSide", "net").capitalize(),
                             "Mode":          _mgn_mode.capitalize(),
-                            "Contracts":     int(_p.get("pos", 0) or 0),
+                            "Contracts":     int(float(_p.get("pos", 0) or 0)),
                             "Avg Entry":     float(_p.get("avgPx",       0) or 0),
                             "Mark Price":    float(_p.get("markPx",      0) or 0),
                             "Unreal PnL":    round(_upnl, 4),
@@ -7261,7 +5210,17 @@ with st.expander("🤖 Manual Trade", expanded=False):
 # ── Charts ─────────────────────────────────────────────────────────────────────
 if signals:
     st.divider()
-    ch1, ch2 = st.columns(2)
+    # All three charts in one row: sector pie | outcomes bar | signals per day
+    from collections import Counter
+    _dc: Counter = Counter()
+    for s in signals:
+        try:
+            _d = to_dubai(datetime.fromisoformat(s["timestamp"].replace("Z","+00:00"))).strftime("%m/%d")
+            _dc[_d] += 1
+        except Exception:
+            pass
+    _has_per_day = len(signals) > 1 and bool(_dc)
+    ch1, ch2, ch3 = st.columns(3)
     sec_counts: dict = {}
     for s in signals:
         k = s.get("sector","Other"); sec_counts[k] = sec_counts.get(k,0)+1
@@ -7269,36 +5228,40 @@ if signals:
         labels=list(sec_counts.keys()), values=list(sec_counts.values()),
         hole=0.4, marker=dict(colors=px.colors.qualitative.Dark24)
     )).update_layout(title="Signals by Sector", paper_bgcolor="rgba(0,0,0,0)",
-                     plot_bgcolor="rgba(0,0,0,0)", font=dict(color="#e6edf3"),
+                     plot_bgcolor="rgba(0,0,0,0)", font=dict(color="#062020"),
                      margin=dict(t=40,b=10,l=10,r=10)),
                      use_container_width=True)
-    outcome = {"Open":open_count,"TP Hit":tp_count,"SL Hit":sl_count}
+    outcome = {"Open": open_count, "TP Hit": tp_count, "SL Hit": sl_count}
     ch2.plotly_chart(go.Figure(go.Bar(
         x=list(outcome.keys()), y=list(outcome.values()),
-        marker_color=["#58a6ff","#3fb950","#f85149"],
+        marker_color=["#005F65", "#2E7D32", "#C0392B"],
         text=list(outcome.values()), textposition="outside"
     )).update_layout(title="Signal Outcomes", paper_bgcolor="rgba(0,0,0,0)",
-                     plot_bgcolor="rgba(0,0,0,0)", font=dict(color="#e6edf3"),
-                     yaxis=dict(gridcolor="#21262d"), margin=dict(t=40,b=10,l=10,r=10)),
+                     plot_bgcolor="rgba(0,0,0,0)", font=dict(color="#062020"),
+                     yaxis=dict(gridcolor="rgba(0,122,128,0.2)"), margin=dict(t=40,b=10,l=10,r=10)),
                      use_container_width=True)
-
-    if len(signals) > 1:
-        from collections import Counter
-        dc: Counter = Counter()
-        for s in signals:
-            try:
-                d = to_dubai(datetime.fromisoformat(s["timestamp"].replace("Z","+00:00"))).strftime("%m/%d")
-                dc[d] += 1
-            except Exception: pass
-        if dc:
-            days = sorted(dc.keys())
-            st.plotly_chart(go.Figure(go.Bar(
-                x=days, y=[dc[d] for d in days],
-                marker_color="#d29922", text=[dc[d] for d in days], textposition="outside"
-            )).update_layout(title="Signals Per Day (Dubai/GST)", paper_bgcolor="rgba(0,0,0,0)",
-                             plot_bgcolor="rgba(0,0,0,0)", font=dict(color="#e6edf3"),
-                             yaxis=dict(gridcolor="#21262d"), margin=dict(t=40,b=10,l=10,r=10)),
-                             use_container_width=True)
+    if _has_per_day:
+        _days = sorted(_dc.keys())
+        ch3.plotly_chart(go.Figure(go.Bar(
+            x=_days, y=[_dc[_d] for _d in _days],
+            width=0.2,
+            marker=dict(
+                color="#005F65",
+                opacity=0.9,
+                line=dict(color="#005A60", width=1),
+            ),
+            text=[_dc[_d] for _d in _days], textposition="outside",
+            textfont=dict(color="#005F65", size=11),
+        )).update_layout(
+            title=dict(text="Signals Per Day (Dubai/GST)", font=dict(size=13, color="#1E4848")),
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+            font=dict(color="#062020"),
+            bargap=0.7,
+            yaxis=dict(gridcolor="rgba(0,122,128,0.2)", zeroline=False),
+            xaxis=dict(gridcolor="rgba(0,122,128,0.2)"),
+            margin=dict(t=40, b=10, l=10, r=10),
+        ), use_container_width=True)
 
 # ── Filter funnel ──────────────────────────────────────────────────────────────
 # Deep-copy under lock so background thread can't mutate lists mid-render
@@ -7312,360 +5275,42 @@ if (
         total     = fc.get("total_watchlist", 0)
         pre_out_n = fc.get("pre_filtered_out", 0)
         after_pre = total - pre_out_n
+        total     = fc.get("total_watchlist", 0)
+        pre_out_n = fc.get("pre_filtered_out", 0)
+        after_pre = total - pre_out_n
         checked   = fc.get("checked", after_pre)
-        after_f2  = checked   - fc.get("f2_pdz15m", 0)
-        after_f3  = after_f2  - fc.get("f3_pdz5m",  0)
-        after_f4  = after_f3  - fc.get("f4_rsi5m",  0)
-        after_f5  = after_f4  - fc.get("f5_rsi1h",  0)
-        after_f5b = after_f5  - fc.get("f5b_atr",   0)
-        after_f6_ema_3m  = after_f5b        - fc.get("f6_ema_3m",  0)
-        after_f6_ema_5m  = after_f6_ema_3m  - fc.get("f6_ema_5m",  0)
-        after_f6_ema_15m = after_f6_ema_5m  - fc.get("f6_ema_15m", 0)
-        after_f6         = after_f6_ema_15m  # final EMA stage output
-        # F7 MACD — per timeframe running totals
-        after_f7_macd_3m  = after_f6  - fc.get("f7_macd_3m",  0)
-        after_f7_macd_5m  = after_f7_macd_3m  - fc.get("f7_macd_5m",  0)
-        after_f7_macd_15m = after_f7_macd_5m  - fc.get("f7_macd_15m", 0)
-        # F8 SAR — per timeframe running totals
-        after_f8_sar_3m   = after_f7_macd_15m - fc.get("f8_sar_3m",  0)
-        after_f8_sar_5m   = after_f8_sar_3m   - fc.get("f8_sar_5m",  0)
-        after_f8_sar_15m  = after_f8_sar_5m   - fc.get("f8_sar_15m", 0)
-        after_f9           = after_f8_sar_15m  - fc.get("f9_vol",       0)
-        after_f10          = after_f9          - fc.get("f10_ema_cross", 0)
-        after_empty        = after_f10         - fc.get("f_empty_data", 0)
+        passed    = fc.get("passed",  0)
 
-        # Use the config that was ACTIVE during the last scan for labels
-        sc = fc.get("scan_cfg") or _snap_cfg
-
-        if sc is not _snap_cfg and sc != _snap_cfg:
-            st.caption("⚠️ Config changed since last scan — funnel reflects the previous settings. "
-                       "Rescan is in progress with the new config.")
-
-        pre_lbl    = "⚡ After Bulk Pre-filter" if sc.get("use_pre_filter", True) else "⚡ Pre-filter (disabled)"
-        pdz15m_lbl = "F2 — PDZ Zones (15m)" if sc.get("use_pdz_15m", True) else "F2 — PDZ 15m (off)"
-        pdz5m_lbl  = "F3 — PDZ Zones (5m)"  if sc.get("use_pdz_5m",  True) else "F3 — PDZ 5m (off)"
-        f4_lbl     = f"F4 — 5m RSI \u2265{sc.get('rsi_5m_min',30)}" if sc.get("use_rsi_5m", True) else "F4 — 5m RSI (off)"
-        f5_lbl     = (f"F5 — 1h RSI {sc.get('rsi_1h_min',30)}\u2013{sc.get('rsi_1h_max',95)}"
-                      if sc.get("use_rsi_1h", True) else "F5 — 1h RSI (off)")
-        _atr_mode_lbl = sc.get("atr_mode", "Normal")
-        _atr_thresh_lbl = {"Strict": "≤1.5×", "Normal": "≤2.0×", "Relaxed": "≤3.0×"}.get(_atr_mode_lbl, "≤2.0×")
-        f5b_lbl    = (f"F5b — ATR(14) 15m {_atr_mode_lbl} {_atr_thresh_lbl}"
-                      if sc.get("use_atr_filter", False) else "F5b — ATR (off)")
-        ema_parts = []
-        if sc.get("use_ema_3m"):  ema_parts.append(f"3m EMA{sc.get('ema_period_3m',12)}")
-        if sc.get("use_ema_5m"):  ema_parts.append(f"5m EMA{sc.get('ema_period_5m',12)}")
-        if sc.get("use_ema_15m"): ema_parts.append(f"15m EMA{sc.get('ema_period_15m',12)}")
-        ema_lbl = ("F6 — EMA (" + (" · ".join(ema_parts)) + ")") if ema_parts else "F6 — EMA (off)"
-        vol_lbl = (f"F9 — Vol \u2265{sc.get('vol_spike_mult',2.0)}\xd7 / {sc.get('vol_spike_lookback',20)} 15m"
-                   if sc.get("use_vol_spike") else "F9 — Vol (off)")
-        ema_cross_lbl = (f"F10 — EMA{sc.get('ema_cross_fast_15m',12)}>EMA{sc.get('ema_cross_slow_15m',21)} 15m"
-                          if sc.get("use_ema_cross_15m", True) else "F10 — EMA Cross (off)")
-
-        # ── Table-style funnel (replaces Plotly chart) ─────────────────────
-        def _funnel_table_html(rows, total_n):
-            """Render the filter funnel as a readable HTML table."""
-            _css = (
-                "<style>"
-                ".ftbl{width:100%;border-collapse:collapse;font-size:13px;margin-bottom:1rem;}"
-                ".ftbl th{font-size:11px;font-weight:500;padding:6px 10px;"
-                "border-bottom:1px solid #30363d;color:#8b949e;text-align:left;}"
-                ".ftbl td{padding:7px 10px;border-bottom:1px solid #21262d;"
-                "color:#e6edf3;vertical-align:middle;}"
-                ".ftbl tr:last-child td{border-bottom:none;}"
-                ".ftbl tr.total-row td{background:#161b22;font-weight:500;}"
-                ".ftbl tr.signal-row td{background:#0d1117;font-weight:500;}"
-                ".ft-stage{font-size:12px;color:#8b949e;margin-top:2px;}"
-                ".ft-on{display:inline-block;font-size:10px;padding:1px 7px;"
-                "border-radius:4px;background:#1f3d5c;color:#79c0ff;font-weight:500;}"
-                ".ft-off{display:inline-block;font-size:10px;padding:1px 7px;"
-                "border-radius:4px;background:#21262d;color:#8b949e;font-weight:500;}"
-                ".ft-in{color:#8b949e;}"
-                ".ft-rem{color:#3fb950;font-weight:500;}"
-                ".ft-drop0{color:#8b949e;}"
-                ".ft-drop1{color:#d29922;font-weight:500;}"
-                ".ft-drop2{color:#f85149;font-weight:500;}"
-                ".ft-bar-wrap{display:inline-block;width:90px;height:7px;"
-                "background:#21262d;border-radius:4px;vertical-align:middle;margin-right:6px;}"
-                ".ft-bar{height:7px;border-radius:4px;background:#388bfd;}"
-                "</style>"
-            )
-            _hdr = (
-                "<table class='ftbl'>"
-                "<thead><tr>"
-                "<th style='width:32%'>Stage</th>"
-                "<th style='width:9%'>Status</th>"
-                "<th style='width:35%'>In → Dropped → Remaining</th>"
-                "<th style='width:24%'>Survival</th>"
-                "</tr></thead><tbody>"
-            )
-            _body = ""
-            for _stage, _status, _in, _dropped, _rem, _pct, _desc, _row_cls in rows:
-                _badge = f"<span class='ft-on'>ON</span>" if _status == "on" else (
-                         f"<span class='ft-off'>OFF</span>" if _status == "off" else "")
-                _drop_cls = "ft-drop0" if _dropped == 0 else (
-                            "ft-drop2" if _dropped > 20 else "ft-drop1")
-                _drop_str = (f"<span class='{_drop_cls}'>{_dropped} dropped</span>"
-                             if _dropped > 0 else "<span class='ft-drop0'>—</span>")
-                _flow = (f"<span class='ft-in'>{_in}</span>"
-                         f" <span style='color:#8b949e'>→</span> "
-                         f"{_drop_str}"
-                         f" <span style='color:#8b949e'>→</span> "
-                         f"<span class='ft-rem'>{_rem}</span>")
-                _bar_w = max(1, _pct)
-                _bar = (f"<div class='ft-bar-wrap'>"
-                        f"<div class='ft-bar' style='width:{_bar_w}%'></div></div>"
-                        f"<span style='font-size:12px;color:#8b949e'>{_pct}%</span>")
-                _stage_cell = (_stage if not _desc else
-                               f"{_stage}<div class='ft-stage'>{_desc}</div>")
-                _row_style = f" class='{_row_cls}'" if _row_cls else ""
-                _body += (f"<tr{_row_style}>"
-                          f"<td>{_stage_cell}</td>"
-                          f"<td>{_badge}</td>"
-                          f"<td>{_flow}</td>"
-                          f"<td>{_bar}</td>"
-                          f"</tr>")
-            return _css + _hdr + _body + "</tbody></table>"
-
-        # Build rows: (stage, status, in_n, dropped, remaining, pct, desc, row_css_class)
-        def _pct(n): return round(n / total * 100) if total > 0 else 0
-        _ft_rows = []
-        _ft_rows.append(("Watchlist", "", total, 0, total, 100, "Starting pool", "total-row"))
-        _ft_rows.append(("\u26a1 Bulk pre-filter",
-                         "on" if sc.get("use_pre_filter", True) else "off",
-                         total, pre_out_n, after_pre, _pct(after_pre),
-                         "Volume \xb7 price vs 24h low", ""))
-        _blacklisted = after_pre - checked
-        _ft_rows.append(("Cooldown / blacklist", "on",
-                         after_pre, _blacklisted, checked, _pct(checked),
-                         "SL cooldown \xb7 open trades", ""))
-        _ft_rows.append((pdz15m_lbl,
-                         "on" if sc.get("use_pdz_15m", True) else "off",
-                         checked, fc.get("f2_pdz15m", 0), after_f2, _pct(after_f2),
-                         "Premium \xb7 Equil \xb7 BandA \xb7 BandB", ""))
-        _ft_rows.append((pdz5m_lbl,
-                         "on" if sc.get("use_pdz_5m", True) else "off",
-                         after_f2, fc.get("f3_pdz5m", 0), after_f3, _pct(after_f3),
-                         "Same logic on 5m candles", ""))
-        _ft_rows.append((f4_lbl,
-                         "on" if sc.get("use_rsi_5m", True) else "off",
-                         after_f3, fc.get("f4_rsi5m", 0), after_f4, _pct(after_f4),
-                         "5m RSI floor", ""))
-        _ft_rows.append((f5_lbl,
-                         "on" if sc.get("use_rsi_1h", True) else "off",
-                         after_f4, fc.get("f5_rsi1h", 0), after_f5, _pct(after_f5),
-                         "1h RSI range", ""))
-        _ft_rows.append((f5b_lbl,
-                         "on" if sc.get("use_atr_filter", False) else "off",
-                         after_f5, fc.get("f5b_atr", 0), after_f5b, _pct(after_f5b),
-                         f"TP%/ATR% ratio {_atr_thresh_lbl}", ""))
-        # F6 EMA — per enabled timeframe
-        _ft_prev_ema = after_f5b
-        for _ema_tf, _ema_key, _ema_pkey, _ema_dkey, _ema_aftn in [
-            ("3m",  "use_ema_3m",  "ema_period_3m",  "f6_ema_3m",  after_f6_ema_3m),
-            ("5m",  "use_ema_5m",  "ema_period_5m",  "f6_ema_5m",  after_f6_ema_5m),
-            ("15m", "use_ema_15m", "ema_period_15m", "f6_ema_15m", after_f6_ema_15m),
-        ]:
-            if sc.get(_ema_key):
-                _ema_lbl = f"F6 \u2014 EMA{sc.get(_ema_pkey, 12)} {_ema_tf}"
-                _ft_rows.append((_ema_lbl, "on",
-                                 _ft_prev_ema, fc.get(_ema_dkey, 0), _ema_aftn, _pct(_ema_aftn),
-                                 f"Price above EMA{sc.get(_ema_pkey, 12)} on {_ema_tf}", ""))
-                _ft_prev_ema = _ema_aftn
-        if not ema_parts:
-            _ft_rows.append(("F6 \u2014 EMA (off)", "off",
-                             after_f5b, 0, after_f5b, _pct(after_f5b),
-                             "All EMA timeframes disabled", ""))
-        # F7 MACD — per enabled timeframe
-        _ft_prev = after_f6
-        for _tf, _key, _dkey, _aftn in [
-            ("3m",  "use_macd_3m",  "f7_macd_3m",  after_f7_macd_3m),
-            ("5m",  "use_macd_5m",  "f7_macd_5m",  after_f7_macd_5m),
-            ("15m", "use_macd_15m", "f7_macd_15m", after_f7_macd_15m),
-        ]:
-            if sc.get(_key, True):
-                _ft_rows.append((f"F7 \u2014 MACD {_tf}", "on",
-                                 _ft_prev, fc.get(_dkey, 0), _aftn, _pct(_aftn),
-                                 "MACD histogram bullish crossover", ""))
-                _ft_prev = _aftn
-        # F8 SAR — per enabled timeframe
-        for _tf, _key, _dkey, _aftn in [
-            ("3m",  "use_sar_3m",  "f8_sar_3m",  after_f8_sar_3m),
-            ("5m",  "use_sar_5m",  "f8_sar_5m",  after_f8_sar_5m),
-            ("15m", "use_sar_15m", "f8_sar_15m", after_f8_sar_15m),
-        ]:
-            if sc.get(_key, True):
-                _ft_rows.append((f"F8 \u2014 SAR {_tf}", "on",
-                                 _ft_prev, fc.get(_dkey, 0), _aftn, _pct(_aftn),
-                                 "Price above Parabolic SAR", ""))
-                _ft_prev = _aftn
-        _ft_rows.append((vol_lbl,
-                         "on" if sc.get("use_vol_spike") else "off",
-                         after_f8_sar_15m, fc.get("f9_vol", 0), after_f9, _pct(after_f9),
-                         "Volume spike check", ""))
-        _ft_rows.append((ema_cross_lbl,
-                         "on" if sc.get("use_ema_cross_15m", True) else "off",
-                         after_f9, fc.get("f10_ema_cross", 0), after_f10, _pct(after_f10),
-                         "Fast EMA above slow EMA 15m", ""))
-        _ft_rows.append(("\u26a0\ufe0f Empty candle drop", "on",
-                         after_f10, fc.get("f_empty_data", 0), after_empty, _pct(after_empty),
-                         "Missing timeframe data", ""))
-        _ft_rows.append(("\u2705 Signals generated", "", after_empty, 0, after_empty,
-                         _pct(after_empty), "Passed all active filters", "signal-row"))
-
-        st.markdown(_funnel_table_html(_ft_rows, total), unsafe_allow_html=True)
-        col_a, col_b, col_c = st.columns(3)
-        col_a.metric("Pre-filtered out ⚡", pre_out_n, help="Removed cheaply — no candle API calls used")
-        col_b.metric("Deep scanned 🔬",     checked,   help="Received full multi-timeframe candle analysis")
-        col_c.metric("Errors",              fc.get("errors",0))
-        super_n = fc.get("super_setup", 0)
-        if super_n:
-            st.success(f"⭐ {super_n} Super Setup(s) this cycle — 15m Discount zone instant buy!")
-
-        # ── Qualified coins table — one row per filter stage ────────────────────
-        st.markdown("#### 🪙 Qualified Coins at Each Stage")
-        st.caption("Shows which coins survived after each filter was applied in the last scan cycle.")
-
-        def _coin_str(s: set) -> str:
-            return ", ".join(sorted(s)) if s else "—"
-
-        # Build remaining sets by subtracting eliminated coins stage-by-stage
         _pre  = set(fc.get("pre_filter_passed_syms", []))
         _chk  = set(fc.get("checked_syms", []))
-        _f2e  = set(fc.get("f2_elim_syms",  []))
-        _f3e  = set(fc.get("f3_elim_syms",  []))
-        _f4e  = set(fc.get("f4_elim_syms",  []))
-        _f5e  = set(fc.get("f5_elim_syms",  []))
-        _f5be = set(fc.get("f5b_elim_syms", []))
-        _f6e_3m  = set(fc.get("f6_ema_3m_elim_syms",  []))
-        _f6e_5m  = set(fc.get("f6_ema_5m_elim_syms",  []))
-        _f6e_15m = set(fc.get("f6_ema_15m_elim_syms", []))
-        # F7 MACD — per timeframe elimination sets
-        _f7e_3m  = set(fc.get("f7_macd_3m_elim_syms",  []))
-        _f7e_5m  = set(fc.get("f7_macd_5m_elim_syms",  []))
-        _f7e_15m = set(fc.get("f7_macd_15m_elim_syms", []))
-        # F8 SAR — per timeframe elimination sets
-        _f8e_3m  = set(fc.get("f8_sar_3m_elim_syms",  []))
-        _f8e_5m  = set(fc.get("f8_sar_5m_elim_syms",  []))
-        _f8e_15m = set(fc.get("f8_sar_15m_elim_syms", []))
-        _f9e    = set(fc.get("f9_elim_syms",      []))
-        _f10e   = set(fc.get("f10_elim_syms",     []))
+        _ftrend = set(fc.get("f_trend_filter_syms", []))
         _fempty = set(fc.get("f_empty_data_syms", []))
-
-        _after_f2        = _chk          - _f2e
-        _after_f3        = _after_f2     - _f3e
-        _after_f4        = _after_f3     - _f4e
-        _after_f5        = _after_f4     - _f5e
-        _after_f5b       = _after_f5    - (_f5be if sc.get("use_atr_filter", False) else set())
-        _after_f6_ema_3m  = _after_f5b       - (_f6e_3m  if sc.get("use_ema_3m")  else set())
-        _after_f6_ema_5m  = _after_f6_ema_3m - (_f6e_5m  if sc.get("use_ema_5m")  else set())
-        _after_f6_ema_15m = _after_f6_ema_5m - (_f6e_15m if sc.get("use_ema_15m") else set())
-        _after_f6         = _after_f6_ema_15m
-        # MACD per timeframe — only subtract if that timeframe is enabled
-        _after_f7_macd_3m  = _after_f6          - (_f7e_3m  if sc.get("use_macd_3m",  True) else set())
-        _after_f7_macd_5m  = _after_f7_macd_3m  - (_f7e_5m  if sc.get("use_macd_5m",  True) else set())
-        _after_f7_macd_15m = _after_f7_macd_5m  - (_f7e_15m if sc.get("use_macd_15m", True) else set())
-        # SAR per timeframe
-        _after_f8_sar_3m   = _after_f7_macd_15m - (_f8e_3m  if sc.get("use_sar_3m",  True) else set())
-        _after_f8_sar_5m   = _after_f8_sar_3m   - (_f8e_5m  if sc.get("use_sar_5m",  True) else set())
-        _after_f8_sar_15m  = _after_f8_sar_5m   - (_f8e_15m if sc.get("use_sar_15m", True) else set())
-        _after_f9          = _after_f8_sar_15m  - _f9e
-        _after_f10         = _after_f9          - (_f10e if sc.get("use_ema_cross_15m", True) else set())
-        _fempty_syms = {s.split("(")[0] for s in _fempty}
-        _after_empty = _after_f10 - _fempty_syms
-
-        _process_err_count = max(0, fc.get("errors", 0))
         _new_sig_s    = set(fc.get("new_signal_syms",         []))
-        _blk_active_s = set(fc.get("blocked_by_active_syms", []))
+        _blk_active_s = set(fc.get("blocked_by_active_syms",  []))
         _blk_cool_s   = set(fc.get("blocked_by_cooldown_syms",[]))
         _blk_sl_cool_s = set(fc.get("blocked_by_sl_cooldown_syms", []))
-        _super_demoted_s = set(fc.get("super_cap_demoted_syms", []))
         _returned_syms = _new_sig_s | _blk_active_s | _blk_cool_s | _blk_sl_cool_s
+        _process_err_count = max(0, fc.get("errors", 0))
 
-        # stage_rows: (stage_name, in_count, remaining_count, coin_str)
-        # dropped = in_count - remaining_count (computed at render time)
+        def _coin_str(s): return ", ".join(sorted(s)) if s else "—"
+
         stage_rows = [
-            ("⚡ After Bulk Pre-filter",  total,       len(_pre),      _coin_str(_pre)),
-            ("🔬 Entered Deep Scan",      len(_pre),   len(_chk),      _coin_str(_chk)),
-            (f"After {pdz15m_lbl}",       len(_chk),   len(_after_f2), _coin_str(_after_f2)),
-            (f"After {pdz5m_lbl}",        len(_after_f2), len(_after_f3), _coin_str(_after_f3)),
-            (f"After {f4_lbl}",           len(_after_f3), len(_after_f4), _coin_str(_after_f4)),
-            (f"After {f5_lbl}",           len(_after_f4), len(_after_f5), _coin_str(_after_f5)),
-            (f"After {f5b_lbl}",          len(_after_f5), len(_after_f5b), _coin_str(_after_f5b)),
+            ("⚡ After Bulk Pre-filter",      total,       len(_pre),  _coin_str(_pre)),
+            ("🔬 Entered Deep Scan",          len(_pre),   len(_chk),  _coin_str(_chk)),
+            ("⚠️ Dropped — Empty Candle Data",len(_chk),   len(_fempty),"—"),
+            ("📈 Dropped — Trend Filter (F2/F3/F4)", "—", len(_ftrend), _coin_str(_ftrend)),
+            ("💥 Dropped — Process Error",    "—", _process_err_count, "See API Error Log ↓"),
+            ("✅ Returned Signal",            "—", len(_returned_syms), _coin_str(_returned_syms)),
+            ("🔵 Blocked — Open trade",       "—", len(_blk_active_s), _coin_str(_blk_active_s)),
+            ("🟡 Blocked — TP Cooldown",      "—", len(_blk_cool_s),   _coin_str(_blk_cool_s)),
+            ("🔴 Blocked — SL Cooldown",      "—", len(_blk_sl_cool_s),_coin_str(_blk_sl_cool_s)),
+            ("🟢 New Signals Fired",          "—", len(_new_sig_s),    _coin_str(_new_sig_s)),
         ]
-        # F6 EMA — one row per enabled timeframe
-        _sr_ema_prev = _after_f5b
-        for _ema_tf, _ema_key, _ema_pkey, _ema_after_set in [
-            ("3m",  "use_ema_3m",  "ema_period_3m",  _after_f6_ema_3m),
-            ("5m",  "use_ema_5m",  "ema_period_5m",  _after_f6_ema_5m),
-            ("15m", "use_ema_15m", "ema_period_15m", _after_f6_ema_15m),
-        ]:
-            if sc.get(_ema_key):
-                stage_rows.append((
-                    f"F6 — EMA{sc.get(_ema_pkey, 12)} {_ema_tf}",
-                    len(_sr_ema_prev), len(_ema_after_set),
-                    _coin_str(_ema_after_set),
-                ))
-                _sr_ema_prev = _ema_after_set
-        if not ema_parts:
-            stage_rows.append(("F6 — EMA (off)", len(_after_f5b), len(_after_f5b), _coin_str(_after_f5b)))
-        stage_rows += [
-        ]
-        # F7 MACD — one row per enabled timeframe
-        _sr_prev = _after_f6
-        for _tf, _key, _after_set in [
-            ("3m",  "use_macd_3m",  _after_f7_macd_3m),
-            ("5m",  "use_macd_5m",  _after_f7_macd_5m),
-            ("15m", "use_macd_15m", _after_f7_macd_15m),
-        ]:
-            if sc.get(_key, True):
-                stage_rows.append((
-                    f"F7 — MACD \U0001f7e2\u2191 {_tf}",
-                    len(_sr_prev), len(_after_set),
-                    _coin_str(_after_set),
-                ))
-                _sr_prev = _after_set
-        # F8 SAR — one row per enabled timeframe
-        for _tf, _key, _after_set in [
-            ("3m",  "use_sar_3m",  _after_f8_sar_3m),
-            ("5m",  "use_sar_5m",  _after_f8_sar_5m),
-            ("15m", "use_sar_15m", _after_f8_sar_15m),
-        ]:
-            if sc.get(_key, True):
-                stage_rows.append((
-                    f"F8 — SAR {_tf}",
-                    len(_sr_prev), len(_after_set),
-                    _coin_str(_after_set),
-                ))
-                _sr_prev = _after_set
-        # Fixed closing rows
-        stage_rows += [
-            (f"After {vol_lbl}",               len(_sr_prev),         len(_after_f9),   _coin_str(_after_f9)),
-            (f"After {ema_cross_lbl}",         len(_after_f9),        len(_after_f10),  _coin_str(_after_f10)),
-            ("⚠️ Dropped — Empty Candle Data", len(_after_f10),       len(_fempty),     ", ".join(sorted(_fempty)) if _fempty else "—"),
-            ("💥 Dropped — Process Error",     "—", _process_err_count, "See API Error Log below ↓"),
-            ("✅ Returned Signal",             "—", len(_returned_syms),   _coin_str(_returned_syms)),
-            ("⭐ Super cap demoted → F3-F10",  "—", len(_super_demoted_s), _coin_str(_super_demoted_s)),
-            ("🔵 Blocked — Open trade exists", "—", len(_blk_active_s),    _coin_str(_blk_active_s)),
-            ("🟡 Blocked — TP Cooldown",       "—", len(_blk_cool_s),      _coin_str(_blk_cool_s)),
-            ("🔴 Blocked — SL Cooldown (24h)", "—", len(_blk_sl_cool_s),   _coin_str(_blk_sl_cool_s)),
-            ("🟢 New Signals Fired",           "—", len(_new_sig_s),       _coin_str(_new_sig_s)),
-        ]
-
         st.dataframe(
-            [{"Filter Stage":    r[0],
-              "In":              r[1],
-              "Dropped":         (r[1] - r[2]) if isinstance(r[1], int) and isinstance(r[2], int) else "—",
-              "Remaining":       r[2],
-              "Qualified Coins": r[3]} for r in stage_rows],
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                "Filter Stage":    st.column_config.TextColumn(width="medium"),
-                "In":              st.column_config.NumberColumn(width="small"),
-                "Dropped":         st.column_config.NumberColumn(width="small"),
-                "Remaining":       st.column_config.NumberColumn(width="small"),
-                "Qualified Coins": st.column_config.TextColumn(width="large"),
-            }
+            [{"Filter Stage": r[0], "In": r[1],
+              "Dropped": (r[1]-r[2]) if isinstance(r[1],int) and isinstance(r[2],int) else "—",
+              "Remaining": r[2], "Qualified Coins": r[3]} for r in stage_rows],
+            use_container_width=True, hide_index=True,
         )
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -7674,7 +5319,12 @@ if (
 st.divider()
 
 with getattr(_b, "_bsc_error_log_lock", threading.Lock()):
-    _err_snap = list(getattr(_b, "_bsc_error_log", []))
+    _err_all  = list(getattr(_b, "_bsc_error_log", []))
+_err_cleared_at = getattr(_b, "_bsc_error_log_cleared_at", None)
+if _err_cleared_at:
+    _err_snap = [e for e in _err_all if e.get("ts", "") >= _err_cleared_at]
+else:
+    _err_snap = _err_all
 
 _TYPE_ICON  = {"scan": "🔴", "trade": "🟠", "loop": "🟣", "http": "🔵",
                "signal_update": "🟤", "io": "💾"}
@@ -7683,7 +5333,8 @@ _TYPE_LABEL = {"scan": "Scan/Candle", "trade": "Trade/Order",
                "signal_update": "Signal Update", "io": "File I/O"}
 
 _err_count = len(_err_snap)
-_err_label = f"⚠️ API Error Log — {_err_count} entr{'y' if _err_count == 1 else 'ies'}"
+_err_cleared_str = (f" · cleared {_err_cleared_at[11:16]}" if _err_cleared_at else "")
+_err_label = f"⚠️ API Error Log — {_err_count} entr{'y' if _err_count == 1 else 'ies'}{_err_cleared_str}"
 
 with st.expander(_err_label, expanded=(_err_count > 0)):
     if not _err_snap:
@@ -7705,6 +5356,7 @@ with st.expander(_err_label, expanded=(_err_count > 0)):
         if ecol2.button("🗑 Clear error log", key="clear_err_log"):
             with _b._bsc_error_log_lock:
                 _b._bsc_error_log.clear()
+            _b._bsc_error_log_cleared_at = dubai_now().isoformat()
             st.rerun()
 
         # ── Type filter ───────────────────────────────────────────────────
@@ -7747,6 +5399,7 @@ with st.expander(_err_label, expanded=(_err_count > 0)):
             },
         )
         st.caption(f"Showing {len(_err_rows)} of {_err_count} entries (newest first) · max {_ERROR_LOG_MAX} kept")
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Download Diagnostics  (bottom of page — plain-text snapshot for debug/share)
@@ -7811,8 +5464,7 @@ def _build_diagnostics_text() -> str:
 
     # ── Runtime state ────────────────────────────────────────────────────────
     _hdr("RUNTIME STATE")
-    try:
-        _kv("scanner_running",        _scanner_running.is_set())
+    try:        _kv("scanner_running",        _scanner_running.is_set())
     except Exception:
         _kv("scanner_running",        "<unavailable>")
     _kv("bsc_sl_paused",              getattr(_b, "_bsc_sl_paused", False))
@@ -7824,21 +5476,12 @@ def _build_diagnostics_text() -> str:
     except Exception:
         _kv("bg_thread_alive", "<unavailable>")
     try:
-        _wt_t = getattr(_b, "_bsc_watcher_thread", None)
-        _kv("watcher_thread_alive", bool(_wt_t is not None and _wt_t.is_alive()))
-    except Exception:
-        _kv("watcher_thread_alive", "<unavailable>")
-    try:
         _health_local = _b._bsc_log.get("health", {}) if hasattr(_b, "_bsc_log") else {}
     except Exception:
         _health_local = {}
     _kv("last_scan_ts",               _fmt_ts(_health_local.get("last_scan_at", "")))
     _kv("total_cycles",               _health_local.get("total_cycles", 0))
     _kv("last_scan_duration_sec",     round(float(getattr(_b, "_bsc_last_dur", 0) or 0), 2))
-    _kv("last_watcher_ts",            _fmt_ts(getattr(_b, "_bsc_watcher_last_ts", 0)))
-    _kv("last_watcher_duration_sec",  round(float(getattr(_b, "_bsc_watcher_last_dur", 0) or 0), 2))
-    _kv("legacy_migration_last_count", getattr(_b, "_bsc_legacy_migration_last_count", "n/a"))
-    _kv("legacy_migration_last_ts",    _fmt_ts(getattr(_b, "_bsc_legacy_migration_last_ts", "")))
 
     # ── Configuration (redacted) ──────────────────────────────────────────────
     _hdr("CONFIGURATION (API credentials redacted)")
@@ -7854,206 +5497,292 @@ def _build_diagnostics_text() -> str:
                 _v += " … (+" + str(len(_cfg_snap_local[_k]) - 20) + " more)"
         _kv(_k, _v)
 
+    # ── Entry / Exit Logic Summary ───────────────────────────────────────────────
+    _hdr("ENTRY / EXIT LOGIC")
+    try:
+        _use_st  = bool(_snap_cfg.get("f2_supertrend",  True))
+        _use_ce  = bool(_snap_cfg.get("f3_chandelier",  True))
+        _use_lux = bool(_snap_cfg.get("f4_lux",         True))
+        _n_enabled = sum([_use_st, _use_ce, _use_lux])
+        _sub("Trend Indicators")
+        _kv("F2 SuperTrend  (ATR 10, mult 3.0)",  "ENABLED" if _use_st  else "DISABLED")
+        _kv("F3 Chandelier  (ATR 22, mult 3.0)",  "ENABLED" if _use_ce  else "DISABLED")
+        _kv("F4 Lux Trend   (ATR 14, mult 2.0)",  "ENABLED" if _use_lux else "DISABLED")
+        _kv("indicators_enabled_count",            _n_enabled)
+        _sub("Entry Criteria (15m candle close required)")
+        _kv("rule", "≥2 indicators must have an ACTIVE BUY signal")
+        _kv("active_buy_definition",
+            "last flip was bullish (-1→+1) AND no bearish flip since")
+        _kv("disqualifier",
+            "if ANY indicator fires a SELL after the earlier of the two buy flips → skip coin")
+        _kv("candle_window_restriction", "NONE — buys can be any distance apart")
+        _sub("Exit Criteria")
+        _kv("trend_exit_enabled", bool(_snap_cfg.get("use_trend_exit", True)))
+        _kv("trend_exit_rule",
+            "ANY ONE indicator flips bearish on last closed 15m candle → close trade")
+        _kv("hard_sl", f"entry × (1 − {_snap_cfg.get('sl_pct', 3.0)}% / 100)  [always active]")
+        _kv("take_profit", f"entry × (1 + {_snap_cfg.get('tp_pct', 1.5)}% / 100)")
+        _sub("Margin / SL Mode")
+        _kv("margin_mode",  _snap_cfg.get("trade_margin_mode", "cross"))
+        _kv("sl_formula",   "entry × (1 − sl_pct/100)   — cross margin, NOT liq price")
+    except Exception as _le:
+        _push(f"  <error: {_le}>")
+
     # ── Signal bucket counts ────────────────────────────────────────────────────────
     _hdr("SIGNAL COUNTS")
     _kv("open",        len(_open_sigs))
     _kv("tp_hit",      len(_tp_sigs))
     _kv("sl_hit",      len(_sl_sigs))
-    _kv("dca_sl_hit",  len(_dca_sl_sigs))
+    _kv("trend_exit",  len(_trend_exit_sigs))
     _kv("queue_limit", len(_queue_sigs))
+    _kv("closed_okx",  len(_closed_okx_sigs))
     _kv("total",       len(signals))
 
-    # ── Per-signal detail (all buckets) ───────────────────────────────────────────
-    def _dump_signal(s: dict):
-        _sub(s.get("symbol","?") + "  ·  " + _fmt_ts(s.get("timestamp","")))
-        _kv("status",              s.get("status", ""))
-        _kv("sector",              s.get("sector", ""))
-        _kv("setup",               "Super" if s.get("is_super_setup") else "Normal")
-        _kv("margin_mode",         s.get("order_margin_mode", "") or "—")
-        _kv("leverage",            s.get("trade_lev", "—"))
-        _kv("trade_usdt (base)",   s.get("trade_usdt", "—"))
-        _kv("original_entry",      s.get("original_entry", s.get("signal_entry", s.get("entry", ""))))
-        _kv("signal_entry",        s.get("signal_entry", "—"))
-        _kv("entry (current ref)", s.get("entry", "—"))
-        _kv("avg_entry (blended)", s.get("avg_entry", "—"))
-        _kv("tp",                  s.get("tp", "—"))
-        _kv("sl",                  s.get("sl", "—"))
-        _kv("latest_price",        s.get("latest_price", "—"))
-        _kv("price_alert_pct",     s.get("price_alert_pct", "—"))
-        _kv("dca_enabled",         s.get("dca_enabled", False))
-        _kv("dca_count",           s.get("dca_count", 0))
-        _kv("dca_max",             s.get("dca_max", 0))
-        _kv("dca_iso_distance_pct", s.get("dca_iso_distance_pct", "—"))
-        _kv("dca_cross_drop_pct",   s.get("dca_cross_drop_pct", "—"))
-        _kv("sl_distance_pct",      s.get("sl_distance_pct", "—"))
-        _kv("next_dca_px",          s.get("next_dca_px", "—"))
-        _kv("final_sl_price",      s.get("final_sl_price", "—"))
-        _kv("order_id",            s.get("order_id", "—") or "—")
-        _kv("algo_id",             s.get("algo_id",  "—") or "—")
-        _kv("order_status",        s.get("order_status", "—"))
-        _kv("order_error",         (s.get("order_error", "") or "")[:200])
-        _kv("timestamp",           _fmt_ts(s.get("timestamp", "")))
-        _kv("close_time",          _fmt_ts(s.get("close_time", "")))
-        _kv("close_price",         s.get("close_price", "—"))
-        _fills = s.get("dca_fills") or []
-        if _fills:
-            _push("  dca_fills:")
-            for _f in _fills:
-                _idx = _f.get("dca_idx", "?")
-                _px  = str(_f.get("price",    "—"))
-                _us  = str(_f.get("usdt",     "—"))
-                _lv  = str(_f.get("leverage", "—"))
-                _nt  = str(_f.get("notional", "—"))
-                _tp2 = str(_f.get("tp",       "—"))
-                _sl2 = str(_f.get("sl",       "—"))
-                _oi  = str(_f.get("order_id", "") or "—")
-                _ts2 = _fmt_ts(_f.get("ts", ""))
-                _push(
-                    "    - idx=" + str(_idx) + "  px=" + _px + "  usdt=" + _us + "  "
-                    "lev=" + _lv + "  notional=" + _nt + "  "
-                    "tp=" + _tp2 + "  sl=" + _sl2 + "  ts=" + _ts2 + "  order_id=" + _oi
-                )
+
+    # ── Capital Requirement Summary ──────────────────────────────────────────
+    _hdr("CAPITAL REQUIREMENT SUMMARY")
+    try:
+        _dc_base    = float(_snap_cfg.get("trade_usdt_amount", 5.0))
+        _dc_pool    = int(_snap_cfg.get("max_open_trades", 7))
+        _dc_min     = _dc_base * _dc_pool
+        _dc_buf     = _dc_min * 0.25
+        _dc_tot     = _dc_min + _dc_buf
+        _kv("base_margin_per_trade",    f"${_dc_base:.2f}")
+        _kv("max_open_trades",          _dc_pool)
+        _kv("minimum_required",         f"${_dc_min:,.2f}  (per_trade × max_trades)")
+        _kv("buffer_25pct",             f"${_dc_buf:,.2f}")
+        _kv("total_recommended",        f"${_dc_tot:,.2f}")
+        _kv("margin_mode",              _snap_cfg.get("trade_margin_mode", "isolated"))
+    except Exception as _ce:
+        _push(f"  <error: {_ce}>")
+
+    # ── Live OKX Positions (real-time API call) ───────────────────────────────
+    _hdr("LIVE OKX POSITIONS (from /api/v5/account/positions)")
+    try:
+        _has_creds = bool(
+            _snap_cfg.get("api_key") and
+            _snap_cfg.get("api_secret") and
+            _snap_cfg.get("api_passphrase")
+        )
+        if not _has_creds:
+            _push("  <skipped — API credentials not configured>")
         else:
-            _kv("dca_fills", "(none)")
-        # ── Entry criteria ──────────────────────────────────────────────────────────────────
-        _crit = s.get("criteria") or {}
-        if _crit:
-            _push("  criteria:")
-            _crit_keys = [
-                ("pdz_zone_15m",    "pdz_zone_15m"),
-                ("pdz_zone_1h",     "pdz_zone_1h"),
-                ("pdz_zone_5m",     "pdz_zone_5m"),
-                ("rsi_5m",          "rsi_5m"),
-                ("rsi_1h",          "rsi_1h"),
-                ("ema_3m",          "ema_3m"),
-                ("ema_5m",          "ema_5m"),
-                ("ema_15m",         "ema_15m"),
-                ("macd_3m",         "macd_3m"),
-                ("macd_5m",         "macd_5m"),
-                ("macd_15m",        "macd_15m"),
-                ("sar_3m",          "sar_3m"),
-                ("sar_5m",          "sar_5m"),
-                ("sar_15m",         "sar_15m"),
-                ("vol_ratio",       "vol_ratio"),
-                ("ema_cross_12_15m","ema_cross_12_15m"),
-                ("ema_cross_21_15m","ema_cross_21_15m"),
-                ("atr_15m",         "atr_15m"),
-                ("atr_ratio",       "atr_ratio"),
-            ]
-            for _ck, _ck_key in _crit_keys:
-                if _ck_key in _crit:
-                    _cv = _crit[_ck_key]
-                    if isinstance(_cv, float):
-                        _cv = f"{_cv:.4f}"
-                    _push("    " + f"{_ck:<24}" + " : " + str(_cv))
+            _pos_resp = _trade_get(
+                "/api/v5/account/positions",
+                {"instType": "SWAP"},
+                _snap_cfg,
+            )
+            if _pos_resp.get("code") != "0":
+                _push(f"  <OKX API error: code={_pos_resp.get('code')} "
+                      f"msg={_pos_resp.get('msg', '?')}>")
+            else:
+                _pos_data = [p for p in (_pos_resp.get("data") or [])
+                             if float(p.get("pos", 0) or 0) != 0]
+                if not _pos_data:
+                    _push("  (no open swap positions on OKX)")
+                else:
+                    _kv("total_open_positions", len(_pos_data))
+                    _push("")
+                    for _pi, _p in enumerate(_pos_data, 1):
+                        _inst      = _p.get("instId", "?")
+                        _pos_sz    = _p.get("pos", "?")
+                        _avg_px    = _p.get("avgPx", "?")
+                        _upnl      = _p.get("upl", "?")
+                        _upnl_r    = _p.get("uplRatio", "?")
+                        _margin    = _p.get("imr", "?") or _p.get("margin", "?")
+                        _lev       = _p.get("lever", "?")
+                        _liq_px    = _p.get("liqPx", "?")
+                        _mm_mode   = _p.get("mgnMode", "?")
+                        _pos_side  = _p.get("posSide", "net")
+                        _ctime     = _p.get("cTime", "")
+                        _utime     = _p.get("uTime", "")
+                        # Format timestamps
+                        try:
+                            _ct_fmt = (datetime.fromtimestamp(int(_ctime)/1000,
+                                       tz=timezone.utc)
+                                       .strftime("%m/%d %H:%M:%S") if _ctime else "—")
+                        except Exception:
+                            _ct_fmt = str(_ctime or "—")
+                        try:
+                            _ut_fmt = (datetime.fromtimestamp(int(_utime)/1000,
+                                       tz=timezone.utc)
+                                       .strftime("%m/%d %H:%M:%S") if _utime else "—")
+                        except Exception:
+                            _ut_fmt = str(_utime or "—")
+                        # Format uPnL with sign
+                        try:
+                            _upnl_f = float(_upnl or 0)
+                            _upnl_r_f = float(_upnl_r or 0)
+                            _upnl_str = f"{_upnl_f:+.4f} USDT ({_upnl_r_f*100:+.2f}%)"
+                        except Exception:
+                            _upnl_str = str(_upnl)
+                        _push(f"  [{_pi}] {_inst}")
+                        _push(f"        pos_sz      : {_pos_sz}  |  posSide: {_pos_side}")
+                        _push(f"        avg_px      : {_avg_px}")
+                        _push(f"        uPnL        : {_upnl_str}")
+                        _push(f"        margin      : {_margin} USDT  |  lev: {_lev}x  |  mode: {_mm_mode}")
+                        _push(f"        liq_px      : {_liq_px}")
+                        _push(f"        opened_at   : {_ct_fmt}  |  updated: {_ut_fmt}")
+
+                # ── Cross-reference with bot's open signals ────────────────────
+                _push("")
+                _push("  -- Cross-reference vs bot open signals " + "-" * 36)
+                _bot_open = {s.get("symbol", ""): s for s in _open_sigs}
+                _okx_inst_set = {p.get("instId", "") for p in _pos_data}
+                # Bot says open but OKX has no position
+                for _bsym, _bsig in _bot_open.items():
+                    _okx_inst = _bsig.get("symbol", "").replace("USDT", "-USDT-SWAP")
+                    if _bsig.get("order_id") and _okx_inst not in _okx_inst_set:
+                        _push(f"  WARNING MISMATCH -- bot=OPEN  okx=NO POSITION : {_bsym} "
+                              f"(order_id={_bsig.get('order_id','')})")
+                # OKX has position but bot doesn't track it
+                for _p in _pos_data:
+                    _inst = _p.get("instId", "")
+                    _bsym_chk = _inst.replace("-USDT-SWAP", "USDT")
+                    if _bsym_chk not in _bot_open:
+                        _push(f"  WARNING MISMATCH -- okx=OPEN  bot=NOT TRACKED : {_inst}")
+                if not any(True for _bsym, _bsig in _bot_open.items()
+                           if _bsig.get("order_id") and
+                           _bsig.get("symbol","").replace("USDT","-USDT-SWAP")
+                           not in _okx_inst_set) and \
+                   not any(True for _p in _pos_data
+                           if _p.get("instId","").replace("-USDT-SWAP","USDT")
+                           not in _bot_open):
+                    _push("  OK  All bot open signals match OKX positions")
+    except Exception as _pe:
+        _push(f"  <error fetching OKX positions: {_pe}>")
+
+    # ── Two-Tier Reconciliation Status ───────────────────────────────────────
+    # ── OKX ctVal / ctMult cache ─────────────────────────────────────────────
+    _hdr("OKX CONTRACT SIZE CACHE (ctVal × ctMult → effective)")
+    _ct_raw = _b._bsc_symbol_cache.get("ct_raw", {})
+    if _ct_raw:
+        _suspicious = {s: v for s, v in _ct_raw.items()
+                       if abs(v[1] - 1.0) > 0.01}  # ctMult ≠ 1
+        _push(f"  Total cached: {len(_ct_raw)} symbols")
+        _push(f"  Symbols with ctMult ≠ 1: {len(_suspicious)}")
+        if _suspicious:
+            _push("  --- Non-unity ctMult tokens ---")
+            for _s, (_cv, _cm, _ef) in sorted(_suspicious.items()):
+                _push(f"    {_s:<14} ctVal={_cv}  ctMult={_cm}  effective={_ef}")
+        _push("  --- Watchlist tokens ---")
+        _cfg_wl = (_b._bsc_log.get("config") or {}).get("watchlist", [])
+        for _s in sorted(_cfg_wl):
+            if _s in _ct_raw:
+                _cv, _cm, _ef = _ct_raw[_s]
+                _push(f"    {_s:<14} ctVal={_cv}  ctMult={_cm}  effective={_ef}")
+    else:
+        _push("  (cache not yet populated — run a scan first)")
+
+    # ── Filter Funnel (last scan) ─────────────────────────────────────────────
+    _hdr("FILTER FUNNEL -- LAST SCAN")
+    try:
+        _fc = getattr(_b, "_bsc_filter_counts", {}) or {}
+        _fmap = [
+            ("pre_filtered_out", "Pre-filter eliminated"),
+            ("checked",          "Deep-scanned"),
+            ("f_empty_data",     "F0  -- Empty/bad data"),
+            ("f_sl_cooldown",    "SL cooldown blocked"),
+            ("passed",           "Passed all filters"),
+        ]
+        for _fk, _fl in _fmap:
+            _fv = _fc.get(_fk, 0)
+            if _fv:
+                _kv(_fl, _fv)
+        _kv("watchlist_size",   _fc.get("watchlist_size", "--"))
+    except Exception as _fe:
+        _push(f"  <error: {_fe}>")
+
+    # ── Per-signal detail (all buckets) ──────────────────────────────────────
+    def _sig_lines(sig: dict, idx: int):
+        _push(f"  [{idx}] {sig.get('symbol','?')} | status={sig.get('status','?')} "
+              f"| entry={sig.get('entry','--')} | tp={sig.get('tp','--')} "
+              f"| sl={sig.get('sl','--')} "
+              f"| mode={sig.get('order_margin_mode','--')} "
+              f"| lev={sig.get('trade_lev','--')}x "
+              f"| usdt=${sig.get('trade_usdt','--')} "
+              f"| ts={_fmt_ts(sig.get('timestamp',''))} "
+              f"| close_ts={_fmt_ts(sig.get('close_time',''))} "
+              f"| close_px={sig.get('close_price','--')} "
+              f"| order_id={sig.get('order_id','--')} "
+              f"| algo_id={sig.get('algo_id','--')} "
+              f"| tp_algo_id={sig.get('tp_algo_id','--')} "
+              f"| demo={sig.get('demo_mode','--')} "
+              f"| is_super={sig.get('is_super_setup',False)}")
+        # OKX Command log -- one sub-line per entry
+        _log_entries = sig.get("okx_log")
+        if isinstance(_log_entries, list) and _log_entries:
+            _push(f"    okx_log ({len(_log_entries)} entries):")
+            for _li, _le in enumerate(_log_entries, 1):
+                _push(f"      #{_li:>2}  {_le}")
+
+    _entry_failed_sigs = [s for s in signals if s.get("status") == "entry_failed"]
+    for _bucket_name, _bucket in [
+        ("OPEN SIGNALS",    _open_sigs),
+        ("TP HIT",          _tp_sigs),
+        ("SL HIT",          _sl_sigs),
+        ("TREND EXIT",      _trend_exit_sigs),
+        ("QUEUE LIMIT",     _queue_sigs),
+        ("CLOSED ON OKX",   _closed_okx_sigs),
+        ("ENTRY FAILED",    _entry_failed_sigs),
+    ]:
+        _hdr(_bucket_name + f"  ({len(_bucket)} signals)")
+        if not _bucket:
+            _push("  (none)")
         else:
-            _push("  criteria                         : (none stored)")
-
-    _hdr("SIGNALS · OPEN")
-    if _open_sigs:
-        for _s in _open_sigs:
-            _dump_signal(_s)
-    else:
-        _push("  (none)")
-
-    _hdr("SIGNALS · TP HIT")
-    if _tp_sigs:
-        for _s in _tp_sigs:
-            _dump_signal(_s)
-    else:
-        _push("  (none)")
-
-    _hdr("SIGNALS · SL HIT")
-    if _sl_sigs:
-        for _s in _sl_sigs:
-            _dump_signal(_s)
-    else:
-        _push("  (none)")
-
-    _hdr("SIGNALS · DCA SL HIT")
-    if _dca_sl_sigs:
-        for _s in _dca_sl_sigs:
-            _dump_signal(_s)
-    else:
-        _push("  (none)")
-
-    _hdr("QUEUE LIMIT (never opened)")
-    if _queue_sigs:
-        for _s in _queue_sigs:
-            _dump_signal(_s)
-    else:
-        _push("  (none)")
-
-    _hdr("SIGNALS · CLOSED ON OKX (manual / undetected close)")
-    if _closed_okx_sigs:
-        for _s in _closed_okx_sigs:
-            _dump_signal(_s)
-    else:
-        _push("  (none)")
-
-    # ── Watchlist ──────────────────────────────────────────────────────────────────
+            for _i, _s in enumerate(_bucket, 1):
+                _sig_lines(_s, _i)
+                # Full entry criteria
+                _push(f"    criteria  : (filters removed)")
+    # ── Active Watchlist ──────────────────────────────────────────────────────
     _hdr("WATCHLIST")
     try:
-        _wl = list(_snap_cfg.get("watchlist", []))
-        _push(f"  Total coins: {len(_wl)}")
+        _wl = list(_snap_cfg.get("watchlist") or [])
+        _push(f"  Total: {len(_wl)} symbols")
         for _wi, _wsym in enumerate(_wl, 1):
             _push(f"  {_wi:>3}. {_wsym}")
-    except Exception as _wle:
-        _push(f"  <error reading watchlist: {_wle}>")
+    except Exception as _we:
+        _push(f"  <error reading watchlist: {_we}>")
 
-    # ── API Error Log ──────────────────────────────────────────────────────────────
-    _hdr("API ERROR LOG (most recent 200 entries)")
+    # ── API Error Log ─────────────────────────────────────────────────────────
+    _hdr("API ERROR LOG (last 200 entries, newest first)")
     try:
-        with _log_lock:
-            _err_snap = list((_b._bsc_log.get("errors") or []))
-        _err_snap_sorted = sorted(_err_snap, key=lambda e: e.get("ts", ""), reverse=True)
-        _err_limit = _err_snap_sorted[:200]
-        if _err_limit:
-            for _e in _err_limit:
-                _ets  = _fmt_ts(_e.get("ts", ""))
-                _etype = _e.get("type", "?")
-                _emsg  = _e.get("message", "") or _e.get("msg", "")
-                _esym  = _e.get("symbol", "")
-                _eep   = _e.get("endpoint", "")
-                _line  = f"  [{_ets}] [{_etype}]"
-                if _esym: _line += f" [{_esym}]"
-                if _eep:  _line += f" [{_eep}]"
-                _line += f"  {_emsg}"
-                _push(_line)
+        with getattr(_b, "_bsc_error_log_lock", threading.Lock()):
+            _err_entries = list(reversed(getattr(_b, "_bsc_error_log", [])))[:200]
+        if not _err_entries:
+            _push("  (no errors)")
         else:
-            _push("  (no errors logged)")
+            for _ei, _err in enumerate(_err_entries, 1):
+                _push(f"  [{_ei:>3}] {_fmt_ts(_err.get('ts',''))} "
+                      f"| {_err.get('type','?'):8} "
+                      f"| {_err.get('symbol',''):15} "
+                      f"| {_err.get('endpoint',''):40} "
+                      f"| {str(_err.get('msg',''))[:120]}")
     except Exception as _ele:
         _push(f"  <error reading error log: {_ele}>")
 
-    # ── Filter funnel (last scan) ──────────────────────────────────────────────────
-    _hdr("FILTER FUNNEL (last scan)")
-    try:
-        with _filter_lock:
-            _fc_snap = {k: (list(v) if isinstance(v, list) else v)
-                        for k, v in _filter_counts.items()}
-        if _fc_snap.get("total_watchlist", 0) > 0:
-            for _k in sorted(_fc_snap.keys()):
-                _v = _fc_snap[_k]
-                if _k in ("scan_cfg", "flushed_at", "scan_completed_at"):
-                    continue
-                if isinstance(_v, list):
-                    _push(f"  {_k:<32} : [{len(_v)} items]")
-                else:
-                    _push(f"  {_k:<32} : {_v}")
-        else:
-            _push("  (no scan data yet)")
-    except Exception as _fe:
-        _push(f"  <error reading filter counts: {_fe}>")
-
+    _push("")
+    _push("=" * 78)
+    _push("END OF DIAGNOSTICS")
+    _push("=" * 78)
     return "\n".join(_lines)
 
-_diag_text = _build_diagnostics_text()
-st.text_area("📋 Debug Snapshot", _diag_text, height=400, key="debug_snap_area")
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Download button -- calls the builder and streams the result
+# ─────────────────────────────────────────────────────────────────────────────
+try:
+    _diag_text = _build_diagnostics_text()
+except Exception as _diag_exc:
+    _diag_text = f"Error building diagnostics: {_diag_exc}"
+
+st.text_area("Diagnostics Preview", _diag_text, height=300, key="debug_snap_area")
+
 _diag_filename = f"diagnostics_{dubai_now().strftime('%Y%m%d_%H%M%S')}.txt"
 st.download_button(
-    label="⬇️ Download Diagnostics",
+    label="Download Diagnostics",
     data=_diag_text.encode("utf-8"),
     file_name=_diag_filename,
     mime="text/plain",
-    use_container_width=False,
+    key="diag_download_btn",
 )
