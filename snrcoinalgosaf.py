@@ -3445,13 +3445,13 @@ if _trade_on and _api_stat == "ok":
     st.caption(f"🤖 Auto-Trading active · {_api_cs.get('message','')} · tested {_tested_str}")
 
 # ── Capital requirement summary ────────────────────────────────────────────────
-_cap_base      = float(_snap_cfg.get("trade_usdt_amount", 5.0))
-_cap_dca_max   = int(_snap_cfg.get("trade_max_dca", 3))
-_cap_pool      = int(_snap_cfg.get("max_open_trades", 7))
-_cap_per_trade = _cap_base * (2 ** _cap_dca_max)   # original + all DCA adds
-_cap_minimum   = _cap_per_trade * _cap_pool
-_cap_buffer    = _cap_minimum * 0.25
-_cap_total     = _cap_minimum + _cap_buffer
+# Formula: each trade commits trade_usdt_amount as margin (cross mode).
+# Minimum = margin_per_trade × max_open_trades
+_cap_base    = float(_snap_cfg.get("trade_usdt_amount", 5.0))
+_cap_pool    = int(_snap_cfg.get("max_open_trades", 7))
+_cap_minimum = _cap_base * _cap_pool
+_cap_buffer  = _cap_minimum * 0.25
+_cap_total   = _cap_minimum + _cap_buffer
 st.markdown(
     f"<p style='color:#005F65;font-weight:700;margin:2px 0;font-size:14px;'>"
     f"💰 Minimum Required: <span style='font-size:15px'>${_cap_minimum:,.2f} USDT</span>"
