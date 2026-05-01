@@ -2760,11 +2760,11 @@ with st.sidebar:
 
     st.markdown("**📊 Trade Settings**")
     c1, c2 = st.columns(2)
-    new_tp = c1.number_input("TP %", min_value=0.1, max_value=20.0, step=0.1, value=float(_snap_cfg["tp_pct"]),    key="cfg_tp")
+    new_tp = c1.number_input("TP %", min_value=0.1, max_value=20.0, step=0.1, value=float(_snap_cfg.get("tp_pct", 1.5)),    key="cfg_tp")
     _isolated_active = _snap_cfg.get("trade_margin_mode", "isolated") == "isolated"
     new_sl = c2.number_input(
         "SL % (Cross only)", min_value=0.1, max_value=20.0, step=0.1,
-        value=float(_snap_cfg["sl_pct"]), key="cfg_sl",
+        value=float(_snap_cfg.get("sl_pct", 3.0)), key="cfg_sl",
         disabled=_isolated_active,
         help=(
             "Applies only to CROSS margin trades.\n\n"
@@ -2876,7 +2876,7 @@ with st.sidebar:
     c5, c6 = st.columns(2)
     new_loop = c5.number_input(
         "Loop (min)", min_value=1, max_value=60, step=1,
-        value=int(_snap_cfg["loop_minutes"]), key="cfg_loop",
+        value=int(_snap_cfg.get("loop_minutes", 4)), key="cfg_loop",
         help=(
             "How often the scanner runs a full watchlist cycle.\n\n"
             "Every N minutes the scanner will:\n"
@@ -2888,7 +2888,7 @@ with st.sidebar:
         ))
     new_cool = c6.number_input(
         "Cooldown (TP, min)", min_value=1, max_value=120, step=1,
-        value=int(_snap_cfg["cooldown_minutes"]), key="cfg_cool",
+        value=int(_snap_cfg.get("cooldown_minutes", 2)), key="cfg_cool",
         help=(
             "After a TP or SL close, skip this coin for N minutes before "
             "allowing re-entry.\n\n"
@@ -2914,7 +2914,7 @@ with st.sidebar:
 
 
     st.markdown("**📋 Watchlist** (one symbol per line)")
-    wl_text = st.text_area("wl", value="\n".join(_snap_cfg["watchlist"]),
+    wl_text = st.text_area("wl", value="\n".join(_snap_cfg.get("watchlist", [])),
                             height=180, label_visibility="collapsed", key="cfg_wl")
 
     # Highlight any watchlist coins absent from the OKX live SWAP instrument list
