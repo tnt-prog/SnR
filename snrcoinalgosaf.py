@@ -367,6 +367,23 @@ def load_config() -> dict:
             else:
                 print(f"[Config] WARNING — failed to parse {CONFIG_FILE}: {type(_e).__name__}: {_e}")
 
+    # One-time defaults reset - forces 6 values back to correct defaults on startup
+    _reset_to_defaults = {
+        "trend_exit_min_confirms": 1,
+        "use_safestop":            False,
+        "safestop_range_pct":      1.0,
+        "use_time_limit_exit":     False,
+        "max_open_trades":         30,
+        "sl_cooldown_hours":       2,
+    }
+    _needs_save = any(cfg.get(_rk) != _rv for _rk, _rv in _reset_to_defaults.items())
+    cfg.update(_reset_to_defaults)
+    if _needs_save and CONFIG_FILE.exists():
+        try:
+            CONFIG_FILE.write_text(__import__("json").dumps(cfg, indent=2), encoding="utf-8")
+        except Exception:
+            pass
+
     # Env-var overrides (credentials only — never persisted)
     import os as _os
     for _cfg_k, _env_k in (("api_key",        "OKX_API_KEY"),
