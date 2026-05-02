@@ -2190,6 +2190,9 @@ def _update_one_signal(sig: dict) -> None:
                 latest_price = candles[-1]["close"]
                 _ref = float(sig.get("entry", 0) or 0)
                 sig["latest_price"] = float(latest_price)
+                # SafeStop live state (refreshed every cycle for open trades)
+                sig["ss_active"]   = _ss_active
+                sig["ss_sl_level"] = float(_ss_sl_level) if _ss_active else None
                 if _ref > 0:
                     drop_pct = (_ref - latest_price) / _ref * 100
                     sig["price_alert"]     = drop_pct >= _PRICE_ALERT_PCT
@@ -4486,11 +4489,35 @@ def _build_signal_row(s: dict, is_open_table: bool = False,
     except Exception:
         trade_history_col = "—"
 
+    # SafeStop Status column (open table only)
+    ss_status_col = "—"
+    if status == "open":
+        _use_ss_disp = bool(_snap_cfg.get("use_safestop", False))
+        if _use_ss_disp:
+            _ss_act  = s.get("ss_active", False)
+            _ss_lvl  = s.get("ss_sl_level")
+            _entry_d = float(s.get("entry", 0) or 0)
+            if _ss_act and _ss_lvl is not None:
+                _fmt_ss = (f"{float(_ss_lvl):.8f}".rstrip("0").rstrip("."))
+                ss_status_col = f"🛡️ Active | SL @ {_fmt_ss}"
+            elif _entry_d > 0:
+                _ss_pct_d = float(_snap_cfg.get("safestop_pct", 0.5))
+                _trigger_d = _entry_d * (1 + _ss_pct_d / 100)
+                _latest_d  = s.get("latest_price")
+                if _latest_d:
+                    _rem = (_trigger_d / float(_latest_d) - 1) * 100
+                    ss_status_col = (f"⬜ +{_rem:.2f}% to trigger"
+                                     if _rem > 0 else "⬜ Waiting")
+                else:
+                    ss_status_col = "⬜ Waiting"
+        # else: SafeStop disabled -> show "\xe2\x80\x94"
+
     if is_open_table:
         row: dict = {
             "Time (GST)":        ts_str,
             "Symbol":            s.get("symbol", ""),
             "Alert":             alert_col,
+            "SafeStop Status":   ss_status_col,
             "Setup":             setup_type,
             "Entry Signals":     entry_signals_col,
             "PnL $":             pnl_col,
@@ -4585,6 +4612,13 @@ _SIG_COL_CFG = {
     "Alert":          st.column_config.TextColumn(
                           "🚨 Alert", width="small",
                           help="🔴 DL = price ≥3% below entry  |  🔴 TL = open ≥2 hours"),
+    "SafeStop Status": st.column_config.TextColumn(
+                          "🛡️ SafeStop Status", width="medium",
+                          help="Live SafeStop state for each open trade.\n\n"
+                               "🛡️ Active | SL @ X.XXX  — SafeStop has triggered; trailing SL is live at the shown price.\n"
+                               "⬜ +X.XX% to trigger  — price needs to rise X% more before SafeStop activates.\n"
+                               "—  — SafeStop is disabled in config.\n\n"
+                               "Refreshed every scan cycle."),
     "Current Status": st.column_config.TextColumn(
                           "📈 Current Status", width="small",
                           help="Signed % change of current price vs. entry for "
