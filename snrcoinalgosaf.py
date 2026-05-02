@@ -2224,8 +2224,8 @@ def _update_one_signal(sig: dict) -> None:
                                         exit_indicators = f"Time Limit Exit @ {float(latest_price):.8f} | PnL ${_tl_pnl:+.2f}"
                                     )
                                     sig.pop("price_alert", None)
-                    except Exception:
-                        pass
+                    except Exception as _tl_exc:
+                        _append_error("tl_exit", f"{_sym}: {type(_tl_exc).__name__}: {_tl_exc}", symbol=_sym)
                 if _ref > 0:
                     drop_pct = (_ref - latest_price) / _ref * 100
                     sig["price_alert"]     = drop_pct >= _PRICE_ALERT_PCT
@@ -2235,7 +2235,8 @@ def _update_one_signal(sig: dict) -> None:
                     sig["price_alert_pct"] = 0.0
 
                 # ── F2/F3/F4 Trend Exit ───────────────────────────────────────
-                if _use_st or _use_ce or _use_lux:
+                # Skip trend-exit if TL or another exit already closed this trade
+                if sig.get("status") == "open" and (_use_st or _use_ce or _use_lux):
                     _c15 = get_klines(sig["symbol"], "15m", 100)[:-1]
 
                     # ── Backfill entry_indicators for legacy signals ──────────
