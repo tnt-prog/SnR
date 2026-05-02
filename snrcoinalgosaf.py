@@ -137,7 +137,9 @@ DEFAULT_CONFIG: dict = {
     "trend_exit_min_confirms": 1,     # how many indicators must flip bearish to trigger trend exit (1/2/3)
     # ── SafeStop trailing break-even ──────────────────────────────────────────
     "use_safestop":           False,  # enable SafeStop trailing break-even mechanism
-    "safestop_pct":           0.5,    # % move in favour → SL moves to entry; then every 1% more → SL trails by this %
+    "safestop_pct":           1.5,    # Safe Stop Trigger Price %: % gain that activates SafeStop (SL to entry)
+    "safestop_range_pct":     1.0,    # Range Increase %: each additional rise before SL steps up
+    "safestop_step_pct":      0.5,    # Step Distance %: how much SL moves up on each step
     "f2_supertrend":         True,   # F2 SuperTrend (ATR 10, mult 3.0) on 15m
     "f3_chandelier":         True,   # F3 Chandelier Exit (ATR 22, mult 3.0) on 15m
     "f4_lux":                True,   # F4 Lux Trend (ATR 14, mult 2.0) on 15m
@@ -2122,8 +2124,10 @@ def _update_one_signal(sig: dict) -> None:
         _use_st         = bool(_te_cfg.get("f2_supertrend",  True))
         _use_ce         = bool(_te_cfg.get("f3_chandelier",  True))
         _use_lux        = bool(_te_cfg.get("f4_lux",         True))
-        _use_safestop   = bool(_te_cfg.get("use_safestop",   False))
-        _ss_pct         = float(_te_cfg.get("safestop_pct",  0.5))
+        _use_safestop   = bool(_te_cfg.get("use_safestop",    False))
+        _ss_pct         = float(_te_cfg.get("safestop_pct",   1.5))   # trigger %
+        _ss_range_pct   = float(_te_cfg.get("safestop_range_pct", 1.0))  # range increase %
+        _ss_step_pct    = float(_te_cfg.get("safestop_step_pct",  0.5))  # step distance %
         _entry          = float(sig.get("entry", 0) or 0)
 
         # ── Scan post-entry candles for TP / SL / SafeStop hits ──────────────
@@ -2144,10 +2148,10 @@ def _update_one_signal(sig: dict) -> None:
                 _ss_trigger = _entry * (1 + _ss_pct / 100)
                 if _ss_peak >= _ss_trigger:
                     # Break-even is active. Calculate trail steps:
-                    # Each additional 1% above initial trigger → SL moves up _ss_pct%
+                    # Each _ss_range_pct% above trigger -> SL moves up _ss_step_pct%
                     _excess = (_ss_peak / _entry - 1) * 100 - _ss_pct
-                    _steps  = max(0, int(_excess / 1.0))   # fixed 1% step size
-                    _ss_sl_level = _entry * (1 + _steps * _ss_pct / 100)
+                    _steps  = max(0, int(_excess / _ss_range_pct)) if _ss_range_pct > 0 else 0
+                    _ss_sl_level = _entry * (1 + _steps * _ss_step_pct / 100)
                     _ss_active   = True
 
             if _use_tp_exit and tp_time is None and c["high"] >= sig["tp"]:
@@ -3206,40 +3210,55 @@ with st.sidebar:
 
     st.markdown("**🛡️ SafeStop — Trailing Break-Even**",
         help=(
-            "When enabled, once price moves in your favour by SafeStop %, "
-            "the effective SL is moved to entry (break-even). After that, "
-            "every additional 1% rise trails the SL up by SafeStop % more.\n\n"
-            "Example with SafeStop = 0.5%:\n"
-            "  +0.5% → SL = entry\n"
-            "  +1.5% → SL = entry + 0.5%\n"
-            "  +2.5% → SL = entry + 1.0%\n\n"
-            "Closes are recorded as 'SafeStop' — a separate category from SL Hit."
+            "Three inputs control the SafeStop mechanism:\n\n"
+            "1. Safe Stop Trigger Price % — price must rise this % from entry to activate SafeStop (SL moves to entry).\n"
+            "2. Range Increase % — after activation, each time price rises by this %, the SL steps up once.\n"
+            "3. Step Distance % — how much the SL moves up on each step.\n\n"
+            "Example (Trigger=1.5%, Range=1%, Step=0.5%):\n"
+            "  +1.5% → SL = entry\n"
+            "  +2.5% → SL = entry + 0.5%\n"
+            "  +3.5% → SL = entry + 1.0%"
         )
     )
     new_use_safestop = st.checkbox(
         "Enable SafeStop",
         value=bool(_snap_cfg.get("use_safestop", False)),
         key="cfg_use_safestop",
-        help="Move SL to break-even once trade moves in your favour, then trail by SafeStop % for every 1% gain."
+        help="Activate the SafeStop trailing break-even mechanism."
     )
     if new_use_safestop:
         new_safestop_pct = st.number_input(
-            "SafeStop %",
-            min_value=0.1, max_value=5.0, step=0.1,
-            value=float(_snap_cfg.get("safestop_pct", 0.5)),
+            "Safe Stop Trigger Price %",
+            min_value=0.1, max_value=10.0, step=0.1,
+            value=float(_snap_cfg.get("safestop_pct", 1.5)),
             key="cfg_safestop_pct",
             format="%.1f",
-            help=(
-                "Trigger: once price rises by this % from entry → SL moves to entry.\n"
-                "Trail: every additional 1% rise → SL moves up by this % more."
-            )
+            help="Price must rise this % from entry to activate SafeStop. SL moves to entry (break-even) at this point."
+        )
+        new_safestop_range_pct = st.number_input(
+            "Range Increase %",
+            min_value=0.1, max_value=10.0, step=0.1,
+            value=float(_snap_cfg.get("safestop_range_pct", 1.0)),
+            key="cfg_safestop_range_pct",
+            format="%.1f",
+            help="After SafeStop activates, every time price rises by this % more, the SL steps up once."
+        )
+        new_safestop_step_pct = st.number_input(
+            "Step Distance %",
+            min_value=0.1, max_value=10.0, step=0.1,
+            value=float(_snap_cfg.get("safestop_step_pct", 0.5)),
+            key="cfg_safestop_step_pct",
+            format="%.1f",
+            help="How much the SL moves up on each step. E.g. 0.5% means SL climbs 0.5% above entry per step."
         )
         st.caption(
-            f"✅ Break-even at +{new_safestop_pct:.1f}%, "
-            f"then trail +{new_safestop_pct:.1f}% per 1% gain"
+            f"✅ Trigger: +{new_safestop_pct:.1f}% → SL=entry | "
+            f"then every +{new_safestop_range_pct:.1f}% → SL +{new_safestop_step_pct:.1f}%"
         )
     else:
-        new_safestop_pct = float(_snap_cfg.get("safestop_pct", 0.5))
+        new_safestop_pct       = float(_snap_cfg.get("safestop_pct",       1.5))
+        new_safestop_range_pct = float(_snap_cfg.get("safestop_range_pct", 1.0))
+        new_safestop_step_pct  = float(_snap_cfg.get("safestop_step_pct",  0.5))
         st.caption("⚠️ SafeStop disabled")
 
     if not new_use_tp_exit and not new_use_sl_exit and not new_use_trend_exit and not new_use_safestop:
@@ -3477,6 +3496,8 @@ with st.sidebar:
             "trend_exit_min_confirms":    int(new_trend_exit_min_confirms),
             "use_safestop":               bool(new_use_safestop),
             "safestop_pct":               float(new_safestop_pct),
+            "safestop_range_pct":         float(new_safestop_range_pct),
+            "safestop_step_pct":          float(new_safestop_step_pct),
             "f2_supertrend":       bool(new_f2_st),
             "f3_chandelier":       bool(new_f3_ce),
             "f4_lux":              bool(new_f4_lux),
@@ -4514,7 +4535,7 @@ def _build_signal_row(s: dict, is_open_table: bool = False,
                 _fmt_ss = (f"{float(_ss_lvl):.8f}".rstrip("0").rstrip("."))
                 ss_status_col = f"🛡️ Active | SL @ {_fmt_ss}"
             elif _entry_d > 0:
-                _ss_pct_d = float(_snap_cfg.get("safestop_pct", 0.5))
+                _ss_pct_d = float(_snap_cfg.get("safestop_pct", 1.5))
                 _trigger_d = _entry_d * (1 + _ss_pct_d / 100)
                 _latest_d  = s.get("latest_price")
                 if _latest_d:
@@ -5954,13 +5975,18 @@ def _build_diagnostics_text() -> str:
             _kv("trend_exit_confirmations", f"{_min_conf_d}  →  {_conf_label}")
             _kv("trend_exit_rule",
                 f"{_conf_label} of enabled F2/F3/F4 must flip bearish on last closed 15m candle → close trade")
-        _use_ss_d  = bool(_snap_cfg.get("use_safestop",  False))
-        _ss_pct_d  = float(_snap_cfg.get("safestop_pct", 0.5))
-        _kv("safestop",       "ENABLED" if _use_ss_d else "DISABLED")
+        _use_ss_d       = bool(_snap_cfg.get("use_safestop",        False))
+        _ss_pct_d       = float(_snap_cfg.get("safestop_pct",       1.5))
+        _ss_range_pct_d = float(_snap_cfg.get("safestop_range_pct", 1.0))
+        _ss_step_pct_d  = float(_snap_cfg.get("safestop_step_pct",  0.5))
+        _kv("safestop",             "ENABLED" if _use_ss_d else "DISABLED")
         if _use_ss_d:
-            _kv("safestop_pct",   f"{_ss_pct_d}%")
+            _kv("safestop_trigger_pct",  f"{_ss_pct_d}%")
+            _kv("safestop_range_pct",    f"{_ss_range_pct_d}%")
+            _kv("safestop_step_pct",     f"{_ss_step_pct_d}%")
             _kv("safestop_logic",
-                f"price +{_ss_pct_d}% → SL=entry; every further +1% → SL trails +{_ss_pct_d}%")
+                f"price +{_ss_pct_d}% → SL=entry; "
+                f"every further +{_ss_range_pct_d}% → SL +{_ss_step_pct_d}%")
         if not _use_tp_exit_d and not _use_sl_exit_d and not _use_te_d and not _use_ss_d:
             _kv("WARNING", "ALL EXIT METHODS DISABLED — open trades will never close automatically")
         _kv("tp_level",  f"entry × (1 + {_snap_cfg.get('tp_pct', 1.2)}% / 100)")
