@@ -2315,10 +2315,12 @@ def _check_sl_circuit_breaker():
              and s.get("close_time")],
             key=lambda x: x.get("close_time", ""),
         )
-    # Filter to only closes that happened after the last manual resume.
-    # If never resumed (_resumed_at is None), use ALL history (first-run behaviour).
+    # Only count trades that were OPENED after the last manual resume.
+    # Pre-existing open trades that close badly after a resume must NOT
+    # re-trigger the breaker -- only fresh entries that immediately fail count.
     if _resumed_at:
-        _closed = [s for s in _all_closed if s.get("close_time", "") > _resumed_at]
+        _closed = [s for s in _all_closed
+                   if s.get("timestamp", "") > _resumed_at]
     else:
         _closed = _all_closed
     return (
