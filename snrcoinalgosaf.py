@@ -4960,6 +4960,39 @@ def _signal_tables_fragment():
             key="open_signals_table",
         )
 
+        # ── Force Close selected row ─────────────────────────────────
+        _sel = _open_event.get("selection", {}).get("rows", [])
+        if _sel:
+            _sel_idx = _sel[0]
+            if _sel_idx < len(_open_sigs):
+                _sel_sig = _open_sigs[_sel_idx]
+                _sel_sym = _sel_sig.get("symbol", "?")
+                _sel_entry = _sel_sig.get("entry", "?")
+                st.warning(
+                    f"🟣 Selected: **{_sel_sym}** — entry {_sel_entry}  "
+                    f"| Click **Force Close** to mark this trade as manually closed.",
+                    icon=None
+                )
+                _fc_col1, _fc_col2 = st.columns([1, 4])
+                if _fc_col1.button(
+                    f"🟣 Force Close {_sel_sym}",
+                    key="force_close_btn",
+                    type="primary",
+                    use_container_width=True
+                ):
+                    _fc_price = _sel_sig.get("latest_price") or _sel_sig.get("entry")
+                    with _log_lock:
+                        _sel_sig.update(
+                            status      = "fc_hit",
+                            close_price = _fc_price,
+                            close_time  = dubai_now().isoformat(),
+                            exit_indicators = f"Force Closed @ {_fc_price}"
+                        )
+                        _sel_sig.pop("price_alert", None)
+                        save_log(_b._bsc_log)
+                    st.success(f"✅ {_sel_sym} marked as Force Closed.")
+                    st.rerun()
+
     else:
         st.info("No open signals right now.")
 
