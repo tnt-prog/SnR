@@ -5480,7 +5480,7 @@ if (
                 "In":              in_n,
                 "Dropped":         dropped_n,
                 "Remaining":       remaining,
-                "Qualified Coins": coins_str,
+                "Candidate Coins (entered this stage)": coins_str,
             }
 
         funnel_rows = [
