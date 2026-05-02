@@ -130,7 +130,11 @@ DEFAULT_CONFIG: dict = {
     # When enabled, new signal scanning is paused outside the defined window.
     # Open-trade monitoring (TP/SL/DCA) always runs regardless of this setting.
     # Supports midnight-crossing windows (e.g. start=22, end=06).
-    "use_trend_exit":         True,   # auto-close open long when ANY ONE indicator flips bearish (15m)
+    # ── Exit criteria (which methods close an open trade) ─────────────────────
+    "use_tp_exit":            True,   # close trade when TP price is reached
+    "use_sl_exit":            False,  # close trade at hard SL price floor (default OFF — rely on trend exit)
+    "use_trend_exit":         True,   # auto-close open long when F2/F3/F4 indicator(s) flip bearish (15m)
+    "trend_exit_min_confirms": 1,     # how many indicators must flip bearish to trigger trend exit (1/2/3)
     "f2_supertrend":         True,   # F2 SuperTrend (ATR 10, mult 3.0) on 15m
     "f3_chandelier":         True,   # F3 Chandelier Exit (ATR 22, mult 3.0) on 15m
     "f4_lux":                True,   # F4 Lux Trend (ATR 14, mult 2.0) on 15m
@@ -1999,11 +2003,18 @@ def _place_tp_only_order(sig: dict, cfg: dict,
 
 
 def _check_trend_exit(candles_15m: list,
-                      use_st:  bool = True,
-                      use_ce:  bool = True,
-                      use_lux: bool = True):
-    """Return (True, ["F2","F4"]) if ANY ONE enabled indicator fired a sell
-    (trend flipped +1 → -1) on the last completed 15m candle.
+                      use_st:       bool = True,
+                      use_ce:       bool = True,
+                      use_lux:      bool = True,
+                      min_confirms: int  = 1):
+    """Return (True, ["F2","F4"]) if enough enabled indicators fired a bearish
+    flip (+1 → -1) on the last completed 15m candle.
+
+    min_confirms controls how many must fire:
+      1 = ANY ONE  (sensitive, default)
+      2 = 2 of 3  (moderate)
+      3 = ALL 3   (stubborn — only fires when every enabled indicator agrees)
+
     Returns (False, []) otherwise.
     """
     _enabled = sum([use_st, use_ce, use_lux])
@@ -2023,7 +2034,10 @@ def _check_trend_exit(candles_15m: list,
     if _sell_on_last(ce_res,  "dir"):   fired.append("F3")
     if _sell_on_last(lux_res, "trend"): fired.append("F4")
 
-    return (len(fired) > 0, fired)
+    # Clamp min_confirms to the number of enabled indicators so "All 3" doesn't
+    # become unreachable when only 2 are enabled.
+    _threshold = max(1, min(int(min_confirms), _enabled))
+    return (len(fired) >= _threshold, fired)
 
 
 def _place_market_close_order(sig: dict, cfg: dict, reason: str = "trend_exit") -> bool:
@@ -2095,10 +2109,25 @@ def _update_one_signal(sig: dict) -> None:
         candles   = get_klines(sig["symbol"], "5m", 200)
         post      = [c for c in candles if c["time"] >= sig_ts_ms]
 
+        # ── Read exit-criteria config once ───────────────────────────────────
+        with _config_lock:
+            _te_cfg = dict(_b._bsc_cfg)
+        _use_tp_exit    = bool(_te_cfg.get("use_tp_exit",    True))
+        _use_sl_exit    = bool(_te_cfg.get("use_sl_exit",    False))
+        _use_trend_exit = bool(_te_cfg.get("use_trend_exit", True))
+        _min_confirms   = int(_te_cfg.get("trend_exit_min_confirms", 1))
+        _use_st         = bool(_te_cfg.get("f2_supertrend",  True))
+        _use_ce         = bool(_te_cfg.get("f3_chandelier",  True))
+        _use_lux        = bool(_te_cfg.get("f4_lux",         True))
+
+        # ── Scan post-entry candles for TP / SL hits ─────────────────────────
         tp_time = sl_time = None
         for c in post:
-            if tp_time is None and c["high"] >= sig["tp"]: tp_time = c["time"]
-            if sl_time is None and c["low"] <= sig["sl"]:  sl_time = c["time"]
+            if _use_tp_exit and tp_time is None and c["high"] >= sig["tp"]:
+                tp_time = c["time"]
+            if _use_sl_exit and sl_time is None and c["low"] <= sig["sl"]:
+                sl_time = c["time"]
+
         if tp_time is not None or sl_time is not None:
             if tp_time is not None and (sl_time is None or tp_time <= sl_time):
                 sig.update(status="tp_hit", close_price=sig["tp"],
@@ -2125,12 +2154,7 @@ def _update_one_signal(sig: dict) -> None:
                     sig["price_alert"]     = False
                     sig["price_alert_pct"] = 0.0
 
-                # ── F2/F3/F4 Trend Exit — ANY ONE bearish flip on 15m ────────
-                with _config_lock:
-                    _te_cfg = dict(_b._bsc_cfg)
-                _use_st  = bool(_te_cfg.get("f2_supertrend", True))
-                _use_ce  = bool(_te_cfg.get("f3_chandelier", True))
-                _use_lux = bool(_te_cfg.get("f4_lux",        True))
+                # ── F2/F3/F4 Trend Exit ───────────────────────────────────────
                 if _use_st or _use_ce or _use_lux:
                     _c15 = get_klines(sig["symbol"], "15m", 100)[:-1]
 
@@ -2145,10 +2169,10 @@ def _update_one_signal(sig: dict) -> None:
                             "+".join(_cur_inds) if _cur_inds else "F2/F3/F4 unclear"
                         )
 
-                if _te_cfg.get("use_trend_exit", True):
-                    if _use_st or _use_ce or _use_lux:
+                    if _use_trend_exit:
                         _exited, _exit_inds = _check_trend_exit(
-                            _c15, _use_st, _use_ce, _use_lux)
+                            _c15, _use_st, _use_ce, _use_lux,
+                            min_confirms=_min_confirms)
                         if _exited:
                             sig.update(
                                 status          = "trend_exit",
@@ -3015,31 +3039,100 @@ with st.sidebar:
         st.caption("⚠️ All disabled — trend filter bypassed")
     st.divider()
 
-    # ── Trend Exit (auto-close on 15m bearish flip) ───────────────────────────
+    # ── Exit Criteria ─────────────────────────────────────────────────────────
     st.markdown(
-        "**🚨 Trend Exit — Auto-Close on Reversal**",
+        "**🚪 Exit Criteria**",
         help=(
-            "When enabled, each open long signal is checked every scan cycle "
-            "against the same F2/F3/F4 indicators on 15m candles.\n\n"
-            "If ≥2 of the 3 enabled indicators flip bearish (-1) within the "
-            "last 2 completed 15m candles, the position is closed immediately "
-            "at the current market price — before the hard SL is hit.\n\n"
-            "In Live mode a market SELL order is placed on OKX automatically. "
-            "In Demo mode the close is recorded in the log only.\n\n"
-            "⚠️ Whipsaw risk: a momentary bearish flip on choppy candles can "
-            "trigger a premature exit — any ONE indicator firing is enough to close."
+            "Choose which methods are allowed to close an open trade.\n\n"
+            "**TP Exit** — closes when price reaches the take-profit level.\n\n"
+            "**SL Exit** — closes at the hard stop-loss price floor. Default OFF: "
+            "rely on trend exit as a trailing stop instead. Warning: disabling SL "
+            "means a fast dump won't stop the trade until an indicator flips on the "
+            "next 15m close.\n\n"
+            "**F2/F3/F4 Trend Exit** — closes when enough enabled indicators flip "
+            "bearish on the last completed 15m candle. 'Confirmations required' "
+            "controls sensitivity: 1 = any one (most sensitive), 3 = all agree "
+            "(most stubborn)."
         )
     )
+
+    new_use_tp_exit = st.checkbox(
+        "TP Exit",
+        value=bool(_snap_cfg.get("use_tp_exit", True)),
+        key="cfg_use_tp_exit",
+        help="Close trade when price reaches the take-profit target."
+    )
+    st.caption("✅ Closes at TP price" if new_use_tp_exit else "⚠️ TP price will not trigger a close")
+
+    new_use_sl_exit = st.checkbox(
+        "SL Exit  (hard floor)",
+        value=bool(_snap_cfg.get("use_sl_exit", False)),
+        key="cfg_use_sl_exit",
+        help=(
+            "Close trade when price hits the hard stop-loss level.\n\n"
+            "Default OFF — rely on F2/F3/F4 trend exit as a trailing stop.\n\n"
+            "⚠️ With SL disabled, a sudden dump will not stop the trade until "
+            "an indicator flips bearish on the next completed 15m candle."
+        )
+    )
+    if new_use_sl_exit:
+        st.caption("✅ Closes at SL price floor")
+    else:
+        st.caption("⚠️ OFF — no hard price floor; trend exit acts as stop")
+
     new_use_trend_exit = st.checkbox(
-        "Enable Trend Exit",
+        "F2/F3/F4 Trend Exit",
         value=bool(_snap_cfg.get("use_trend_exit", True)),
         key="cfg_use_trend_exit",
-        help="Auto-close open longs when ANY ONE trend indicator flips bearish on the last closed 15m candle."
+        help=(
+            "Auto-close open longs when indicator(s) flip bearish on the last "
+            "closed 15m candle.\n\n"
+            "In Live mode a market SELL order is placed on OKX automatically.\n\n"
+            "⚠️ Whipsaw risk: choppy candles can trigger a premature exit. "
+            "Raise 'Confirmations required' to reduce false exits."
+        )
     )
     if new_use_trend_exit:
-        st.caption("✅ Open longs closed when ANY ONE indicator flips bearish on last 15m candle")
+        _conf_options = {
+            "Any 1 — sensitive (default)": 1,
+            "2 of 3 — moderate":           2,
+            "All 3 — stubborn":            3,
+        }
+        _cur_conf = int(_snap_cfg.get("trend_exit_min_confirms", 1))
+        _conf_default = next(
+            (k for k, v in _conf_options.items() if v == _cur_conf),
+            "Any 1 — sensitive (default)"
+        )
+        new_trend_confirms_label = st.selectbox(
+            "Confirmations required",
+            options=list(_conf_options.keys()),
+            index=list(_conf_options.keys()).index(_conf_default),
+            key="cfg_trend_exit_confirms",
+            help=(
+                "How many of the enabled F2/F3/F4 indicators must flip bearish "
+                "to trigger a trend exit.\n\n"
+                "1 = Any one fires → exit (most sensitive)\n"
+                "2 = At least two agree → exit\n"
+                "3 = All enabled indicators agree → exit (most stubborn)\n\n"
+                "Note: if fewer than 3 indicators are enabled, 'All 3' is "
+                "automatically clamped to the number of enabled indicators."
+            )
+        )
+        new_trend_exit_min_confirms = _conf_options[new_trend_confirms_label]
+        _conf_val = new_trend_exit_min_confirms
+        if _conf_val == 1:
+            st.caption("✅ Any ONE indicator flip → close (most sensitive)")
+        elif _conf_val == 2:
+            st.caption("✅ 2 of 3 indicators must flip → close")
+        else:
+            st.caption("✅ ALL enabled indicators must flip → close (most stubborn)")
     else:
-        st.caption("⚠️ Disabled — positions held until hard TP/SL price is hit")
+        new_trend_exit_min_confirms = int(_snap_cfg.get("trend_exit_min_confirms", 1))
+        st.caption("⚠️ Trend exit disabled — no indicator-based closes")
+
+    if not new_use_tp_exit and not new_use_sl_exit and not new_use_trend_exit:
+        st.warning("⚠️ All exit methods disabled — open trades will never close automatically.")
+
     st.divider()
 
     # ── Queue Size (max concurrent open trades) ──────────────────────────────
@@ -3264,8 +3357,12 @@ with st.sidebar:
         new_cfg = {
             "tp_pct": new_tp, "sl_pct": new_sl,
             # enable/disable flags
-            "use_pre_filter":      bool(new_use_pre_filter),
-            "use_trend_exit":      bool(new_use_trend_exit),
+            "use_pre_filter":             bool(new_use_pre_filter),
+            # exit criteria
+            "use_tp_exit":                bool(new_use_tp_exit),
+            "use_sl_exit":                bool(new_use_sl_exit),
+            "use_trend_exit":             bool(new_use_trend_exit),
+            "trend_exit_min_confirms":    int(new_trend_exit_min_confirms),
             "f2_supertrend":       bool(new_f2_st),
             "f3_chandelier":       bool(new_f3_ce),
             "f4_lux":              bool(new_f4_lux),
@@ -3676,13 +3773,20 @@ def _cfg_panel(cfg: dict) -> str:
     _fpill("F2 SuperTrend",   bool(_c.get("f2_supertrend",   True)))
     _fpill("F3 Chandelier",   bool(_c.get("f3_chandelier",   True)))
     _fpill("F4 Lux Trend",    bool(_c.get("f4_lux",          True)))
-    _fpill("Trend Exit",      bool(_c.get("use_trend_exit",  True)))
     _n_trend = sum([
         bool(_c.get("f2_supertrend", True)),
         bool(_c.get("f3_chandelier", True)),
         bool(_c.get("f4_lux",        True)),
     ])
     _fpill(f"{_n_trend} trend indicators active", _n_trend >= 2)
+    # Exit method pills
+    _fpill("Exit: TP",        bool(_c.get("use_tp_exit",    True)))
+    _fpill("Exit: SL floor",  bool(_c.get("use_sl_exit",    False)))
+    _fpill("Exit: Trend",     bool(_c.get("use_trend_exit", True)))
+    _min_c = int(_c.get("trend_exit_min_confirms", 1))
+    if bool(_c.get("use_trend_exit", True)):
+        _conf_str = {1: "any 1", 2: "2 of 3", 3: "all 3"}.get(_min_c, str(_min_c))
+        _fpill(f"Trend confirms: {_conf_str}", True)
     _fpill("Cross Margin", _c.get("trade_margin_mode", "cross") == "cross")
 
     # ── build HTML ─────────────────────────────────────────────────────────────
@@ -5620,11 +5724,22 @@ def _build_diagnostics_text() -> str:
             "if ANY indicator fires a SELL after the earlier of the two buy flips → skip coin")
         _kv("candle_window_restriction", "NONE — buys can be any distance apart")
         _sub("Exit Criteria")
-        _kv("trend_exit_enabled", bool(_snap_cfg.get("use_trend_exit", True)))
-        _kv("trend_exit_rule",
-            "ANY ONE indicator flips bearish on last closed 15m candle → close trade")
-        _kv("hard_sl", f"entry × (1 − {_snap_cfg.get('sl_pct', 3.0)}% / 100)  [always active]")
-        _kv("take_profit", f"entry × (1 + {_snap_cfg.get('tp_pct', 1.5)}% / 100)")
+        _use_tp_exit_d  = bool(_snap_cfg.get("use_tp_exit",    True))
+        _use_sl_exit_d  = bool(_snap_cfg.get("use_sl_exit",    False))
+        _use_te_d       = bool(_snap_cfg.get("use_trend_exit", True))
+        _min_conf_d     = int(_snap_cfg.get("trend_exit_min_confirms", 1))
+        _conf_label     = {1: "any 1 (sensitive)", 2: "2 of 3 (moderate)", 3: "all 3 (stubborn)"}.get(_min_conf_d, str(_min_conf_d))
+        _kv("tp_exit",          "ENABLED — closes at TP price"         if _use_tp_exit_d  else "DISABLED — TP price will not close trade")
+        _kv("sl_exit",          "ENABLED — closes at hard SL floor"    if _use_sl_exit_d  else "DISABLED — no hard price floor (rely on trend exit)")
+        _kv("trend_exit",       "ENABLED"                              if _use_te_d       else "DISABLED — no indicator-based closes")
+        if _use_te_d:
+            _kv("trend_exit_confirmations", f"{_min_conf_d}  →  {_conf_label}")
+            _kv("trend_exit_rule",
+                f"{_conf_label} of enabled F2/F3/F4 must flip bearish on last closed 15m candle → close trade")
+        if not _use_tp_exit_d and not _use_sl_exit_d and not _use_te_d:
+            _kv("WARNING", "ALL EXIT METHODS DISABLED — open trades will never close automatically")
+        _kv("tp_level",  f"entry × (1 + {_snap_cfg.get('tp_pct', 1.2)}% / 100)")
+        _kv("sl_level",  f"entry × (1 − {_snap_cfg.get('sl_pct', 3.0)}% / 100)  [computed even when SL exit is OFF]")
         _sub("Margin / SL Mode")
         _kv("margin_mode",  _snap_cfg.get("trade_margin_mode", "cross"))
         _kv("sl_formula",   "entry × (1 − sl_pct/100)   — cross margin, NOT liq price")
@@ -5771,130 +5886,10 @@ def _build_diagnostics_text() -> str:
         _push("  --- Watchlist tokens ---")
         _cfg_wl = (_b._bsc_log.get("config") or {}).get("watchlist", [])
         for _s in sorted(_cfg_wl):
-            if _s in _ct_raw:
-                _cv, _cm, _ef = _ct_raw[_s]
-                _push(f"    {_s:<14} ctVal={_cv}  ctMult={_cm}  effective={_ef}")
+            _ct_entry = _ct_raw.get(_s)
+            if _ct_entry:
+                _push(f"    {_s:<14} ctVal={_ct_entry[0]}  ctMult={_ct_entry[1]}  effective={_ct_entry[2]}")
+            else:
+                _push(f"    {_s:<14} (not in cache)")
     else:
-        _push("  (cache not yet populated — run a scan first)")
-
-    # ── Filter Funnel (last scan) ─────────────────────────────────────────────
-    _hdr("FILTER FUNNEL -- LAST SCAN")
-    try:
-        _fc = getattr(_b, "_bsc_filter_counts", {}) or {}
-        _total_wl  = _fc.get("total_watchlist", 0)
-        _pre_out   = _fc.get("pre_filtered_out", 0)
-        _checked   = _fc.get("checked", 0)
-        _empty     = _fc.get("f_empty_data", 0)
-        _trend     = _fc.get("f_trend_filter", 0)
-        _drift     = _fc.get("f_price_drift", 0)
-        _sl_cool   = _fc.get("f_sl_cooldown", 0)
-        _passed    = _fc.get("passed", 0)
-        _kv("Watchlist size",              _total_wl)
-        _kv("Pre-filter eliminated",       _pre_out)
-        _kv("Deep-scanned",                _checked)
-        _kv("Dropped -- Empty candle data",_empty)
-        _kv("Dropped -- Trend filter (F2/F3/F4 freshness+direction)", _trend)
-        _kv("Dropped -- Price drift (>0.5% above flip candle)",       _drift)
-        _kv("Dropped -- SL cooldown",      _sl_cool)
-        _kv("Passed all filters",          _passed)
-    except Exception as _fe:
-        _push(f"  <error: {_fe}>")
-
-    # ── Per-signal detail (all buckets) ──────────────────────────────────────
-    def _sig_lines(sig: dict, idx: int):
-        _push(f"  [{idx}] {sig.get('symbol','?')} | status={sig.get('status','?')} "
-              f"| entry={sig.get('entry','--')} | tp={sig.get('tp','--')} "
-              f"| sl={sig.get('sl','--')} "
-              f"| mode={sig.get('order_margin_mode','--')} "
-              f"| lev={sig.get('trade_lev','--')}x "
-              f"| usdt=${sig.get('trade_usdt','--')} "
-              f"| ts={_fmt_ts(sig.get('timestamp',''))} "
-              f"| close_ts={_fmt_ts(sig.get('close_time',''))} "
-              f"| close_px={sig.get('close_price','--')} "
-              f"| order_id={sig.get('order_id','--')} "
-              f"| algo_id={sig.get('algo_id','--')} "
-              f"| tp_algo_id={sig.get('tp_algo_id','--')} "
-              f"| demo={sig.get('demo_mode','--')}")
-        # Entry / exit signal detail
-        _entry_ind = sig.get("entry_indicators", "—") or "—"
-        _exit_ind  = sig.get("exit_indicators",  "—") or "—"
-        _push(f"    entry_signals : {_entry_ind}")
-        if sig.get("status") not in ("open", "queue_limit"):
-            _push(f"    exit_reason   : {_exit_ind}")
-        # OKX Command log -- one sub-line per entry
-        _log_entries = sig.get("okx_log")
-        if isinstance(_log_entries, list) and _log_entries:
-            _push(f"    okx_log ({len(_log_entries)} entries):")
-            for _li, _le in enumerate(_log_entries, 1):
-                _push(f"      #{_li:>2}  {_le}")
-
-    _entry_failed_sigs = [s for s in signals if s.get("status") == "entry_failed"]
-    for _bucket_name, _bucket in [
-        ("OPEN SIGNALS",    _open_sigs),
-        ("TP HIT",          _tp_sigs),
-        ("SL HIT",          _sl_sigs),
-        ("TREND EXIT",      _trend_exit_sigs),
-        ("QUEUE LIMIT",     _queue_sigs),
-        ("CLOSED ON OKX",   _closed_okx_sigs),
-        ("ENTRY FAILED",    _entry_failed_sigs),
-    ]:
-        _hdr(_bucket_name + f"  ({len(_bucket)} signals)")
-        if not _bucket:
-            _push("  (none)")
-        else:
-            for _i, _s in enumerate(_bucket, 1):
-                _sig_lines(_s, _i)
-                # Full entry criteria
-                _push(f"    criteria  : (filters removed)")
-    # ── Active Watchlist ──────────────────────────────────────────────────────
-    _hdr("WATCHLIST")
-    try:
-        _wl = list(_snap_cfg.get("watchlist") or [])
-        _push(f"  Total: {len(_wl)} symbols")
-        for _wi, _wsym in enumerate(_wl, 1):
-            _push(f"  {_wi:>3}. {_wsym}")
-    except Exception as _we:
-        _push(f"  <error reading watchlist: {_we}>")
-
-    # ── API Error Log ─────────────────────────────────────────────────────────
-    _hdr("API ERROR LOG (last 200 entries, newest first)")
-    try:
-        with getattr(_b, "_bsc_error_log_lock", threading.Lock()):
-            _err_entries = list(reversed(getattr(_b, "_bsc_error_log", [])))[:200]
-        if not _err_entries:
-            _push("  (no errors)")
-        else:
-            for _ei, _err in enumerate(_err_entries, 1):
-                _push(f"  [{_ei:>3}] {_fmt_ts(_err.get('ts',''))} "
-                      f"| {_err.get('type','?'):8} "
-                      f"| {_err.get('symbol',''):15} "
-                      f"| {_err.get('endpoint',''):40} "
-                      f"| {str(_err.get('msg',''))[:120]}")
-    except Exception as _ele:
-        _push(f"  <error reading error log: {_ele}>")
-
-    _push("")
-    _push("=" * 78)
-    _push("END OF DIAGNOSTICS")
-    _push("=" * 78)
-    return "\n".join(_lines)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Download button -- calls the builder and streams the result
-# ─────────────────────────────────────────────────────────────────────────────
-try:
-    _diag_text = _build_diagnostics_text()
-except Exception as _diag_exc:
-    _diag_text = f"Error building diagnostics: {_diag_exc}"
-
-st.text_area("Diagnostics Preview", _diag_text, height=300, key="debug_snap_area")
-
-_diag_filename = f"diagnostics_{dubai_now().strftime('%Y%m%d_%H%M%S')}.txt"
-st.download_button(
-    label="Download Diagnostics",
-    data=_diag_text.encode("utf-8"),
-    file_name=_diag_filename,
-    mime="text/plain",
-    key="diag_download_btn",
-)
+        _push("  (cache empty — no symbols fetched yet)")
