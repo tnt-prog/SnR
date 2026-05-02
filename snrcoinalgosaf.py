@@ -4825,8 +4825,9 @@ def _render_sig_table(sig_list: list, header: str, empty_msg: str,
             if tooltip:
                 _tip_html = (
                     f'### {header} ({len(rows)}) '
-                    f'<span title="{tooltip}" style="font-size:0.85rem;'
-                    f'color:#0097A7;cursor:help;vertical-align:middle;">ⓘ</span>'
+                    f'<span title="{tooltip}" style="display:inline-block;'
+                    f'width:8px;height:8px;background:#0097A7;border-radius:50%;'
+                    f'cursor:help;vertical-align:middle;margin-left:2px;"></span>'
                 )
                 st.markdown(_tip_html, unsafe_allow_html=True)
             else:
@@ -4907,7 +4908,8 @@ def _signal_tables_fragment():
     _open_tip = "Active trades currently being monitored. Price, PnL and exit criteria are checked on every scan cycle."
     st.markdown(
         f'### 🔵 Open Signals ({len(_open_sigs)}) '
-        f'<span title="{_open_tip}" style="font-size:0.85rem;color:#0097A7;cursor:help;vertical-align:middle;">ⓘ</span>',
+        f'<span title="{_open_tip}" style="display:inline-block;width:8px;height:8px;'
+        f'background:#0097A7;border-radius:50%;cursor:help;vertical-align:middle;margin-left:2px;"></span>',
         unsafe_allow_html=True)
     if _open_sigs:
         try:
