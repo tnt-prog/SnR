@@ -3745,7 +3745,7 @@ _health_items = [
 ]
 _health_boxes = "".join(
     f'<div title="{h}" style="background:#E0F2F1;border:1px solid #B2DFDB;border-radius:8px;'
-    f'padding:6px 12px;text-align:left;cursor:default;min-width:90px;max-width:130px;flex:0 0 auto;">"'
+    f'padding:6px 12px;text-align:left;cursor:default;min-width:90px;max-width:130px;flex:0 0 auto;">'
     f'<div style="font-size:10px;font-weight:700;letter-spacing:.08em;color:#00695C;'
     f'text-transform:uppercase;margin-bottom:2px;">{l}</div>'
     f'<div style="font-size:18px;font-weight:700;color:#004D40;line-height:1.1;">{v}</div>'
