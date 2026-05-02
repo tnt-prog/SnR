@@ -485,6 +485,7 @@ if "_scanner_initialised" not in st.session_state:
         # cycle, no other event — manual resume only. Do not add any code path
         # that clears this flag automatically.
         _b._bsc_sl_paused     = False
+        _b._bsc_sl_resumed_at = None       # ISO timestamp of last manual resume
         _b._bsc_api_conn_status = {          # result of last "Test Connection" call
             "status":      "untested",       # "untested" | "ok" | "error"
             "message":     "",
@@ -2299,19 +2300,26 @@ def update_open_signals(signals):
 # Background scanner thread
 # ─────────────────────────────────────────────────────────────────────────────
 def _check_sl_circuit_breaker():
-    """Return True if the last 3 closed trades are all non-TP exits.
+    """Return True if the last 3 closes SINCE the last resume are all non-TP.
 
-    Fires when the 3 most recent closes are all sl_hit or trend_exit (i.e. no
-    TP among them). This covers the case where use_sl_exit=False and all losses
-    are arriving via trend_exit — previously those were invisible to the breaker.
+    Only trades closed AFTER the most recent manual resume are considered.
+    This prevents the breaker from re-firing instantly on old history when
+    the user clicks “Resume Scanning”.
     """
+    _resumed_at = getattr(_b, "_bsc_sl_resumed_at", None)
     with _log_lock:
-        _closed = sorted(
+        _all_closed = sorted(
             [s for s in _b._bsc_log["signals"]
              if s.get("status") in ("tp_hit", "sl_hit", "trend_exit")
              and s.get("close_time")],
             key=lambda x: x.get("close_time", ""),
         )
+    # Filter to only closes that happened after the last manual resume.
+    # If never resumed (_resumed_at is None), use ALL history (first-run behaviour).
+    if _resumed_at:
+        _closed = [s for s in _all_closed if s.get("close_time", "") > _resumed_at]
+    else:
+        _closed = _all_closed
     return (
         len(_closed) >= 3 and
         all(s["status"] in ("sl_hit", "trend_exit") for s in _closed[-3:])
@@ -2809,6 +2817,7 @@ with st.sidebar:
             # hit is intentionally disabled — the halt sticks until a human
             # reviews market conditions and clicks this button.
             _b._bsc_sl_paused = False
+            _b._bsc_sl_resumed_at = dubai_now().isoformat()  # stamp so CB ignores prior history
             _rescan_event.set()
             st.rerun()
     else:
