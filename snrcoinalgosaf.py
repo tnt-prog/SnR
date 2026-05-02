@@ -4062,7 +4062,7 @@ _pnl_24h_sl_ct     = 0
 _cfg_usdt_fallback = float(_snap_cfg.get("trade_usdt_amount", 0) or 0)
 _cfg_lev_fallback  = int(_snap_cfg.get("trade_leverage", 10) or 0)
 for _s in signals:
-    if _s.get("status") not in ("tp_hit", "sl_hit", "dca_sl_hit", "trend_exit"):
+    if _s.get("status") not in ("tp_hit", "sl_hit", "dca_sl_hit", "trend_exit", "safestop"):
         continue
     _ct_raw = _s.get("close_time")
     if not _ct_raw:
@@ -4307,7 +4307,7 @@ def _build_signal_row(s: dict, is_open_table: bool = False,
     #   • sl_hit  → sig["close_price"] (= SL level — realized loss)
     #   • queue   → "—" (no trade was ever opened)
     pnl_col = "—"
-    if status in ("open", "tp_hit", "sl_hit", "dca_sl_hit", "fc_hit", "trend_exit"):
+    if status in ("open", "tp_hit", "sl_hit", "dca_sl_hit", "fc_hit", "trend_exit", "safestop"):
         if status == "open":
             _ref_pnl = s.get("latest_price")
             if _ref_pnl is None:
@@ -4319,7 +4319,7 @@ def _build_signal_row(s: dict, is_open_table: bool = False,
                     except (TypeError, ValueError):
                         _ref_pnl = None
         else:
-            # tp_hit / sl_hit / dca_sl_hit / fc_hit — close_price is the realized exit
+            # tp_hit / sl_hit / dca_sl_hit / fc_hit / trend_exit / safestop — close_price is the realized exit
             _ref_pnl = s.get("close_price")
         # Use the shared helper — single source of truth for PnL math.
         _pnl_val = _calc_pnl_usd(s, _ref_pnl, _cfg_usdt_fallback, _cfg_lev_fallback)
@@ -4331,7 +4331,7 @@ def _build_signal_row(s: dict, is_open_table: bool = False,
     # DCA trades, original entry otherwise).
     #   Positive = closed above entry (TP or FC)  Negative = closed below (SL)
     exit_pct_col = "—"
-    if status in ("tp_hit", "sl_hit", "dca_sl_hit", "fc_hit", "trend_exit"):
+    if status in ("tp_hit", "sl_hit", "dca_sl_hit", "fc_hit", "trend_exit", "safestop"):
         try:
             _close_ep  = float(s.get("close_price", 0) or 0)
             _ref_ep    = float(s.get("signal_entry", s.get("entry", 0)) or 0)
