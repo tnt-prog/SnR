@@ -2340,9 +2340,30 @@ def _check_sl_circuit_breaker():
                    if s.get("timestamp", "") > _resumed_at]
     else:
         _closed = _all_closed
+    # A "bad" close is:
+    #   - sl_hit (always bad regardless of PnL)
+    #   - trend_exit with PnL <= 0  (losing exit)
+    # trend_exit with positive PnL is a GOOD outcome and must NOT count.
+    def _is_bad_close(s):
+        if s["status"] == "sl_hit":
+            return True
+        if s["status"] == "trend_exit":
+            try:
+                _entry = float(s.get("entry", 0) or 0)
+                _close = float(s.get("close_price", 0) or 0)
+                _usdt  = float(s.get("trade_usdt", 5.0) or 5.0)
+                _lev   = int(s.get("trade_lev", 20) or 20)
+                if _entry > 0 and _close > 0:
+                    _pnl = (_close / _entry - 1.0) * (_usdt * _lev)
+                    return _pnl <= 0  # positive PnL trend_exit is NOT bad
+            except Exception:
+                pass
+            return True  # fallback: treat as bad if PnL uncomputable
+        return False
+
     return (
         len(_closed) >= 3 and
-        all(s["status"] in ("sl_hit", "trend_exit") for s in _closed[-3:])
+        all(_is_bad_close(s) for s in _closed[-3:])
     )
 
 
