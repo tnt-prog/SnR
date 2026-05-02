@@ -135,6 +135,9 @@ DEFAULT_CONFIG: dict = {
     "use_sl_exit":            False,  # close trade at hard SL price floor (default OFF — rely on trend exit)
     "use_trend_exit":         True,   # auto-close open long when F2/F3/F4 indicator(s) flip bearish (15m)
     "trend_exit_min_confirms": 1,     # how many indicators must flip bearish to trigger trend exit (1/2/3)
+    # ── SafeStop trailing break-even ──────────────────────────────────────────
+    "use_safestop":           False,  # enable SafeStop trailing break-even mechanism
+    "safestop_pct":           0.5,    # % move in favour → SL moves to entry; then every 1% more → SL trails by this %
     "f2_supertrend":         True,   # F2 SuperTrend (ATR 10, mult 3.0) on 15m
     "f3_chandelier":         True,   # F3 Chandelier Exit (ATR 22, mult 3.0) on 15m
     "f4_lux":                True,   # F4 Lux Trend (ATR 14, mult 2.0) on 15m
@@ -2119,27 +2122,68 @@ def _update_one_signal(sig: dict) -> None:
         _use_st         = bool(_te_cfg.get("f2_supertrend",  True))
         _use_ce         = bool(_te_cfg.get("f3_chandelier",  True))
         _use_lux        = bool(_te_cfg.get("f4_lux",         True))
+        _use_safestop   = bool(_te_cfg.get("use_safestop",   False))
+        _ss_pct         = float(_te_cfg.get("safestop_pct",  0.5))
+        _entry          = float(sig.get("entry", 0) or 0)
 
-        # ── Scan post-entry candles for TP / SL hits ─────────────────────────
+        # ── Scan post-entry candles for TP / SL / SafeStop hits ──────────────
+        # SafeStop state — recomputed fresh each cycle from all post-entry candles
+        # so the trail level is always accurate even after an app restart.
+        _ss_peak      = _entry        # running highest high since entry
+        _ss_active    = False         # True once break-even trigger has fired
+        _ss_sl_level  = _entry        # current SafeStop SL price
+        _ss_hit_time  = None          # candle time when SafeStop SL was breached
+        _ss_hit_price = _entry        # SafeStop SL price at time of breach
+
         tp_time = sl_time = None
         for c in post:
+            # ── SafeStop: update peak and trail level (high before low) ──────
+            if _use_safestop and _entry > 0:
+                if c["high"] > _ss_peak:
+                    _ss_peak = c["high"]
+                _ss_trigger = _entry * (1 + _ss_pct / 100)
+                if _ss_peak >= _ss_trigger:
+                    # Break-even is active. Calculate trail steps:
+                    # Each additional 1% above initial trigger → SL moves up _ss_pct%
+                    _excess = (_ss_peak / _entry - 1) * 100 - _ss_pct
+                    _steps  = max(0, int(_excess / 1.0))   # fixed 1% step size
+                    _ss_sl_level = _entry * (1 + _steps * _ss_pct / 100)
+                    _ss_active   = True
+
             if _use_tp_exit and tp_time is None and c["high"] >= sig["tp"]:
                 tp_time = c["time"]
             if _use_sl_exit and sl_time is None and c["low"] <= sig["sl"]:
                 sl_time = c["time"]
+            if _use_safestop and _ss_active and _ss_hit_time is None and c["low"] <= _ss_sl_level:
+                _ss_hit_time  = c["time"]
+                _ss_hit_price = _ss_sl_level
 
-        if tp_time is not None or sl_time is not None:
-            if tp_time is not None and (sl_time is None or tp_time <= sl_time):
+        # ── Determine earliest exit among TP / SL / SafeStop ─────────────────
+        _exit_candidates = {}
+        if tp_time    is not None: _exit_candidates["tp"] = tp_time
+        if sl_time    is not None: _exit_candidates["sl"] = sl_time
+        if _ss_hit_time is not None: _exit_candidates["ss"] = _ss_hit_time
+
+        if _exit_candidates:
+            _first_exit = min(_exit_candidates, key=_exit_candidates.get)
+            if _first_exit == "tp":
                 sig.update(status="tp_hit", close_price=sig["tp"],
                            close_time=to_dubai(datetime.fromtimestamp(
                                tp_time/1000, tz=timezone.utc)).isoformat(),
                            exit_indicators="TP Hit")
                 sig.pop("price_alert", None)
-            else:
+            elif _first_exit == "sl":
                 sig.update(status="sl_hit", close_price=sig["sl"],
                            close_time=to_dubai(datetime.fromtimestamp(
                                sl_time/1000, tz=timezone.utc)).isoformat(),
                            exit_indicators="SL Hit")
+                sig.pop("price_alert", None)
+            elif _first_exit == "ss":
+                sig.update(status="safestop",
+                           close_price=_ss_hit_price,
+                           close_time=to_dubai(datetime.fromtimestamp(
+                               _ss_hit_time/1000, tz=timezone.utc)).isoformat(),
+                           exit_indicators=f"SafeStop @ {_ss_hit_price:.6f}")
                 sig.pop("price_alert", None)
         else:
             if candles:
@@ -3157,7 +3201,45 @@ with st.sidebar:
         new_trend_exit_min_confirms = int(_snap_cfg.get("trend_exit_min_confirms", 1))
         st.caption("⚠️ Trend exit disabled — no indicator-based closes")
 
-    if not new_use_tp_exit and not new_use_sl_exit and not new_use_trend_exit:
+    st.markdown("**🛡️ SafeStop — Trailing Break-Even**",
+        help=(
+            "When enabled, once price moves in your favour by SafeStop %, "
+            "the effective SL is moved to entry (break-even). After that, "
+            "every additional 1% rise trails the SL up by SafeStop % more.\n\n"
+            "Example with SafeStop = 0.5%:\n"
+            "  +0.5% → SL = entry\n"
+            "  +1.5% → SL = entry + 0.5%\n"
+            "  +2.5% → SL = entry + 1.0%\n\n"
+            "Closes are recorded as 'SafeStop' — a separate category from SL Hit."
+        )
+    )
+    new_use_safestop = st.checkbox(
+        "Enable SafeStop",
+        value=bool(_snap_cfg.get("use_safestop", False)),
+        key="cfg_use_safestop",
+        help="Move SL to break-even once trade moves in your favour, then trail by SafeStop % for every 1% gain."
+    )
+    if new_use_safestop:
+        new_safestop_pct = st.number_input(
+            "SafeStop %",
+            min_value=0.1, max_value=5.0, step=0.1,
+            value=float(_snap_cfg.get("safestop_pct", 0.5)),
+            key="cfg_safestop_pct",
+            format="%.1f",
+            help=(
+                "Trigger: once price rises by this % from entry → SL moves to entry.\n"
+                "Trail: every additional 1% rise → SL moves up by this % more."
+            )
+        )
+        st.caption(
+            f"✅ Break-even at +{new_safestop_pct:.1f}%, "
+            f"then trail +{new_safestop_pct:.1f}% per 1% gain"
+        )
+    else:
+        new_safestop_pct = float(_snap_cfg.get("safestop_pct", 0.5))
+        st.caption("⚠️ SafeStop disabled")
+
+    if not new_use_tp_exit and not new_use_sl_exit and not new_use_trend_exit and not new_use_safestop:
         st.warning("⚠️ All exit methods disabled — open trades will never close automatically.")
 
     st.divider()
@@ -3390,6 +3472,8 @@ with st.sidebar:
             "use_sl_exit":                bool(new_use_sl_exit),
             "use_trend_exit":             bool(new_use_trend_exit),
             "trend_exit_min_confirms":    int(new_trend_exit_min_confirms),
+            "use_safestop":               bool(new_use_safestop),
+            "safestop_pct":               float(new_safestop_pct),
             "f2_supertrend":       bool(new_f2_st),
             "f3_chandelier":       bool(new_f3_ce),
             "f4_lux":              bool(new_f4_lux),
@@ -3470,7 +3554,7 @@ _total_sl_ct     = 0
 _cfg_usdt_fb_top = float(_snap_cfg.get("trade_usdt_amount", 0) or 0)
 _cfg_lev_fb_top  = int(_snap_cfg.get("trade_leverage", 10) or 0)
 for _s in signals:
-    if _s.get("status") not in ("tp_hit", "sl_hit", "dca_sl_hit", "trend_exit"):
+    if _s.get("status") not in ("tp_hit", "sl_hit", "dca_sl_hit", "trend_exit", "safestop"):
         continue
     _v = _pnl_topline(_s, _cfg_usdt_fb_top, _cfg_lev_fb_top)
     if _v is None:
@@ -3606,12 +3690,13 @@ open_count        = sum(1 for s in signals if s["status"]=="open")
 tp_count          = sum(1 for s in signals if s["status"]=="tp_hit")
 sl_count          = sum(1 for s in signals if s["status"]=="sl_hit")
 trend_exit_count  = sum(1 for s in signals if s["status"]=="trend_exit")
+safestop_count    = sum(1 for s in signals if s["status"]=="safestop")
 queue_count       = sum(1 for s in signals if s["status"]=="queue_limit")
 
 # ── Per-card PnL sums ─────────────────────────────────────────────────────────
 _pnl_fb_usdt = float(_snap_cfg.get("trade_usdt_amount", 5.0) or 5.0)
 _pnl_fb_lev  = int(_snap_cfg.get("trade_leverage", 20) or 20)
-_pnl_tp, _pnl_sl, _pnl_te = 0.0, 0.0, 0.0
+_pnl_tp, _pnl_sl, _pnl_te, _pnl_ss = 0.0, 0.0, 0.0, 0.0
 for _ps in signals:
     _pv = _pnl_topline(_ps, _pnl_fb_usdt, _pnl_fb_lev)
     if _pv is None:
@@ -3622,6 +3707,8 @@ for _ps in signals:
         _pnl_sl += _pv
     elif _ps["status"] == "trend_exit":
         _pnl_te += _pv
+    elif _ps["status"] == "safestop":
+        _pnl_ss += _pv
 
 # ── Capital at stake for open trades ─────────────────────────────────────────
 _open_at_stake = open_count * _pnl_fb_usdt  # margin deployed (not leveraged)
@@ -3657,7 +3744,7 @@ m4.metric("Pre-filtered ⚡", pre_out,  help="Coins removed by bulk ticker pre-f
 m5c.metric("Deep Scanned",   deep_sc,  help="Coins that passed pre-filter and received full candle analysis")
 
 # ── Row 2: Trade results ──────────────────────────────────────────────────────
-m6, m7, m8, m8b, m9 = st.columns(5)
+m6, m7, m8, m8b, m8c, m9 = st.columns(6)
 # ── Open — large orange ─────────────────────────────────────────────────
 with m6:
     st.markdown(
@@ -3715,6 +3802,21 @@ with m8b:
                       color:#C0392B;line-height:1.1;">{trend_exit_count}</p>
             <p style="margin:2px 0 0 0;font-size:0.68rem;font-weight:500;
                       color:#7B241C;line-height:1.2;">{_fmt_pnl(_pnl_te)}</p>
+        </div>""",
+        unsafe_allow_html=True,
+    )
+# ── SafeStop — blue/teal ─────────────────────────────────────────────────
+with m8c:
+    st.markdown(
+        f"""<div style="background:#D0EEEE;border:1px solid #005F6566;border-radius:8px;
+                        padding:12px 16px 10px 16px;min-height:88px;"
+             title="Trades closed by SafeStop trailing break-even mechanism">
+            <p style="margin:0 0 4px 0;font-size:0.72rem;font-weight:600;
+                      color:#005F65;letter-spacing:.05em;line-height:1.2;">SAFESTOP 🛡️</p>
+            <p style="margin:0;font-size:1.9rem;font-weight:700;
+                      color:#005F65;line-height:1.1;">{safestop_count}</p>
+            <p style="margin:2px 0 0 0;font-size:0.68rem;font-weight:500;
+                      color:#004A50;line-height:1.2;">{_fmt_pnl(_pnl_ss)}</p>
         </div>""",
         unsafe_allow_html=True,
     )
@@ -4067,6 +4169,7 @@ def _build_signal_row(s: dict, is_open_table: bool = False,
         "sl_hit":      "❌ SL Hit",
         "dca_sl_hit":  "❌ DCA SL Hit",
         "trend_exit":  "🚨 Trend Exit",
+        "safestop":    "🛡️ SafeStop",
         "fc_hit":      "🟣 FC Hit",
         "queue_limit": "⏳ Queue Limit",
         "closed_okx":  "🟠 Closed on OKX",
@@ -4721,12 +4824,13 @@ def _signal_tables_fragment():
                [s for s in _frag_signals if s.get("sector") == _frag_sector]
     filtered_sorted = sorted(filtered, key=lambda x: x.get("timestamp", ""), reverse=True)
 
-    _open_sigs       = [s for s in filtered_sorted if s.get("status") == "open"]
-    _tp_sigs         = [s for s in filtered_sorted if s.get("status") == "tp_hit"]
-    _sl_sigs         = [s for s in filtered_sorted if s.get("status") == "sl_hit"]
-    _trend_exit_sigs = [s for s in filtered_sorted if s.get("status") == "trend_exit"]
-    _queue_sigs      = [s for s in filtered_sorted if s.get("status") == "queue_limit"]
-    _closed_okx_sigs = [s for s in filtered_sorted if s.get("status") == "closed_okx"]
+    _open_sigs        = [s for s in filtered_sorted if s.get("status") == "open"]
+    _tp_sigs          = [s for s in filtered_sorted if s.get("status") == "tp_hit"]
+    _sl_sigs          = [s for s in filtered_sorted if s.get("status") == "sl_hit"]
+    _trend_exit_sigs  = [s for s in filtered_sorted if s.get("status") == "trend_exit"]
+    _safestop_sigs    = [s for s in filtered_sorted if s.get("status") == "safestop"]
+    _queue_sigs       = [s for s in filtered_sorted if s.get("status") == "queue_limit"]
+    _closed_okx_sigs  = [s for s in filtered_sorted if s.get("status") == "closed_okx"]
 
     # ── Table 1: Open Signals ───────────────────────────────────────────────────────
     # ── Open Signals table with row selection + Force Close ─────────────────────
@@ -5014,6 +5118,10 @@ def _signal_tables_fragment():
     _render_sig_table(_trend_exit_sigs, "🚨 Trend Exit",
                       "No trend exits yet.", show_pnl=True)
 
+    # ── Table 3c: SafeStop ──────────────────────────────────────────────────
+    _render_sig_table(_safestop_sigs, "🛡️ SafeStop",
+                      "No SafeStop exits yet.", show_pnl=True)
+
     # ── OKX Liquidated / SL Closed Orders (auto-trading only) ───────────────────────
     if _hist_trade_on and _hist_has_creds:
         _sl_hist      = st.session_state.get("okx_sl_hist")
@@ -5125,12 +5233,13 @@ _signal_tables_fragment()
 _filtered_pg   = signals if st.session_state.get("sector_filter","All") == "All" else \
                  [s for s in signals if s.get("sector") == st.session_state.get("sector_filter","All")]
 _fsorted_pg    = sorted(_filtered_pg, key=lambda x: x.get("timestamp",""), reverse=True)
-_open_sigs       = [s for s in _fsorted_pg if s.get("status") == "open"]
-_tp_sigs         = [s for s in _fsorted_pg if s.get("status") == "tp_hit"]
+_open_sigs        = [s for s in _fsorted_pg if s.get("status") == "open"]
+_tp_sigs          = [s for s in _fsorted_pg if s.get("status") == "tp_hit"]
 _sl_sigs          = [s for s in _fsorted_pg if s.get("status") == "sl_hit"]
 _trend_exit_sigs  = [s for s in _fsorted_pg if s.get("status") == "trend_exit"]
+_safestop_sigs    = [s for s in _fsorted_pg if s.get("status") == "safestop"]
 _queue_sigs       = [s for s in _fsorted_pg if s.get("status") == "queue_limit"]
-_closed_okx_sigs = [s for s in _fsorted_pg if s.get("status") == "closed_okx"]
+_closed_okx_sigs  = [s for s in _fsorted_pg if s.get("status") == "closed_okx"]
 
 # ─────────────────────────────────────────────────────────────────────────────
 # OKX Live Positions Panel
@@ -5424,9 +5533,9 @@ if signals:
                      plot_bgcolor="rgba(0,0,0,0)", font=dict(color="#062020"),
                      margin=dict(t=40,b=10,l=10,r=10)),
                      use_container_width=True)
-    outcome_labels = ["Open", "TP Hit", "SL Hit", "Trend Exit"]
-    outcome_values = [open_count, tp_count, sl_count, trend_exit_count]
-    outcome_colors = ["#005F65", "#2E7D32", "#C0392B", "#E67E22"]
+    outcome_labels = ["Open", "TP Hit", "SL Hit", "Trend Exit", "SafeStop"]
+    outcome_values = [open_count, tp_count, sl_count, trend_exit_count, safestop_count]
+    outcome_colors = ["#005F65", "#2E7D32", "#C0392B", "#E67E22", "#1D9E75"]
     ch2.plotly_chart(go.Figure(go.Bar(
         x=outcome_labels, y=outcome_values,
         marker_color=outcome_colors,
@@ -5763,7 +5872,14 @@ def _build_diagnostics_text() -> str:
             _kv("trend_exit_confirmations", f"{_min_conf_d}  →  {_conf_label}")
             _kv("trend_exit_rule",
                 f"{_conf_label} of enabled F2/F3/F4 must flip bearish on last closed 15m candle → close trade")
-        if not _use_tp_exit_d and not _use_sl_exit_d and not _use_te_d:
+        _use_ss_d  = bool(_snap_cfg.get("use_safestop",  False))
+        _ss_pct_d  = float(_snap_cfg.get("safestop_pct", 0.5))
+        _kv("safestop",       "ENABLED" if _use_ss_d else "DISABLED")
+        if _use_ss_d:
+            _kv("safestop_pct",   f"{_ss_pct_d}%")
+            _kv("safestop_logic",
+                f"price +{_ss_pct_d}% → SL=entry; every further +1% → SL trails +{_ss_pct_d}%")
+        if not _use_tp_exit_d and not _use_sl_exit_d and not _use_te_d and not _use_ss_d:
             _kv("WARNING", "ALL EXIT METHODS DISABLED — open trades will never close automatically")
         _kv("tp_level",  f"entry × (1 + {_snap_cfg.get('tp_pct', 1.2)}% / 100)")
         _kv("sl_level",  f"entry × (1 − {_snap_cfg.get('sl_pct', 3.0)}% / 100)  [computed even when SL exit is OFF]")
@@ -5779,6 +5895,7 @@ def _build_diagnostics_text() -> str:
     _kv("tp_hit",      len(_tp_sigs))
     _kv("sl_hit",      len(_sl_sigs))
     _kv("trend_exit",  len(_trend_exit_sigs))
+    _kv("safestop",    len(_safestop_sigs))
     _kv("queue_limit", len(_queue_sigs))
     _kv("closed_okx",  len(_closed_okx_sigs))
     _kv("total",       len(signals))
@@ -5812,80 +5929,22 @@ def _build_diagnostics_text() -> str:
         if not _has_creds:
             _push("  <skipped — API credentials not configured>")
         else:
-            _pos_resp = _trade_get(
-                "/api/v5/account/positions",
-                {"instType": "SWAP"},
-                _snap_cfg,
-            )
-            if _pos_resp.get("code") != "0":
-                _push(f"  <OKX API error: code={_pos_resp.get('code')} "
-                      f"msg={_pos_resp.get('msg', '?')}>")
-            else:
-                _pos_data = [p for p in (_pos_resp.get("data") or [])
-                             if float(p.get("pos", 0) or 0) != 0]
+            try:
+                _pos_resp = _trade_get("/api/v5/account/positions",
+                                       {"instType": "SWAP"}, _snap_cfg)
+                _pos_data = _pos_resp.get("data", []) if _pos_resp.get("code") == "0" else []
+                _okx_inst_set = {p.get("instId","") for p in _pos_data}
+                _bot_open = {s.get("symbol","").replace("USDT","-USDT-SWAP"): s
+                             for s in _b._bsc_log["signals"] if s.get("status") == "open"
+                             and s.get("order_id")}
                 if not _pos_data:
-                    _push("  (no open swap positions on OKX)")
+                    _push("  No open SWAP positions on OKX")
                 else:
-                    _kv("total_open_positions", len(_pos_data))
-                    _push("")
-                    for _pi, _p in enumerate(_pos_data, 1):
-                        _inst      = _p.get("instId", "?")
-                        _pos_sz    = _p.get("pos", "?")
-                        _avg_px    = _p.get("avgPx", "?")
-                        _upnl      = _p.get("upl", "?")
-                        _upnl_r    = _p.get("uplRatio", "?")
-                        _margin    = _p.get("imr", "?") or _p.get("margin", "?")
-                        _lev       = _p.get("lever", "?")
-                        _liq_px    = _p.get("liqPx", "?")
-                        _mm_mode   = _p.get("mgnMode", "?")
-                        _pos_side  = _p.get("posSide", "net")
-                        _ctime     = _p.get("cTime", "")
-                        _utime     = _p.get("uTime", "")
-                        # Format timestamps
-                        try:
-                            _ct_fmt = (datetime.fromtimestamp(int(_ctime)/1000,
-                                       tz=timezone.utc)
-                                       .strftime("%m/%d %H:%M:%S") if _ctime else "—")
-                        except Exception:
-                            _ct_fmt = str(_ctime or "—")
-                        try:
-                            _ut_fmt = (datetime.fromtimestamp(int(_utime)/1000,
-                                       tz=timezone.utc)
-                                       .strftime("%m/%d %H:%M:%S") if _utime else "—")
-                        except Exception:
-                            _ut_fmt = str(_utime or "—")
-                        # Format uPnL with sign
-                        try:
-                            _upnl_f = float(_upnl or 0)
-                            _upnl_r_f = float(_upnl_r or 0)
-                            _upnl_str = f"{_upnl_f:+.4f} USDT ({_upnl_r_f*100:+.2f}%)"
-                        except Exception:
-                            _upnl_str = str(_upnl)
-                        _push(f"  [{_pi}] {_inst}")
-                        _push(f"        pos_sz      : {_pos_sz}  |  posSide: {_pos_side}")
-                        _push(f"        avg_px      : {_avg_px}")
-                        _push(f"        uPnL        : {_upnl_str}")
-                        _push(f"        margin      : {_margin} USDT  |  lev: {_lev}x  |  mode: {_mm_mode}")
-                        _push(f"        liq_px      : {_liq_px}")
-                        _push(f"        opened_at   : {_ct_fmt}  |  updated: {_ut_fmt}")
-
-                # ── Cross-reference with bot's open signals ────────────────────
-                _push("")
-                _push("  -- Cross-reference vs bot open signals " + "-" * 36)
-                _bot_open = {s.get("symbol", ""): s for s in _open_sigs}
-                _okx_inst_set = {p.get("instId", "") for p in _pos_data}
-                # Bot says open but OKX has no position
-                for _bsym, _bsig in _bot_open.items():
-                    _okx_inst = _bsig.get("symbol", "").replace("USDT", "-USDT-SWAP")
-                    if _bsig.get("order_id") and _okx_inst not in _okx_inst_set:
-                        _push(f"  WARNING MISMATCH -- bot=OPEN  okx=NO POSITION : {_bsym} "
-                              f"(order_id={_bsig.get('order_id','')})")
-                # OKX has position but bot doesn't track it
-                for _p in _pos_data:
-                    _inst = _p.get("instId", "")
-                    _bsym_chk = _inst.replace("-USDT-SWAP", "USDT")
-                    if _bsym_chk not in _bot_open:
-                        _push(f"  WARNING MISMATCH -- okx=OPEN  bot=NOT TRACKED : {_inst}")
+                    for _p in _pos_data:
+                        _inst = _p.get("instId","")
+                        _bsym_chk = _inst.replace("-USDT-SWAP","USDT")
+                        if _bsym_chk not in _bot_open:
+                            _push(f"  WARNING MISMATCH -- okx=OPEN  bot=NOT TRACKED : {_inst}")
                 if not any(True for _bsym, _bsig in _bot_open.items()
                            if _bsig.get("order_id") and
                            _bsig.get("symbol","").replace("USDT","-USDT-SWAP")
@@ -5894,10 +5953,11 @@ def _build_diagnostics_text() -> str:
                            if _p.get("instId","").replace("-USDT-SWAP","USDT")
                            not in _bot_open):
                     _push("  OK  All bot open signals match OKX positions")
-    except Exception as _pe:
-        _push(f"  <error fetching OKX positions: {_pe}>")
+            except Exception as _pe:
+                _push(f"  <error fetching OKX positions: {_pe}>")
+    except Exception as _oe:
+        _push(f"  <error: {_oe}>")
 
-    # ── Two-Tier Reconciliation Status ───────────────────────────────────────
     # ── OKX ctVal / ctMult cache ─────────────────────────────────────────────
     _hdr("OKX CONTRACT SIZE CACHE (ctVal × ctMult → effective)")
     _ct_raw = _b._bsc_symbol_cache.get("ct_raw", {})
@@ -5919,14 +5979,14 @@ def _build_diagnostics_text() -> str:
             else:
                 _push(f"    {_s:<14} (not in cache)")
     else:
-        _push("  (cache empty \u2014 no symbols fetched yet)")
+        _push("  (cache empty — no symbols fetched yet)")
 
     return "\n".join(_lines)
 
 
 _diag_text = _build_diagnostics_text()
 st.download_button(
-    label="\u2b07\ufe0f Download diagnostics.txt",
+    label="⬇️ Download diagnostics.txt",
     data=_diag_text,
     file_name=f"diagnostics_{dubai_now().strftime('%Y%m%d_%H%M%S')}.txt",
     mime="text/plain",
