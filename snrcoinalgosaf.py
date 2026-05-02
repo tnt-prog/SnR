@@ -140,6 +140,9 @@ DEFAULT_CONFIG: dict = {
     "safestop_pct":           1.5,    # Safe Stop Trigger Price %: % gain that activates SafeStop (SL to entry)
     "safestop_range_pct":     1.0,    # Range Increase %: each additional rise before SL steps up
     "safestop_step_pct":      0.5,    # Step Distance %: how much SL moves up on each step
+    "use_time_limit_exit":    False,  # close trade when open >= X hours AND PnL >= threshold
+    "time_limit_hours":       2.0,    # hours a trade must be open before time-limit exit applies
+    "time_limit_min_pnl_usd": 0.25,  # minimum unrealized PnL $ required to trigger time-limit exit
     "f2_supertrend":         True,   # F2 SuperTrend (ATR 10, mult 3.0) on 15m
     "f3_chandelier":         True,   # F3 Chandelier Exit (ATR 22, mult 3.0) on 15m
     "f4_lux":                True,   # F4 Lux Trend (ATR 14, mult 2.0) on 15m
@@ -2197,6 +2200,31 @@ def _update_one_signal(sig: dict) -> None:
                 # SafeStop live state (refreshed every cycle for open trades)
                 sig["ss_active"]   = _ss_active
                 sig["ss_sl_level"] = float(_ss_sl_level) if _ss_active else None
+                # Time Limit Exit check
+                _use_tl = bool(_te_cfg.get("use_time_limit_exit", False))
+                if _use_tl and sig.get("timestamp"):
+                    try:
+                        _tl_hours  = float(_te_cfg.get("time_limit_hours", 2.0))
+                        _tl_min_pnl = float(_te_cfg.get("time_limit_min_pnl_usd", 0.25))
+                        _tl_open = datetime.fromisoformat(sig["timestamp"].replace("Z", "+00:00"))
+                        _tl_age  = (dubai_now() - _tl_open).total_seconds() / 3600
+                        if _tl_age >= _tl_hours:
+                            _tl_usdt = float(sig.get("trade_usdt", _te_cfg.get("trade_usdt_amount", 5.0)) or 5.0)
+                            _tl_lev  = int(sig.get("trade_lev",   _te_cfg.get("trade_leverage",     20))  or 20)
+                            _tl_notional = _tl_usdt * _tl_lev
+                            _tl_entry_p  = float(sig.get("entry", 0) or 0)
+                            if _tl_entry_p > 0:
+                                _tl_pnl = (_tl_notional / _tl_entry_p) * (float(latest_price) - _tl_entry_p)
+                                if _tl_pnl >= _tl_min_pnl:
+                                    sig.update(
+                                        status     = "time_limit",
+                                        close_price = float(latest_price),
+                                        close_time  = dubai_now().isoformat(),
+                                        exit_indicators = f"Time Limit Exit @ {float(latest_price):.8f} | PnL ${_tl_pnl:+.2f}"
+                                    )
+                                    sig.pop("price_alert", None)
+                    except Exception:
+                        pass
                 if _ref > 0:
                     drop_pct = (_ref - latest_price) / _ref * 100
                     sig["price_alert"]     = drop_pct >= _PRICE_ALERT_PCT
@@ -3264,6 +3292,35 @@ with st.sidebar:
     if not new_use_tp_exit and not new_use_sl_exit and not new_use_trend_exit and not new_use_safestop:
         st.warning("⚠️ All exit methods disabled — open trades will never close automatically.")
 
+    st.markdown("**🕐 Time Limit Exit**",
+        help="Close a trade automatically when it has been open longer than the set hours AND the unrealized PnL is above the minimum threshold. Closed as Time Limit category.")
+    new_use_time_limit = st.checkbox(
+        "Enable Time Limit Exit",
+        value=bool(_snap_cfg.get("use_time_limit_exit", False)),
+        key="cfg_use_time_limit_exit"
+    )
+    if new_use_time_limit:
+        _tl_c1, _tl_c2 = st.columns(2)
+        new_time_limit_hours = _tl_c1.number_input(
+            "Min Open Hours",
+            min_value=0.5, max_value=48.0, step=0.5,
+            value=float(_snap_cfg.get("time_limit_hours", 2.0)),
+            key="cfg_time_limit_hours", format="%.1f",
+            help="Trade must be open at least this many hours before Time Limit exit applies."
+        )
+        new_time_limit_min_pnl = _tl_c2.number_input(
+            "Min PnL $",
+            min_value=0.01, max_value=100.0, step=0.05,
+            value=float(_snap_cfg.get("time_limit_min_pnl_usd", 0.25)),
+            key="cfg_time_limit_min_pnl_usd", format="%.2f",
+            help="Minimum unrealized PnL in USD required to trigger the Time Limit exit."
+        )
+        st.caption(f"✅ Close if open ≥{new_time_limit_hours:.1f}h AND PnL ≥${new_time_limit_min_pnl:.2f}")
+    else:
+        new_time_limit_hours   = float(_snap_cfg.get("time_limit_hours",       2.0))
+        new_time_limit_min_pnl = float(_snap_cfg.get("time_limit_min_pnl_usd", 0.25))
+        st.caption("⚠️ Time Limit Exit disabled")
+
     st.divider()
 
     # ── Queue Size (max concurrent open trades) ──────────────────────────────
@@ -3498,6 +3555,9 @@ with st.sidebar:
             "safestop_pct":               float(new_safestop_pct),
             "safestop_range_pct":         float(new_safestop_range_pct),
             "safestop_step_pct":          float(new_safestop_step_pct),
+            "use_time_limit_exit":        bool(new_use_time_limit),
+            "time_limit_hours":           float(new_time_limit_hours),
+            "time_limit_min_pnl_usd":     float(new_time_limit_min_pnl),
             "f2_supertrend":       bool(new_f2_st),
             "f3_chandelier":       bool(new_f3_ce),
             "f4_lux":              bool(new_f4_lux),
@@ -3578,7 +3638,7 @@ _total_sl_ct     = 0
 _cfg_usdt_fb_top = float(_snap_cfg.get("trade_usdt_amount", 0) or 0)
 _cfg_lev_fb_top  = int(_snap_cfg.get("trade_leverage", 10) or 0)
 for _s in signals:
-    if _s.get("status") not in ("tp_hit", "sl_hit", "dca_sl_hit", "trend_exit", "safestop"):
+    if _s.get("status") not in ("tp_hit", "sl_hit", "dca_sl_hit", "trend_exit", "safestop", "time_limit"):
         continue
     _v = _pnl_topline(_s, _cfg_usdt_fb_top, _cfg_lev_fb_top)
     if _v is None:
@@ -3728,12 +3788,13 @@ tp_count          = sum(1 for s in signals if s["status"]=="tp_hit")
 sl_count          = sum(1 for s in signals if s["status"]=="sl_hit")
 trend_exit_count  = sum(1 for s in signals if s["status"]=="trend_exit")
 safestop_count    = sum(1 for s in signals if s["status"]=="safestop")
+timelimit_count   = sum(1 for s in signals if s["status"]=="time_limit")
 queue_count       = sum(1 for s in signals if s["status"]=="queue_limit")
 
 # ── Per-card PnL sums ─────────────────────────────────────────────────────────
 _pnl_fb_usdt = float(_snap_cfg.get("trade_usdt_amount", 5.0) or 5.0)
 _pnl_fb_lev  = int(_snap_cfg.get("trade_leverage", 20) or 20)
-_pnl_tp, _pnl_sl, _pnl_te, _pnl_ss = 0.0, 0.0, 0.0, 0.0
+_pnl_tp, _pnl_sl, _pnl_te, _pnl_ss, _pnl_tl = 0.0, 0.0, 0.0, 0.0, 0.0
 for _ps in signals:
     _pv = _pnl_topline(_ps, _pnl_fb_usdt, _pnl_fb_lev)
     if _pv is None:
@@ -3746,6 +3807,8 @@ for _ps in signals:
         _pnl_te += _pv
     elif _ps["status"] == "safestop":
         _pnl_ss += _pv
+    elif _ps["status"] == "time_limit":
+        _pnl_tl += _pv
 
 # ── Capital at stake for open trades ─────────────────────────────────────────
 _open_at_stake = open_count * _pnl_fb_usdt  # margin deployed (not leveraged)
@@ -3796,7 +3859,7 @@ st.markdown(
 )
 
 # ── Row 2: Trade results ──────────────────────────────────────────────────────
-m6, m7, m8, m8b, m8c, m9 = st.columns(6)
+m6, m7, m8, m8b, m8c, m8d, m9 = st.columns(7)
 # ── Open — large orange ─────────────────────────────────────────────────
 with m6:
     st.markdown(
@@ -3869,6 +3932,21 @@ with m8c:
                       color:#005F65;line-height:1.1;">{safestop_count}</p>
             <p style="margin:2px 0 0 0;font-size:0.68rem;font-weight:500;
                       color:#004A50;line-height:1.2;">{_fmt_pnl(_pnl_ss)}</p>
+        </div>""",
+        unsafe_allow_html=True,
+    )
+# ── Time Limit — purple ───────────────────────────────────────────────
+with m8d:
+    st.markdown(
+        f"""<div style="background:#EDE7F6;border:1px solid #7E57C266;border-radius:8px;
+                        padding:12px 16px 10px 16px;min-height:88px;"
+             title="Trades closed by Time Limit exit (open >= X hours with PnL >= threshold)">
+            <p style="margin:0 0 4px 0;font-size:0.72rem;font-weight:600;
+                      color:#4527A0;letter-spacing:.05em;line-height:1.2;">🕐 TIME LIMIT</p>
+            <p style="margin:0;font-size:1.9rem;font-weight:700;
+                      color:#4527A0;line-height:1.1;">{timelimit_count}</p>
+            <p style="margin:2px 0 0 0;font-size:0.68rem;font-weight:500;
+                      color:#311B92;line-height:1.2;">{_fmt_pnl(_pnl_tl)}</p>
         </div>""",
         unsafe_allow_html=True,
     )
@@ -4062,7 +4140,7 @@ _pnl_24h_sl_ct     = 0
 _cfg_usdt_fallback = float(_snap_cfg.get("trade_usdt_amount", 0) or 0)
 _cfg_lev_fallback  = int(_snap_cfg.get("trade_leverage", 10) or 0)
 for _s in signals:
-    if _s.get("status") not in ("tp_hit", "sl_hit", "dca_sl_hit", "trend_exit", "safestop"):
+    if _s.get("status") not in ("tp_hit", "sl_hit", "dca_sl_hit", "trend_exit", "safestop", "time_limit"):
         continue
     _ct_raw = _s.get("close_time")
     if not _ct_raw:
@@ -4222,6 +4300,7 @@ def _build_signal_row(s: dict, is_open_table: bool = False,
         "dca_sl_hit":  "❌ DCA SL Hit",
         "trend_exit":  "🚨 Trend Exit",
         "safestop":    "🛡️ SafeStop",
+        "time_limit":  "🕐 Time Limit",
         "fc_hit":      "🟣 FC Hit",
         "queue_limit": "⏳ Queue Limit",
         "closed_okx":  "🟠 Closed on OKX",
@@ -4307,7 +4386,7 @@ def _build_signal_row(s: dict, is_open_table: bool = False,
     #   • sl_hit  → sig["close_price"] (= SL level — realized loss)
     #   • queue   → "—" (no trade was ever opened)
     pnl_col = "—"
-    if status in ("open", "tp_hit", "sl_hit", "dca_sl_hit", "fc_hit", "trend_exit", "safestop"):
+    if status in ("open", "tp_hit", "sl_hit", "dca_sl_hit", "fc_hit", "trend_exit", "safestop", "time_limit"):
         if status == "open":
             _ref_pnl = s.get("latest_price")
             if _ref_pnl is None:
@@ -4331,7 +4410,7 @@ def _build_signal_row(s: dict, is_open_table: bool = False,
     # DCA trades, original entry otherwise).
     #   Positive = closed above entry (TP or FC)  Negative = closed below (SL)
     exit_pct_col = "—"
-    if status in ("tp_hit", "sl_hit", "dca_sl_hit", "fc_hit", "trend_exit", "safestop"):
+    if status in ("tp_hit", "sl_hit", "dca_sl_hit", "fc_hit", "trend_exit", "safestop", "time_limit"):
         try:
             _close_ep  = float(s.get("close_price", 0) or 0)
             _ref_ep    = float(s.get("signal_entry", s.get("entry", 0)) or 0)
@@ -4921,6 +5000,7 @@ def _signal_tables_fragment():
     _sl_sigs          = [s for s in filtered_sorted if s.get("status") == "sl_hit"]
     _trend_exit_sigs  = [s for s in filtered_sorted if s.get("status") == "trend_exit"]
     _safestop_sigs    = [s for s in filtered_sorted if s.get("status") == "safestop"]
+    _timelimit_sigs   = [s for s in filtered_sorted if s.get("status") == "time_limit"]
     _queue_sigs       = [s for s in filtered_sorted if s.get("status") == "queue_limit"]
     _closed_okx_sigs  = [s for s in filtered_sorted if s.get("status") == "closed_okx"]
 
@@ -5256,6 +5336,11 @@ def _signal_tables_fragment():
                       "No Safe Stop exits yet.", show_pnl=True,
                       tooltip="Trades closed by the SafeStop trailing mechanism. Price rose enough to activate break-even SL, which then got hit on a pullback. Exit price is at or above entry.")
 
+    # ── Table 3e: Time Limit Exit ────────────────────────
+    _render_sig_table(_timelimit_sigs, "🕐 Time Limit",
+                      "No Time Limit exits yet.", show_pnl=True,
+                      tooltip="Trades closed automatically after being open longer than the set hours with PnL above the minimum threshold.")
+
     # ── OKX Liquidated / SL Closed Orders (auto-trading only) ───────────────────────
     if _hist_trade_on and _hist_has_creds:
         _sl_hist      = st.session_state.get("okx_sl_hist")
@@ -5374,6 +5459,7 @@ _tp_sigs          = [s for s in _fsorted_pg if s.get("status") == "tp_hit"]
 _sl_sigs          = [s for s in _fsorted_pg if s.get("status") == "sl_hit"]
 _trend_exit_sigs  = [s for s in _fsorted_pg if s.get("status") == "trend_exit"]
 _safestop_sigs    = [s for s in _fsorted_pg if s.get("status") == "safestop"]
+_timelimit_sigs   = [s for s in _fsorted_pg if s.get("status") == "time_limit"]
 _queue_sigs       = [s for s in _fsorted_pg if s.get("status") == "queue_limit"]
 _closed_okx_sigs  = [s for s in _fsorted_pg if s.get("status") == "closed_okx"]
 
@@ -5669,9 +5755,9 @@ if signals:
                      plot_bgcolor="rgba(0,0,0,0)", font=dict(color="#062020"),
                      margin=dict(t=40,b=10,l=10,r=10)),
                      use_container_width=True)
-    outcome_labels = ["Open", "TP Hit", "SL Hit", "Trend Exit", "SafeStop"]
-    outcome_values = [open_count, tp_count, sl_count, trend_exit_count, safestop_count]
-    outcome_colors = ["#005F65", "#2E7D32", "#C0392B", "#E67E22", "#1D9E75"]
+    outcome_labels = ["Open", "TP Hit", "SL Hit", "Trend Exit", "SafeStop", "Time Limit"]
+    outcome_values = [open_count, tp_count, sl_count, trend_exit_count, safestop_count, timelimit_count]
+    outcome_colors = ["#005F65", "#2E7D32", "#C0392B", "#E67E22", "#1D9E75", "#7E57C2"]
     ch2.plotly_chart(go.Figure(go.Bar(
         x=outcome_labels, y=outcome_values,
         marker_color=outcome_colors,
@@ -6008,6 +6094,14 @@ def _build_diagnostics_text() -> str:
             _kv("trend_exit_confirmations", f"{_min_conf_d}  →  {_conf_label}")
             _kv("trend_exit_rule",
                 f"{_conf_label} of enabled F2/F3/F4 must flip bearish on last closed 15m candle → close trade")
+        _use_tl_d       = bool(_snap_cfg.get("use_time_limit_exit",  False))
+        _tl_hours_d     = float(_snap_cfg.get("time_limit_hours",    2.0))
+        _tl_pnl_d       = float(_snap_cfg.get("time_limit_min_pnl_usd", 0.25))
+        _kv("time_limit_exit",  "ENABLED" if _use_tl_d else "DISABLED")
+        if _use_tl_d:
+            _kv("time_limit_hours",   f"{_tl_hours_d}h")
+            _kv("time_limit_min_pnl", f"${_tl_pnl_d:.2f}")
+            _kv("time_limit_logic",   f"close if open >= {_tl_hours_d}h AND PnL >= ${_tl_pnl_d:.2f}")
         _use_ss_d       = bool(_snap_cfg.get("use_safestop",        False))
         _ss_pct_d       = float(_snap_cfg.get("safestop_pct",       1.5))
         _ss_range_pct_d = float(_snap_cfg.get("safestop_range_pct", 1.0))
@@ -6037,6 +6131,7 @@ def _build_diagnostics_text() -> str:
     _kv("sl_hit",      len(_sl_sigs))
     _kv("trend_exit",  len(_trend_exit_sigs))
     _kv("safestop",    len(_safestop_sigs))
+    _kv("time_limit",  len(_timelimit_sigs))
     _kv("queue_limit", len(_queue_sigs))
     _kv("closed_okx",  len(_closed_okx_sigs))
     _kv("total",       len(signals))
