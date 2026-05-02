@@ -3643,9 +3643,22 @@ if last_scan and last_scan != "never":
         last_scan = f"{ago}m ago  ({ts_dubai.strftime('%H:%M')} GST)"
     except Exception: pass
 
-col_h1, col_h2, col_h3 = st.columns([3, 1, 1])
+col_h1, col_h2, col_h3, col_h4 = st.columns([3, 1, 1, 2])
 col_h1.caption(f"Last scan: {last_scan}   |   🕐 Dubai / GST (UTC+4)")
 if col_h2.button("🔄 Refresh", key="manual_refresh"): st.rerun()
+_cb_paused_hdr = getattr(_b, "_bsc_sl_paused", False)
+if _cb_paused_hdr:
+    col_h4.markdown(
+        '<div style="background:#FFF3CD;border:1px solid #FFCA28;border-radius:6px;'
+        'padding:3px 8px;font-size:0.78rem;font-weight:600;color:#7B4F00;'
+        'display:inline-block;">🔴 Circuit Breaker: PAUSED</div>',
+        unsafe_allow_html=True)
+else:
+    col_h4.markdown(
+        '<div style="background:#E8F5E9;border:1px solid #A5D6A7;border-radius:6px;'
+        'padding:3px 8px;font-size:0.78rem;font-weight:600;color:#1B5E20;'
+        'display:inline-block;">✅ Circuit Breaker: OK</div>',
+        unsafe_allow_html=True)
 
 # ── API connection status badge ───────────────────────────────────────────────
 _api_cs   = getattr(_b, "_bsc_api_conn_status",
