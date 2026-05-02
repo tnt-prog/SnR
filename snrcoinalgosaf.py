@@ -5902,3 +5902,15 @@ def _build_diagnostics_text() -> str:
                 _push(f"    {_s:<14} (not in cache)")
     else:
         _push("  (cache empty — no symbols fetched yet)")
+
+    return "\n".join(_lines)
+
+
+_diag_text = _build_diagnostics_text()
+st.download_button(
+    label="⬇️ Download diagnostics.txt",
+    data=_diag_text,
+    file_name=f"diagnostics_{dubai_now().strftime('%Y%m%d_%H%M%S')}.txt",
+    mime="text/plain",
+    use_container_width=True,
+)
