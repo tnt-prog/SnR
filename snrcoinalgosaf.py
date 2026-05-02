@@ -3736,21 +3736,27 @@ pre_out     = health.get("pre_filtered_out", 0)
 deep_sc     = health.get("deep_scanned",     0)
 
 # ── Row 1: Scanner health ────────────────────────────────────────────────────
-m1, m2, m3, m4, m5c = st.columns(5)
-def _small_metric(col, label, value, help_txt=""):
-    _tip = f" title='{help_txt}'" if help_txt else ""
-    col.markdown(
-        f"""<div{_tip} style="background:#E0F2F1;border:1px solid #B2DFDB;border-radius:8px;
-padding:6px 10px;text-align:left;cursor:default;">
-<div style="font-size:10px;font-weight:700;letter-spacing:.08em;
-color:#00695C;text-transform:uppercase;margin-bottom:2px;">{label}</div>
-<div style="font-size:18px;font-weight:700;color:#004D40;line-height:1.1;">{value}</div>
-</div>""", unsafe_allow_html=True)
-_small_metric(m1,  "Cycles",         health.get("total_cycles", 0),          "How many full watchlist scan cycles have completed since startup")
-_small_metric(m2,  "Scan Time",      f"{health.get('last_scan_duration_s', 0)}s", "Duration of the last completed scan cycle in seconds")
-_small_metric(m3,  "API Errors",     health.get("total_api_errors", 0),      "Cumulative OKX API errors logged since startup")
-_small_metric(m4,  "Pre-filtered ⚡", pre_out,                              "Coins removed by bulk ticker pre-filter (saves API calls)")
-_small_metric(m5c, "Deep Scanned",   deep_sc,                                "Coins that passed pre-filter and received full candle analysis")
+_health_items = [
+    ("Cycles",          health.get("total_cycles", 0),                    "How many full watchlist scan cycles have completed since startup"),
+    ("Scan Time",       f"{health.get('last_scan_duration_s', 0)}s",      "Duration of the last completed scan cycle in seconds"),
+    ("API Errors",      health.get("total_api_errors", 0),                "Cumulative OKX API errors logged since startup"),
+    ("Pre-filtered ⚡", pre_out,                                          "Coins removed by bulk ticker pre-filter (saves API calls)"),
+    ("Deep Scanned",    deep_sc,                                          "Coins that passed pre-filter and received full candle analysis"),
+]
+_health_boxes = "".join(
+    f'<div title="{h}" style="background:#E0F2F1;border:1px solid #B2DFDB;border-radius:8px;'
+    f'padding:6px 12px;text-align:left;cursor:default;min-width:90px;max-width:130px;flex:0 0 auto;">"'
+    f'<div style="font-size:10px;font-weight:700;letter-spacing:.08em;color:#00695C;'
+    f'text-transform:uppercase;margin-bottom:2px;">{l}</div>'
+    f'<div style="font-size:18px;font-weight:700;color:#004D40;line-height:1.1;">{v}</div>'
+    f'</div>'
+    for l, v, h in _health_items
+)
+st.markdown(
+    f'<div style="display:flex;flex-wrap:nowrap;gap:8px;margin-bottom:8px;">'
+    f'{_health_boxes}</div>',
+    unsafe_allow_html=True
+)
 
 # ── Row 2: Trade results ──────────────────────────────────────────────────────
 m6, m7, m8, m8b, m8c, m9 = st.columns(6)
