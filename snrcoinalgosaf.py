@@ -2220,14 +2220,23 @@ def update_open_signals(signals):
 # Background scanner thread
 # ─────────────────────────────────────────────────────────────────────────────
 def _check_sl_circuit_breaker():
-    """Return True if the last 3 closed trades are all sl_hit (triggers auto-pause)."""
+    """Return True if the last 3 closed trades are all non-TP exits.
+
+    Fires when the 3 most recent closes are all sl_hit or trend_exit (i.e. no
+    TP among them). This covers the case where use_sl_exit=False and all losses
+    are arriving via trend_exit — previously those were invisible to the breaker.
+    """
     with _log_lock:
         _closed = sorted(
             [s for s in _b._bsc_log["signals"]
-             if s.get("status") in ("tp_hit", "sl_hit") and s.get("close_time")],
+             if s.get("status") in ("tp_hit", "sl_hit", "trend_exit")
+             and s.get("close_time")],
             key=lambda x: x.get("close_time", ""),
         )
-    return len(_closed) >= 3 and all(s["status"] == "sl_hit" for s in _closed[-3:])
+    return (
+        len(_closed) >= 3 and
+        all(s["status"] in ("sl_hit", "trend_exit") for s in _closed[-3:])
+    )
 
 
 def _bg_loop():
@@ -2272,7 +2281,12 @@ def _bg_loop():
             # Phase 1 (open-signal monitoring) has already run this cycle —
             # existing trades stay watched. Only new-signal scanning is blocked.
             # Flag is cleared ONLY by the manual "▶️ Resume Scanning" button.
+            # IMPORTANT: save_log here so any trend-exit / TP closes detected
+            # in Phase 1 are persisted to disk even though we never reach the
+            # normal save_log call at the end of Phase 2.
             if getattr(_b, "_bsc_sl_paused", False):
+                with _log_lock:
+                    save_log(_b._bsc_log)
                 _rescan_event.wait(timeout=30)
                 _rescan_event.clear()
                 continue
@@ -2290,9 +2304,13 @@ def _bg_loop():
                              and s.get("status") == "tp_hit"
                              and datetime.fromisoformat(
                                  s["close_time"].replace("Z","+00:00")) >= tp_cutoff}
+                # sl_cooldown applies to both hard SL hits AND trend exits —
+                # both represent an unfavourable close. Without this, a coin
+                # that just closed via trend_exit (with use_sl_exit=False) has
+                # zero cooldown and can immediately re-enter on the next cycle.
                 cooled_sl = {s["symbol"] for s in _b._bsc_log["signals"]
                              if s.get("close_time")
-                             and s.get("status") == "sl_hit"
+                             and s.get("status") in ("sl_hit", "trend_exit")
                              and datetime.fromisoformat(
                                  s["close_time"].replace("Z","+00:00")) >= sl_cutoff}
                 cooled = cooled_tp | cooled_sl
@@ -5901,14 +5919,14 @@ def _build_diagnostics_text() -> str:
             else:
                 _push(f"    {_s:<14} (not in cache)")
     else:
-        _push("  (cache empty — no symbols fetched yet)")
+        _push("  (cache empty \u2014 no symbols fetched yet)")
 
     return "\n".join(_lines)
 
 
 _diag_text = _build_diagnostics_text()
 st.download_button(
-    label="⬇️ Download diagnostics.txt",
+    label="\u2b07\ufe0f Download diagnostics.txt",
     data=_diag_text,
     file_name=f"diagnostics_{dubai_now().strftime('%Y%m%d_%H%M%S')}.txt",
     mime="text/plain",
