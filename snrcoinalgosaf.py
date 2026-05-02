@@ -131,7 +131,7 @@ DEFAULT_CONFIG: dict = {
     # Open-trade monitoring (TP/SL/DCA) always runs regardless of this setting.
     # Supports midnight-crossing windows (e.g. start=22, end=06).
     # ── Exit criteria (which methods close an open trade) ─────────────────────
-    "use_tp_exit":            True,   # close trade when TP price is reached
+    "use_tp_exit":            False,  # close trade when TP price is reached (default OFF — rely on trend exit)
     "use_sl_exit":            False,  # close trade at hard SL price floor (default OFF — rely on trend exit)
     "use_trend_exit":         True,   # auto-close open long when F2/F3/F4 indicator(s) flip bearish (15m)
     "trend_exit_min_confirms": 1,     # how many indicators must flip bearish to trigger trend exit (1/2/3)
@@ -2112,7 +2112,7 @@ def _update_one_signal(sig: dict) -> None:
         # ── Read exit-criteria config once ───────────────────────────────────
         with _config_lock:
             _te_cfg = dict(_b._bsc_cfg)
-        _use_tp_exit    = bool(_te_cfg.get("use_tp_exit",    True))
+        _use_tp_exit    = bool(_te_cfg.get("use_tp_exit",    False))
         _use_sl_exit    = bool(_te_cfg.get("use_sl_exit",    False))
         _use_trend_exit = bool(_te_cfg.get("use_trend_exit", True))
         _min_confirms   = int(_te_cfg.get("trend_exit_min_confirms", 1))
@@ -3058,7 +3058,7 @@ with st.sidebar:
 
     new_use_tp_exit = st.checkbox(
         "TP Exit",
-        value=bool(_snap_cfg.get("use_tp_exit", True)),
+        value=bool(_snap_cfg.get("use_tp_exit", False)),
         key="cfg_use_tp_exit",
         help="Close trade when price reaches the take-profit target."
     )
@@ -3780,7 +3780,7 @@ def _cfg_panel(cfg: dict) -> str:
     ])
     _fpill(f"{_n_trend} trend indicators active", _n_trend >= 2)
     # Exit method pills
-    _fpill("Exit: TP",        bool(_c.get("use_tp_exit",    True)))
+    _fpill("Exit: TP",        bool(_c.get("use_tp_exit",    False)))
     _fpill("Exit: SL floor",  bool(_c.get("use_sl_exit",    False)))
     _fpill("Exit: Trend",     bool(_c.get("use_trend_exit", True)))
     _min_c = int(_c.get("trend_exit_min_confirms", 1))
@@ -5724,7 +5724,7 @@ def _build_diagnostics_text() -> str:
             "if ANY indicator fires a SELL after the earlier of the two buy flips → skip coin")
         _kv("candle_window_restriction", "NONE — buys can be any distance apart")
         _sub("Exit Criteria")
-        _use_tp_exit_d  = bool(_snap_cfg.get("use_tp_exit",    True))
+        _use_tp_exit_d  = bool(_snap_cfg.get("use_tp_exit",    False))
         _use_sl_exit_d  = bool(_snap_cfg.get("use_sl_exit",    False))
         _use_te_d       = bool(_snap_cfg.get("use_trend_exit", True))
         _min_conf_d     = int(_snap_cfg.get("trend_exit_min_confirms", 1))
@@ -5892,4 +5892,4 @@ def _build_diagnostics_text() -> str:
             else:
                 _push(f"    {_s:<14} (not in cache)")
     else:
-        _push("  (cache empty — no symbols fetched yet)")
+        _push("  (cache empty \u2014 no symbols fetched yet)")
