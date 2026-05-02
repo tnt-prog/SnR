@@ -3737,11 +3737,20 @@ deep_sc     = health.get("deep_scanned",     0)
 
 # ── Row 1: Scanner health ────────────────────────────────────────────────────
 m1, m2, m3, m4, m5c = st.columns(5)
-m1.metric("Cycles",          health.get("total_cycles", 0),          help="How many full watchlist scan cycles have completed since startup")
-m2.metric("Scan Time",       f"{health.get('last_scan_duration_s', 0)}s", help="Duration of the last completed scan cycle in seconds")
-m3.metric("API Errors",      health.get("total_api_errors", 0),      help="Cumulative OKX API errors logged since startup")
-m4.metric("Pre-filtered ⚡", pre_out,  help="Coins removed by bulk ticker pre-filter (saves API calls)")
-m5c.metric("Deep Scanned",   deep_sc,  help="Coins that passed pre-filter and received full candle analysis")
+def _small_metric(col, label, value, help_txt=""):
+    _tip = f" title='{help_txt}'" if help_txt else ""
+    col.markdown(
+        f"""<div{_tip} style="background:#E0F2F1;border:1px solid #B2DFDB;border-radius:8px;
+padding:6px 10px;text-align:left;cursor:default;">
+<div style="font-size:10px;font-weight:700;letter-spacing:.08em;
+color:#00695C;text-transform:uppercase;margin-bottom:2px;">{label}</div>
+<div style="font-size:18px;font-weight:700;color:#004D40;line-height:1.1;">{value}</div>
+</div>""", unsafe_allow_html=True)
+_small_metric(m1,  "Cycles",         health.get("total_cycles", 0),          "How many full watchlist scan cycles have completed since startup")
+_small_metric(m2,  "Scan Time",      f"{health.get('last_scan_duration_s', 0)}s", "Duration of the last completed scan cycle in seconds")
+_small_metric(m3,  "API Errors",     health.get("total_api_errors", 0),      "Cumulative OKX API errors logged since startup")
+_small_metric(m4,  "Pre-filtered ⚡", pre_out,                              "Coins removed by bulk ticker pre-filter (saves API calls)")
+_small_metric(m5c, "Deep Scanned",   deep_sc,                                "Coins that passed pre-filter and received full candle analysis")
 
 # ── Row 2: Trade results ──────────────────────────────────────────────────────
 m6, m7, m8, m8b, m8c, m9 = st.columns(6)
