@@ -2232,18 +2232,19 @@ def _check_sl_circuit_breaker():
 
 def _bg_loop():
     while True:
-        # Pause if user manually stopped OR circuit breaker fired (3 consec SL).
-        # NOTE: When _bsc_sl_paused is True, the loop is fully idle — no
-        # open-signal updates, no scans, no cycle logic. The flag is cleared
-        # ONLY by the manual "▶️ Resume Scanning" button (see sidebar UI). TP
-        # hits do NOT auto-resume the scanner.
-        if not _scanner_running.is_set() or getattr(_b, "_bsc_sl_paused", False):
+        # Full idle ONLY when the user manually stops the scanner.
+        # Circuit-breaker pause (_bsc_sl_paused) is handled BELOW Phase 1 so
+        # open-trade monitoring always runs — existing positions keep getting
+        # watched for TP / SL / trend exit even while new scanning is blocked.
+        if not _scanner_running.is_set():
             time.sleep(2); continue
         with _config_lock:
             cfg = dict(_b._bsc_cfg)
         t0 = time.time()
         try:
-            # ── Phase 1: Update open signals (candle fetch per open trade) ──
+            # ── Phase 1: Update open signals (always runs, even during circuit-
+            # breaker pause — existing positions must stay monitored so they can
+            # close naturally and drain the queue).
             # This is network-bound (0.3–0.8 s typical, up to several seconds
             # on slow connections). We intentionally run it OUTSIDE `_log_lock`
             # so the UI snapshot in the main render thread is never blocked
@@ -2266,7 +2267,15 @@ def _bg_loop():
             # sl_hit trades are counted immediately ─────────────────────────
             if _check_sl_circuit_breaker():
                 _b._bsc_sl_paused = True
-                continue   # halt this cycle; UI will show the resume banner
+
+            # ── Block new scanning if circuit breaker is active.
+            # Phase 1 (open-signal monitoring) has already run this cycle —
+            # existing trades stay watched. Only new-signal scanning is blocked.
+            # Flag is cleared ONLY by the manual "▶️ Resume Scanning" button.
+            if getattr(_b, "_bsc_sl_paused", False):
+                _rescan_event.wait(timeout=30)
+                _rescan_event.clear()
+                continue
 
 
             # ── Cooldown windows (TP — minutes; SL — hours) ─────────────────
@@ -5892,4 +5901,4 @@ def _build_diagnostics_text() -> str:
             else:
                 _push(f"    {_s:<14} (not in cache)")
     else:
-        _push("  (cache empty \u2014 no symbols fetched yet)")
+        _push("  (cache empty — no symbols fetched yet)")
