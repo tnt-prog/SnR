@@ -4803,7 +4803,7 @@ def _render_sig_table(sig_list: list, header: str, empty_msg: str,
                       auto_height: bool = False, is_open_table: bool = False,
                       show_pnl: bool = False, scroll_height: int = None,
                       use_expander: bool = False, expander_open: bool = True,
-                      show_header: bool = True):
+                      show_header: bool = True, tooltip: str = ""):
     """Render a signal table.
 
     Parameters
@@ -4822,7 +4822,15 @@ def _render_sig_table(sig_list: list, header: str, empty_msg: str,
     def _draw_table_content():
         # Heading is shown in non-expander mode (unless explicitly suppressed).
         if show_header and not use_expander:
-            st.markdown(f"### {header} ({len(rows)})")
+            if tooltip:
+                _tip_html = (
+                    f'### {header} ({len(rows)}) '
+                    f'<span title="{tooltip}" style="font-size:0.85rem;'
+                    f'color:#0097A7;cursor:help;vertical-align:middle;">ⓘ</span>'
+                )
+                st.markdown(_tip_html, unsafe_allow_html=True)
+            else:
+                st.markdown(f"### {header} ({len(rows)})")
         if rows:
             # Wrap the rows in a pandas DataFrame so we can apply Styler to
             # color the Alert cell orange+bold when it contains DCA text.
@@ -4896,7 +4904,11 @@ def _signal_tables_fragment():
 
     # ── Table 1: Open Signals ───────────────────────────────────────────────────────
     # ── Open Signals table with row selection + Force Close ─────────────────────
-    st.markdown(f"### 🔵 Open Signals ({len(_open_sigs)})")
+    _open_tip = "Active trades currently being monitored. Price, PnL and exit criteria are checked on every scan cycle."
+    st.markdown(
+        f'### 🔵 Open Signals ({len(_open_sigs)}) '
+        f'<span title="{_open_tip}" style="font-size:0.85rem;color:#0097A7;cursor:help;vertical-align:middle;">ⓘ</span>',
+        unsafe_allow_html=True)
     if _open_sigs:
         try:
             import pandas as _pd
@@ -5093,7 +5105,8 @@ def _signal_tables_fragment():
     # For DCA trades, the row naturally picks up DCA-N in Alert, blended avg in
     # Signal Entry, original entry in Original Entry, and cumulative Order Size.
     _render_sig_table(_tp_sigs,    "✅ TP Hit",         "No TP hits yet.",
-                      show_pnl=True)
+                      show_pnl=True,
+                      tooltip="Trades closed because price reached the Take Profit target.")
 
     # ── OKX Fulfilled Orders (auto-trading only) ────────────────────────────────────
     if _hist_trade_on and _hist_has_creds:
@@ -5174,15 +5187,18 @@ def _signal_tables_fragment():
     # Trades that exhausted a DCA ladder and hit the −3% final SL are routed to
     # the dedicated "DCA SL Hit" table below, not this one.
     _render_sig_table(_sl_sigs,    "❌ SL Hit",         "No SL hits yet.",
-                      show_pnl=True)
+                      show_pnl=True,
+                      tooltip="Trades closed because price hit the hard Stop Loss level.")
 
     # ── Table 3b: Trend Exit ────────────────────────────────────────────────
     _render_sig_table(_trend_exit_sigs, "🚨 Trend Exit",
-                      "No trend exits yet.", show_pnl=True)
+                      "No trend exits yet.", show_pnl=True,
+                      tooltip="Trades closed because 1 or more trend indicators (F2/F3/F4) flipped bearish on the last 15m candle.")
 
     # ── Table 3c: SafeStop ──────────────────────────────────────────────────
-    _render_sig_table(_safestop_sigs, "🛡️ SafeStop",
-                      "No SafeStop exits yet.", show_pnl=True)
+    _render_sig_table(_safestop_sigs, "🛡️ Safe Stop Hit",
+                      "No Safe Stop exits yet.", show_pnl=True,
+                      tooltip="Trades closed by the SafeStop trailing mechanism. Price rose enough to activate break-even SL, which then got hit on a pullback. Exit price is at or above entry.")
 
     # ── OKX Liquidated / SL Closed Orders (auto-trading only) ───────────────────────
     if _hist_trade_on and _hist_has_creds:
@@ -5266,7 +5282,8 @@ def _signal_tables_fragment():
     _ql_count = len(_queue_sigs)
     with st.expander(f"⏳ Queue Limit ({_ql_count})", expanded=False):
         _render_sig_table(_queue_sigs, "⏳ Queue Limit", "No queued signals.",
-                          show_header=False)
+                          show_header=False,
+                          tooltip="Signals detected while max open trades limit was already reached. No position was opened.")
         if _queue_sigs:
             if st.button("🗑️ Clear Queue Limit Records", key="clear_queue_limit"):
                 with _log_lock:
@@ -5284,7 +5301,8 @@ def _signal_tables_fragment():
     if _closed_okx_sigs:
         st.divider()
         _render_sig_table(_closed_okx_sigs, "🟠 Closed on OKX",
-                          "No manually closed positions.", show_pnl=True)
+                          "No manually closed positions.", show_pnl=True,
+                          tooltip="Positions closed on OKX (manually or by exchange) that were not caught by the bot's TP/SL detector.")
 
 
 _signal_tables_fragment()
