@@ -8611,6 +8611,7 @@ def _build_signal_row(s: dict, is_open_table: bool = False,
             "Difficulty":        diff_col,
             "Time (GST)":        ts_str,
             "Symbol":            s.get("symbol", ""),
+            "Dir":               "\U0001f534S" if s.get("direction","long")=="short" else "\U0001f7e2L",
             "Alert":             alert_col,
             "Setup":             setup_type,
             "PnL $":             pnl_col,
@@ -8929,6 +8930,25 @@ def _style_pnl_cell(val) -> str:
     return ""
 
 
+def _style_dir_row(row) -> list:
+    """Return per-cell CSS list tinting the entire row by trade direction.
+    Short rows get a faint red wash; Long rows get a faint green wash.
+    Applied via df.style.apply(_style_dir_row, axis=1).
+    """
+    try:
+        _dir_val = str(row.get("Dir", "")).strip()
+        if "\U0001f534" in _dir_val or _dir_val.upper().startswith("S"):
+            # Short — faint red tint matching the theme's #2D0B0B row colour
+            _bg = "background-color: rgba(239,68,68,0.07);"
+        elif "\U0001f7e2" in _dir_val or _dir_val.upper().startswith("L"):
+            # Long — faint green tint matching the theme's #052E16 row colour
+            _bg = "background-color: rgba(34,197,94,0.07);"
+        else:
+            _bg = ""
+        return [_bg] * len(row)
+    except Exception:
+        return [""] * len(row)
+
 def _render_sig_table(sig_list: list, header: str, empty_msg: str,
                       auto_height: bool = False, is_open_table: bool = False,
                       show_pnl: bool = False, scroll_height: int = None,
@@ -9038,6 +9058,8 @@ def _signal_tables_fragment():
                 _open_styled = _open_styled.applymap(_style_alert_cell, subset=["Alert"])
             if "PnL $" in _open_df.columns:
                 _open_styled = _open_styled.applymap(_style_pnl_cell, subset=["PnL $"])
+            if "Dir" in _open_df.columns:
+                _open_styled = _open_styled.apply(_style_dir_row, axis=1)
             _open_render = _open_styled
         except Exception:
             _open_rows   = [_build_signal_row(s, is_open_table=True, show_pnl=True)
