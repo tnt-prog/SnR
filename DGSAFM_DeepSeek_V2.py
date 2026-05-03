@@ -138,17 +138,26 @@ DEFAULT_CONFIG: dict = {
 }
 
 # ============================================================================
-# SECTOR TAGS
+# SECTOR TAGS (Enhanced)
 # ============================================================================
 SECTORS: dict = {
-    "BTCUSDT": "BTC", "ETHUSDT": "L1", "SOLUSDT": "L1", "BNBUSDT": "L1",
-    "XRPUSDT": "L1", "DOGEUSDT": "Meme", "ADAUSDT": "L1", "AVAXUSDT": "L1",
+    "BTCUSDT": "BTC",
+    "ETHUSDT": "L1", "SOLUSDT": "L1", "BNBUSDT": "L1", "XRPUSDT": "L1",
+    "DOGEUSDT": "Meme", "ADAUSDT": "L1", "AVAXUSDT": "L1",
     "ARBUSDT": "L2", "OPUSDT": "L2", "UNIUSDT": "DeFi", "AAVEUSDT": "DeFi",
+    "LINKUSDT": "Oracle", "MATICUSDT": "L2", "DOTUSDT": "L1", "LTCUSDT": "L1",
+    "APTUSDT": "L1", "SUIUSDT": "L1", "TONUSDT": "L1", "NEARUSDT": "L1",
+    "FETUSDT": "AI", "RENDERUSDT": "AI", "GRTUSDT": "AI", "VIRTUALUSDT": "AI",
+    "TAOUSDT": "AI", "WLDUSDT": "AI", "FETUSDT": "AI",
+    "DASHUSDT": "Privacy", "ZECUSDT": "Privacy", "XMRUSDT": "Privacy",
+    "SANDUSDT": "Gaming", "MANAUSDT": "Gaming", "GALAUSDT": "Gaming",
+    "AXSUSDT": "Gaming", "APEUSDT": "Gaming",
 }
 
 MAX_LEVERAGE: dict = {
     "BTCUSDT": 125, "ETHUSDT": 100, "SOLUSDT": 75, "BNBUSDT": 75,
-    "XRPUSDT": 75, "DOGEUSDT": 75, "ADAUSDT": 75,
+    "XRPUSDT": 75, "DOGEUSDT": 75, "ADAUSDT": 75, "LTCUSDT": 75,
+    "AVAXUSDT": 75, "DOTUSDT": 75, "MATICUSDT": 75, "LINKUSDT": 75,
 }
 
 def get_max_leverage(sym: str) -> int:
@@ -169,7 +178,6 @@ def analyze_sl_reason_short(sig: dict) -> str:
         except (TypeError, ValueError):
             return default
 
-    # Speed of loss
     duration_mins = None
     try:
         if sig.get("timestamp") and sig.get("close_time"):
@@ -188,11 +196,9 @@ def analyze_sl_reason_short(sig: dict) -> str:
         elif duration_mins >= 120:
             reasons.append(f"Trade held {duration_mins} min before SL — sustained trend reversal.")
 
-    # Super Setup for Short
     if sig.get("is_super_setup"):
         reasons.append("Super Setup — 15m Premium zone bypassed all filters.")
 
-    # PDZ zone risk
     pdz_5m = str(criteria.get("pdz_zone_5m", "") or "")
     pdz_15m = str(criteria.get("pdz_zone_15m", "") or "")
     for zone_label, zone_val in [("5m", pdz_5m), ("15m", pdz_15m)]:
@@ -203,7 +209,6 @@ def analyze_sl_reason_short(sig: dict) -> str:
         elif "Discount" in zone_val:
             reasons.append(f"PDZ {zone_label} zone was Discount — oversold, bounce risk.")
 
-    # RSI analysis
     rsi_5m = _f("rsi_5m")
     rsi_1h = _f("rsi_1h")
 
@@ -213,18 +218,15 @@ def analyze_sl_reason_short(sig: dict) -> str:
             improve.append("Lower RSI 5m maximum threshold")
         elif rsi_5m < 55:
             reasons.append(f"RSI 5m only {rsi_5m:.1f} — weak overbought condition.")
-            improve.append("Raise RSI 5m minimum threshold")
 
     if rsi_1h is not None and rsi_1h < 60:
         reasons.append(f"RSI 1h weak ({rsi_1h:.1f}) — no bearish higher-TF support.")
 
-    # MACD status
     macd_flags = {"3m": criteria.get("macd_3m"), "5m": criteria.get("macd_5m"), "15m": criteria.get("macd_15m")}
     false_bullish = [tf for tf, v in macd_flags.items() if v not in (None, "—") and str(v) not in ("", "—") and float(v) > 0]
     if false_bullish:
         reasons.append(f"MACD was bullish on {', '.join(false_bullish)} timeframe(s) at entry.")
 
-    # Volume conviction
     vol_ratio = _f("vol_ratio")
     if vol_ratio is not None and vol_ratio < 1.5:
         reasons.append(f"Volume spike only {vol_ratio:.1f}× average — low conviction.")
@@ -900,7 +902,6 @@ def place_okx_order_short(sig: dict, cfg: dict) -> dict:
             return {"ordId": "", "algoId": "", "sz": 0, "status": "error",
                     "error": "Invalid numeric values"}
 
-        # SHORT sanity checks
         if sl <= entry:
             return {"ordId": "", "algoId": "", "sz": 0, "status": "error",
                     "error": f"SHORT SL ({sl}) must be above entry ({entry})"}
@@ -929,7 +930,6 @@ def place_okx_order_short(sig: dict, cfg: dict) -> dict:
 
         _base_info = {"ct_val": ct_val, "notional": notional, "tdMode": mode, "is_hedge": False}
 
-        # Fetch position mode
         is_hedge = False
         try:
             _pm_resp = _trade_get("/api/v5/account/config", {}, cfg)
@@ -943,14 +943,12 @@ def place_okx_order_short(sig: dict, cfg: dict) -> dict:
             pass
         _base_info["is_hedge"] = is_hedge
 
-        # Set leverage
         try:
             _set_leverage_okx(sym, cfg)
         except Exception as lev_exc:
             return {"ordId": "", "algoId": "", "sz": 0, "status": "error",
                     "error": f"set-leverage failed: {lev_exc}", **_base_info}
 
-        # Step 1: Place SHORT market order (side="sell")
         order_body = {"instId": _to_okx(sym), "tdMode": mode, "side": "sell", "ordType": "market", "sz": str(contracts)}
         if is_hedge:
             order_body["posSide"] = "short"
@@ -968,7 +966,6 @@ def place_okx_order_short(sig: dict, cfg: dict) -> dict:
             err = f"Entry order: {d0.get('sCode')}: {d0.get('sMsg', '')}"
             return {"ordId": ord_id, "algoId": "", "sz": contracts, "status": "error", "error": err, **_base_info}
 
-        # Fetch actual fill price
         actual_entry = entry
         time.sleep(0.3)
         try:
@@ -981,7 +978,6 @@ def place_okx_order_short(sig: dict, cfg: dict) -> dict:
         except Exception:
             pass
 
-        # Recalculate TP and SL from actual fill price (SHORT version)
         tp_pct = float(cfg.get("tp_pct", 1.5)) / 100
         actual_tp = _pround(actual_entry * (1 - tp_pct))
         if mode == "isolated":
@@ -990,7 +986,6 @@ def place_okx_order_short(sig: dict, cfg: dict) -> dict:
             sl_pct = float(cfg.get("sl_pct", 3.0)) / 100
             actual_sl = _pround(actual_entry * (1 + sl_pct))
 
-        # Step 2: Place TP/SL algo (SHORT: buy to close)
         if mode == "cross":
             _tp_sig = _place_tp_only_order_short(sig, cfg, actual_tp, contracts)
             if not _tp_sig:
@@ -1215,10 +1210,59 @@ def _init_signal_trade_snapshot_short(sig: dict, cfg: dict) -> None:
         _sl_dist = (_entry_sl_snap - _entry_px) / _entry_px
     sig["sl_distance_pct"] = float(_sl_dist)
 
+    # DCA ladder pre-calculation for cross margin
+    if _dca_max_snap > 0 and _mode == "cross" and _entry_px > 0:
+        _tp_pct_l = float(cfg.get("tp_pct", 1.5) or 1.5)
+        _rise_l = float(cfg.get("dca_cross_rise_pct", 7.0) or 7.0)
+        sig["dca_ladder"] = _calc_cross_dca_ladder_short(
+            _entry_px, _entry_usdt, _entry_lev,
+            _dca_max_snap, _rise_l, _tp_pct_l
+        )
+    else:
+        sig.setdefault("dca_ladder", [])
+
     try:
         sig["next_dca_px"] = float(_dca_compute_trigger_short(sig, cfg) or 0.0)
     except Exception:
         sig["next_dca_px"] = 0.0
+
+def _calc_cross_dca_ladder_short(entry_px: float, base_usdt: float, leverage: int,
+                                  max_dca: int, rise_pct: float, tp_pct: float) -> list:
+    """Pre-calculate the full DCA price cascade for cross margin mode (SHORT)."""
+    if entry_px <= 0 or base_usdt <= 0 or leverage <= 0 or max_dca <= 0:
+        return []
+    rise_frac = rise_pct / 100.0
+    tp_frac = tp_pct / 100.0
+    lev = max(1, int(leverage))
+
+    fills = [{"price": entry_px, "notional": base_usdt * lev}]
+    ladder = []
+
+    for i in range(1, max_dca + 1):
+        tot_not = sum(f["notional"] for f in fills)
+        tot_unit = sum(f["notional"] / f["price"] for f in fills if f["price"] > 0)
+        blended_before = tot_not / tot_unit if tot_unit > 0 else fills[-1]["price"]
+
+        trigger_px = _pround(blended_before * (1.0 + rise_frac))
+        dca_usdt = base_usdt * (2 ** (i - 1))
+        dca_not = dca_usdt * lev
+
+        fills_after = fills + [{"price": trigger_px, "notional": dca_not}]
+        tot_not_a = sum(f["notional"] for f in fills_after)
+        tot_unit_a = sum(f["notional"] / f["price"] for f in fills_after if f["price"] > 0)
+        blend_after = tot_not_a / tot_unit_a if tot_unit_a > 0 else trigger_px
+        tp_after = _pround(blend_after * (1.0 - tp_frac))
+
+        ladder.append({
+            "level": i,
+            "trigger_px": trigger_px,
+            "usdt": dca_usdt,
+            "blended_avg": _pround(blend_after),
+            "tp_px": tp_after,
+        })
+        fills.append({"price": trigger_px, "notional": dca_not})
+
+    return ladder
 
 def _force_close_position_short(sig: dict, cfg: dict) -> dict:
     sym = sig.get("symbol", "?")
@@ -1300,7 +1344,6 @@ def process_short(sym, cfg: dict, super_counter: dict = None, super_lock=None):
         _incr_filter("checked")
         _filter_counts["checked_syms"].append(sym)
 
-        # Stage 1: Quick parallel fetch
         with ThreadPoolExecutor(max_workers=3) as pool:
             f_5m_q = pool.submit(get_klines, sym, "5m", 300)
             f_15m_q = pool.submit(get_klines, sym, "15m", 300)
@@ -1312,7 +1355,6 @@ def process_short(sym, cfg: dict, super_counter: dict = None, super_lock=None):
         closes_5m_q = [c["close"] for c in m5_quick]
         entry_q = _pround(m5_quick[-1]["close"])
 
-        # F2: PDZ 15m (SHORT — Premium zone)
         pdz_zone_15m = "—"
         pdz_zone_1h = "—"
         is_super_eligible = False
@@ -1329,7 +1371,6 @@ def process_short(sym, cfg: dict, super_counter: dict = None, super_lock=None):
                 _record_elim("f2_pdz15m", "f2_elim_syms", sym)
                 return None
 
-        # SUPER SETUP for SHORT
         if is_super_eligible:
             _take_super_slot = True
             if super_counter is not None and super_lock is not None:
@@ -1377,7 +1418,6 @@ def process_short(sym, cfg: dict, super_counter: dict = None, super_lock=None):
                 }
             _record_elim("super_cap_demoted", "super_cap_demoted_syms", sym)
 
-        # F3: PDZ 5m
         pdz_zone_5m = "—"
         if cfg.get("use_pdz_5m", True):
             pdz_pass_5m, pdz_zone_5m = calc_pdz_zone_short(m5_quick, entry_q,
@@ -1386,13 +1426,11 @@ def process_short(sym, cfg: dict, super_counter: dict = None, super_lock=None):
                 _record_elim("f3_pdz5m", "f3_elim_syms", sym)
                 return None
 
-        # F4: Quick 5m RSI (SHORT — OVERBOUGHT: RSI ≤ max)
         rsi5_q = (calc_rsi_series(closes_5m_q) or [0])[-1]
         if cfg.get("use_rsi_5m", True) and rsi5_q > cfg.get("rsi_5m_max", 70):
             _record_elim("f4_rsi5m", "f4_elim_syms", sym)
             return None
 
-        # Stage 2: Fetch 3m candles
         _need_3m_detail = (cfg.get("use_ema_3m") or cfg.get("use_macd_3m") or cfg.get("use_sar_3m"))
         candle_limit_3m = 80 if _need_3m_detail else 30
         m3_candles = get_klines(sym, "3m", candle_limit_3m)[:-1]
@@ -1413,13 +1451,11 @@ def process_short(sym, cfg: dict, super_counter: dict = None, super_lock=None):
         closes_1h = [c["close"] for c in m1h_candles]
         entry = _pround(m5[-1]["close"])
 
-        # F5: 1h RSI (SHORT — upper range)
         rsi1h = (calc_rsi_series(closes_1h) or [0])[-1]
         if cfg.get("use_rsi_1h", True) and not (cfg["rsi_1h_min"] <= rsi1h <= cfg["rsi_1h_max"]):
             _record_elim("f5_rsi1h", "f5_elim_syms", sym)
             return None
 
-        # F5b: ATR
         atr_15m_val = None
         atr_ratio_val = None
         _atr_series = calc_atr(m15, 14)
@@ -1434,7 +1470,6 @@ def process_short(sym, cfg: dict, super_counter: dict = None, super_lock=None):
                 _record_elim("f5b_atr", "f5b_elim_syms", sym)
                 return None
 
-        # F6: EMA (SHORT: price must be BELOW EMA)
         ema_3m_val = ema_5m_val = ema_15m_val = None
         if cfg.get("use_ema_3m"):
             ema = calc_ema(closes_3m, max(2, int(cfg.get("ema_period_3m", 12))))
@@ -1455,7 +1490,6 @@ def process_short(sym, cfg: dict, super_counter: dict = None, super_lock=None):
                 return None
             ema_15m_val = _pround(ema[-1])
 
-        # F7: MACD bearish
         macd_3m_val = macd_5m_val = macd_15m_val = None
         _macd_3m_on = cfg.get("use_macd_3m", True)
         _macd_5m_on = cfg.get("use_macd_5m", True)
@@ -1482,7 +1516,6 @@ def process_short(sym, cfg: dict, super_counter: dict = None, super_lock=None):
                 _record_elim("f7_macd_15m", "f7_macd_15m_elim_syms", sym)
                 return None
 
-        # F8: Parabolic SAR (SHORT: SAR must be ABOVE price)
         sar_3m_val = sar_5m_val = sar_15m_val = None
         _sar_3m_on = cfg.get("use_sar_3m", True)
         _sar_5m_on = cfg.get("use_sar_5m", True)
@@ -1506,7 +1539,6 @@ def process_short(sym, cfg: dict, super_counter: dict = None, super_lock=None):
                 return None
             sar_15m_val = _pround(sar_15m[-1][0])
 
-        # F9: Volume Spike
         vol_ratio = None
         if cfg.get("use_vol_spike"):
             lookback = max(2, int(cfg.get("vol_spike_lookback", 20)))
@@ -1520,7 +1552,6 @@ def process_short(sym, cfg: dict, super_counter: dict = None, super_lock=None):
                     return None
                 vol_ratio = round(vols_15m[-1] / avg_vol, 2) if avg_vol > 0 else None
 
-        # F10: EMA Crossover (SHORT: fast < slow, death cross)
         ema_cross_12_15m_val = ema_cross_21_15m_val = None
         if cfg.get("use_ema_cross_15m", True):
             _fast_p = max(2, int(cfg.get("ema_cross_fast_15m", 12)))
@@ -1533,7 +1564,6 @@ def process_short(sym, cfg: dict, super_counter: dict = None, super_lock=None):
             ema_cross_12_15m_val = _pround(ema_fast_15m[-1])
             ema_cross_21_15m_val = _pround(ema_slow_15m[-1])
 
-        # All filters passed — create SHORT signal
         tp = _pround(entry * (1 - cfg["tp_pct"] / 100))
         _lev_sl = max(1, int(cfg.get("trade_leverage", 10)))
         if cfg.get("trade_margin_mode", "isolated") == "isolated":
@@ -1647,16 +1677,17 @@ def scan_short(cfg: dict, super_slots_remaining: int = None, skip_symbols: set =
     return sorted(results, key=lambda x: x["symbol"]), _filter_counts.get("errors", 0)
 
 # ============================================================================
-# WATCHER THREAD (SHORT VERSION)
+# OPEN SIGNAL UPDATE FUNCTIONS (for watcher)
 # ============================================================================
-def _watcher_update_one_signal_short(sig: dict) -> None:
+
+def _update_one_signal_short(sig: dict) -> None:
     _sym = sig.get("symbol", "?")
     try:
         with _config_lock:
             _cfg_snap = dict(_b._ss_cfg)
         sig_dt = _parse_iso_safe(sig["timestamp"])
         sig_ts_ms = int(sig_dt.timestamp() * 1000)
-        candles = get_klines(sig["symbol"], "1m", 120)
+        candles = get_klines(sig["symbol"], "5m", 200)
         if not candles:
             return
         post = [c for c in candles if c["time"] >= sig_ts_ms]
@@ -1728,24 +1759,23 @@ def _watcher_update_one_signal_short(sig: dict) -> None:
                     sig["latest_price"] = float(latest_price)
                     _avg = float(sig.get("avg_entry", sig.get("entry", 0)) or 0)
                     if _avg > 0:
-                        drop_pct = (_avg - latest_price) / _avg * 100
-                        sig["price_alert"] = drop_pct >= _PRICE_ALERT_PCT
-                        sig["price_alert_pct"] = round(drop_pct, 2)
+                        rise_pct = (latest_price - _avg) / _avg * 100
+                        sig["price_alert"] = rise_pct >= _PRICE_ALERT_PCT
+                        sig["price_alert_pct"] = round(rise_pct, 2)
             else:
                 if candles:
                     latest_price = candles[-1]["close"]
                     sig["latest_price"] = float(latest_price)
                     _avg = float(sig.get("avg_entry", sig.get("entry", 0)) or 0)
                     if _avg > 0:
-                        drop_pct = (_avg - latest_price) / _avg * 100
-                        sig["price_alert"] = drop_pct >= _PRICE_ALERT_PCT
-                        sig["price_alert_pct"] = round(drop_pct, 2)
+                        rise_pct = (latest_price - _avg) / _avg * 100
+                        sig["price_alert"] = rise_pct >= _PRICE_ALERT_PCT
+                        sig["price_alert_pct"] = round(rise_pct, 2)
                     else:
                         sig["price_alert"] = False
                         sig["price_alert_pct"] = 0.0
             return
 
-        # Legacy branch
         _ladder_full = _dca_enabled and _dca_max > 0 and _dca_count >= _dca_max
         _use_sl_here = _cfg_snap.get("use_dca_sl", True)
         tp_time = sl_time = None
@@ -1770,15 +1800,25 @@ def _watcher_update_one_signal_short(sig: dict) -> None:
                 _ref = float(sig.get("avg_entry", sig.get("entry", 0)) or 0)
                 sig["latest_price"] = float(latest_price)
                 if _ref > 0:
-                    drop_pct = (_ref - latest_price) / _ref * 100
-                    sig["price_alert"] = drop_pct >= _PRICE_ALERT_PCT
-                    sig["price_alert_pct"] = round(drop_pct, 2)
+                    rise_pct = (latest_price - _ref) / _ref * 100
+                    sig["price_alert"] = rise_pct >= _PRICE_ALERT_PCT
+                    sig["price_alert_pct"] = round(rise_pct, 2)
                 else:
                     sig["price_alert"] = False
                     sig["price_alert_pct"] = 0.0
 
     except Exception as _upd_exc:
         _append_error("signal_update", f"{_sym}: {_upd_exc}", symbol=_sym)
+
+def update_open_signals_short(signals):
+    open_sigs = [s for s in signals if s["status"] == "open"]
+    if not open_sigs:
+        return signals
+    with ThreadPoolExecutor(max_workers=min(len(open_sigs), 15)) as pool:
+        futs = [pool.submit(_update_one_signal_short, s) for s in open_sigs]
+        for f in as_completed(futs):
+            f.result()
+    return signals
 
 # ============================================================================
 # TWO-TIER RECONCILIATION (for Short positions)
@@ -2304,14 +2344,130 @@ def _execute_dca_fill_short(sig: dict, cfg: dict) -> bool:
         return False
 
 # ============================================================================
-# BACKGROUND SCANNER THREAD
+# WATCHER THREAD (SHORT VERSION)
 # ============================================================================
-def _check_sl_circuit_breaker_short():
-    with _log_lock:
-        _closed = sorted([s for s in _b._ss_log["signals"]
-                         if s.get("status") in ("tp_hit", "sl_hit") and s.get("close_time")],
-                         key=lambda x: x.get("close_time", ""))
-    return len(_closed) >= 3 and all(s["status"] == "sl_hit" for s in _closed[-3:])
+
+def _watcher_update_one_signal_short(sig: dict) -> None:
+    _sym = sig.get("symbol", "?")
+    try:
+        with _config_lock:
+            _cfg_snap = dict(_b._ss_cfg)
+        sig_dt = _parse_iso_safe(sig["timestamp"])
+        sig_ts_ms = int(sig_dt.timestamp() * 1000)
+        candles = get_klines(sig["symbol"], "1m", 120)
+        if not candles:
+            return
+        post = [c for c in candles if c["time"] >= sig_ts_ms]
+
+        _dca_enabled = bool(sig.get("dca_enabled", False))
+        _dca_max = int(sig.get("dca_max", 0) or 0)
+        _dca_count = int(sig.get("dca_count", 0) or 0)
+        _ladder_slots_left = _dca_enabled and _dca_count < _dca_max
+
+        if _ladder_slots_left:
+            _dca_trigger_price = _dca_compute_trigger_short(sig, _cfg_snap)
+            _last_fill_ts_ms = sig_ts_ms
+            _fills = sig.get("dca_fills") or []
+            if _fills:
+                _last_fill = _fills[-1]
+                try:
+                    _last_fill_ts_ms = int(_parse_iso_safe(_last_fill.get("ts") or sig["timestamp"]).timestamp() * 1000)
+                except Exception:
+                    _last_fill_ts_ms = sig_ts_ms
+            _post_dca = [c for c in post if c["time"] >= _last_fill_ts_ms]
+            tp_time = None
+            dca_time = None
+            sl_time = None
+            _dca_sl_px = float(sig.get("sl", 0) or 0)
+            _use_dca_sl_w = _cfg_snap.get("use_dca_sl", True)
+            for c in _post_dca:
+                if tp_time is None and c["low"] <= sig["tp"]:
+                    tp_time = c["time"]
+                if (dca_time is None and _dca_trigger_price > 0 and c["high"] >= _dca_trigger_price):
+                    dca_time = c["time"]
+                if (_use_dca_sl_w and sl_time is None and _dca_sl_px > 0 and c["high"] >= _dca_sl_px):
+                    sl_time = c["time"]
+            _fc_px_w = float(sig.get("fc_trigger_px", 0) or 0)
+            fc_time = None
+            if _fc_px_w > 0:
+                for _c in _post_dca:
+                    if fc_time is None and _c["low"] <= _fc_px_w:
+                        fc_time = _c["time"]
+                        break
+
+            if sl_time is not None and (tp_time is None or sl_time <= tp_time):
+                sig.update(status="dca_sl_hit", close_price=_dca_sl_px,
+                           close_time=to_dubai(datetime.fromtimestamp(sl_time/1000, tz=timezone.utc)).isoformat())
+                sig.pop("price_alert", None)
+                sig.pop("_dca_pending", None)
+            elif fc_time is not None:
+                sig.update(status="fc_hit", close_price=_fc_px_w,
+                           close_time=to_dubai(datetime.fromtimestamp(fc_time/1000, tz=timezone.utc)).isoformat())
+                sig.pop("price_alert", None)
+                sig.pop("_dca_pending", None)
+            elif tp_time is not None and (dca_time is None or tp_time <= dca_time):
+                sig.update(status="tp_hit", close_price=sig["tp"],
+                           close_time=to_dubai(datetime.fromtimestamp(tp_time/1000, tz=timezone.utc)).isoformat())
+                sig.pop("price_alert", None)
+                sig.pop("_dca_pending", None)
+            elif dca_time is not None:
+                sig["_dca_pending"] = True
+                sig["_dca_trigger_px"] = _dca_trigger_price
+                sig["_dca_trigger_time"] = to_dubai(datetime.fromtimestamp(dca_time/1000, tz=timezone.utc)).isoformat()
+                if candles:
+                    latest_price = candles[-1]["close"]
+                    sig["latest_price"] = float(latest_price)
+                    _avg = float(sig.get("avg_entry", sig.get("entry", 0)) or 0)
+                    if _avg > 0:
+                        rise_pct = (latest_price - _avg) / _avg * 100
+                        sig["price_alert"] = rise_pct >= _PRICE_ALERT_PCT
+                        sig["price_alert_pct"] = round(rise_pct, 2)
+            else:
+                if candles:
+                    latest_price = candles[-1]["close"]
+                    sig["latest_price"] = float(latest_price)
+                    _avg = float(sig.get("avg_entry", sig.get("entry", 0)) or 0)
+                    if _avg > 0:
+                        rise_pct = (latest_price - _avg) / _avg * 100
+                        sig["price_alert"] = rise_pct >= _PRICE_ALERT_PCT
+                        sig["price_alert_pct"] = round(rise_pct, 2)
+                    else:
+                        sig["price_alert"] = False
+                        sig["price_alert_pct"] = 0.0
+            return
+
+        _ladder_full = _dca_enabled and _dca_max > 0 and _dca_count >= _dca_max
+        tp_time = sl_time = None
+        for c in post:
+            if tp_time is None and c["low"] <= sig["tp"]:
+                tp_time = c["time"]
+            if sl_time is None and c["high"] >= sig["sl"]:
+                sl_time = c["time"]
+        if tp_time is not None or sl_time is not None:
+            if tp_time is not None and (sl_time is None or tp_time <= sl_time):
+                sig.update(status="tp_hit", close_price=sig["tp"],
+                           close_time=to_dubai(datetime.fromtimestamp(tp_time/1000, tz=timezone.utc)).isoformat())
+                sig.pop("price_alert", None)
+            else:
+                _close_status = "dca_sl_hit" if _ladder_full else "sl_hit"
+                sig.update(status=_close_status, close_price=sig["sl"],
+                           close_time=to_dubai(datetime.fromtimestamp(sl_time/1000, tz=timezone.utc)).isoformat())
+                sig.pop("price_alert", None)
+        else:
+            if candles:
+                latest_price = candles[-1]["close"]
+                _ref = float(sig.get("avg_entry", sig.get("entry", 0)) or 0)
+                sig["latest_price"] = float(latest_price)
+                if _ref > 0:
+                    rise_pct = (latest_price - _ref) / _ref * 100
+                    sig["price_alert"] = rise_pct >= _PRICE_ALERT_PCT
+                    sig["price_alert_pct"] = round(rise_pct, 2)
+                else:
+                    sig["price_alert"] = False
+                    sig["price_alert_pct"] = 0.0
+
+    except Exception as _upd_exc:
+        _append_error("signal_update", f"[watcher] {_sym}: {_upd_exc}", symbol=_sym)
 
 def _watcher_loop_short():
     while True:
@@ -2402,6 +2558,16 @@ def _watcher_loop_short():
             _append_error("watcher", f"outer loop: {e}")
             time.sleep(5)
 
+# ============================================================================
+# BACKGROUND SCANNER THREAD
+# ============================================================================
+def _check_sl_circuit_breaker_short():
+    with _log_lock:
+        _closed = sorted([s for s in _b._ss_log["signals"]
+                         if s.get("status") in ("tp_hit", "sl_hit") and s.get("close_time")],
+                         key=lambda x: x.get("close_time", ""))
+    return len(_closed) >= 3 and all(s["status"] == "sl_hit" for s in _closed[-3:])
+
 def _bg_loop_short():
     while True:
         if not _scanner_running.is_set() or getattr(_b, "_ss_sl_paused", False):
@@ -2418,10 +2584,7 @@ def _bg_loop_short():
             with _log_lock:
                 _open_snapshot = [s for s in _b._ss_log["signals"] if s.get("status") == "open"]
             if _open_snapshot and not _watcher_active:
-                with ThreadPoolExecutor(max_workers=min(len(_open_snapshot), 15)) as pool:
-                    futs = [pool.submit(_watcher_update_one_signal_short, s) for s in _open_snapshot]
-                    for f in as_completed(futs):
-                        f.result()
+                update_open_signals_short(_open_snapshot)
 
                 _dca_pending_sigs = [s for s in _open_snapshot if s.get("_dca_pending")]
                 if _dca_pending_sigs:
@@ -2677,23 +2840,19 @@ def _analyze_market_conditions_short(cfg: dict, symbols: list, progress_bar, sta
             closes_1h = [c["close"] for c in m1h]
             closes_3m = [c["close"] for c in m3]
 
-            # F2: PDZ 15m — SHORT passes on Premium zone
             _p15, _z15 = calc_pdz_zone_short(m15, entry, tp_pct / 100.0)
             _d["f2_pdz15m"]["zones"].append(_z15)
             _d["f2_pdz15m"]["pass" if _z15 == "Premium" else "fail"] += 1
 
-            # F3: PDZ 5m — SHORT passes on Premium zone
             _p5, _z5 = calc_pdz_zone_short(m5, entry, tp_pct / 100.0)
             _d["f3_pdz5m"]["zones"].append(_z5)
             _d["f3_pdz5m"]["pass" if _z5 == "Premium" else "fail"] += 1
 
-            # F4: RSI 5m — SHORT passes when RSI ≤ max
             _rsi5 = (calc_rsi_series(closes_5m) or [None])[-1]
             if _rsi5 is not None:
                 _d["f4_rsi5m"]["values"].append(_rsi5)
                 _d["f4_rsi5m"]["pass" if _rsi5 <= float(cfg.get("rsi_5m_max", 70)) else "fail"] += 1
 
-            # F5: RSI 1h — SHORT passes in upper range
             _rsi1h = (calc_rsi_series(closes_1h) or [None])[-1]
             if _rsi1h is not None:
                 _d["f5_rsi1h"]["values"].append(_rsi1h)
@@ -2701,7 +2860,6 @@ def _analyze_market_conditions_short(cfg: dict, symbols: list, progress_bar, sta
                 _rhi = float(cfg.get("rsi_1h_max", 95))
                 _d["f5_rsi1h"]["pass" if _rlo <= _rsi1h <= _rhi else "fail"] += 1
 
-            # F5b: ATR ratio
             _atr_s = calc_atr(m15, 14)
             if _atr_s and entry > 0:
                 _atr_pct = (_atr_s[-1] / entry) * 100.0
@@ -2711,7 +2869,6 @@ def _analyze_market_conditions_short(cfg: dict, symbols: list, progress_bar, sta
                     _thresh = {"Strict": 1.5, "Normal": 2.0, "Relaxed": 3.0}.get(cfg.get("atr_mode", "Normal"), 2.0)
                     _d["f5b_atr"]["pass" if _ratio <= _thresh else "fail"] += 1
 
-            # F6: EMA — SHORT passes when price is BELOW EMA
             for _fk, _cl, _pk in [("f6_ema_3m", closes_3m, "ema_period_3m"),
                                    ("f6_ema_5m", closes_5m, "ema_period_5m"),
                                    ("f6_ema_15m", closes_15m, "ema_period_15m")]:
@@ -2719,17 +2876,14 @@ def _analyze_market_conditions_short(cfg: dict, symbols: list, progress_bar, sta
                 if _ema:
                     _d[_fk]["pass" if entry < _ema[-1] else "fail"] += 1
 
-            # F7: MACD — SHORT passes on bearish condition
             for _fk, _cl in [("f7_macd_3m", closes_3m), ("f7_macd_5m", closes_5m), ("f7_macd_15m", closes_15m)]:
                 _ok, _ = macd_bearish_and_value(_cl)
                 _d[_fk]["pass" if _ok else "fail"] += 1
 
-            # F8: SAR — SHORT passes when SAR is ABOVE price (bearish)
             for _fk, _bars in [("f8_sar_3m", m3), ("f8_sar_5m", m5), ("f8_sar_15m", m15)]:
                 _sar = calc_parabolic_sar(_bars)
                 _d[_fk]["pass" if (_sar and not _sar[-1][1]) else "fail"] += 1
 
-            # F9: Volume spike
             _lkb = max(2, int(cfg.get("vol_spike_lookback", 20)))
             _vols = [c["volume"] for c in m15]
             if len(_vols) >= _lkb + 1:
@@ -2739,7 +2893,6 @@ def _analyze_market_conditions_short(cfg: dict, symbols: list, progress_bar, sta
                     _d["f9_vol"]["values"].append(_vr)
                     _d["f9_vol"]["pass" if _vr >= float(cfg.get("vol_spike_mult", 2.0)) else "fail"] += 1
 
-            # F10: EMA cross — SHORT passes when fast < slow (death cross)
             _fp = max(2, int(cfg.get("ema_cross_fast_15m", 12)))
             _sp = max(_fp + 1, int(cfg.get("ema_cross_slow_15m", 21)))
             _ef = calc_ema(closes_15m, _fp)
@@ -2771,7 +2924,6 @@ def _analyze_market_conditions_short(cfg: dict, symbols: list, progress_bar, sta
 
     recs = {}
 
-    # PDZ filters (SHORT: Premium zone)
     for _fk, _fl, _use_key, _tf_label in [("f2_pdz15m", "F2 — PDZ 15m", "use_pdz_15m", "15m"),
                                             ("f3_pdz5m", "F3 — PDZ 5m", "use_pdz_5m", "5m")]:
         _rate = _pr(_fk)
@@ -2791,7 +2943,6 @@ def _analyze_market_conditions_short(cfg: dict, symbols: list, progress_bar, sta
                      "current_pass_rate": _rate, "rec": _rec, "rec_pass_rate": _rate,
                      "reason": _reason, "icon": _icon(_rate)}
 
-    # RSI 5m (SHORT: overbought)
     _r4 = _pr("f4_rsi5m")
     _v5 = _d["f4_rsi5m"]["values"]
     _cur_r5 = int(cfg.get("rsi_5m_max", 70))
@@ -2806,7 +2957,6 @@ def _analyze_market_conditions_short(cfg: dict, symbols: list, progress_bar, sta
                         "rec_pass_rate": (sum(1 for v in _v5 if v <= _best_r5) / len(_v5) * 100) if _v5 else _r4,
                         "reason": f"Median 5m RSI {_med_r5}", "icon": _icon(_r4)}
 
-    # RSI 1h range (SHORT: upper range)
     _r5 = _pr("f5_rsi1h")
     _v1h = _d["f5_rsi1h"]["values"]
     _cur_lo = int(cfg.get("rsi_1h_min", 65))
@@ -2825,7 +2975,6 @@ def _analyze_market_conditions_short(cfg: dict, symbols: list, progress_bar, sta
                         "rec_pass_rate": (sum(1 for v in _v1h if _rec_lo <= v <= _rec_hi) / len(_v1h) * 100) if _v1h else _r5,
                         "reason": f"Median 1h RSI {_med_1h}", "icon": _icon(_r5)}
 
-    # ATR mode
     _r5b = _pr("f5b_atr")
     _vatr = _d["f5b_atr"]["values"]
     _cur_atr = cfg.get("atr_mode", "Normal")
@@ -2838,7 +2987,6 @@ def _analyze_market_conditions_short(cfg: dict, symbols: list, progress_bar, sta
                        "rec_pass_rate": _atr_rates.get(_best_atr, _r5b),
                        "reason": f"Mode '{_best_atr}' gives best pass rate", "icon": _icon(_r5b)}
 
-    # EMA filters (SHORT: price below EMA)
     for _fk, _fl, _uk, _pk in [("f6_ema_3m", "F6 — EMA 3m", "use_ema_3m", "ema_period_3m"),
                                 ("f6_ema_5m", "F6 — EMA 5m", "use_ema_5m", "ema_period_5m"),
                                 ("f6_ema_15m", "F6 — EMA 15m", "use_ema_15m", "ema_period_15m")]:
@@ -2848,7 +2996,6 @@ def _analyze_market_conditions_short(cfg: dict, symbols: list, progress_bar, sta
                      "current_pass_rate": _rate, "rec": _bool_rec(_rate, "ON"),
                      "rec_pass_rate": _rate, "reason": f"{_rate:.0f}% below EMA{_per}", "icon": _icon(_rate)}
 
-    # MACD bearish filters
     for _fk, _fl, _uk in [("f7_macd_3m", "F7 — MACD 3m (bearish)", "use_macd_3m"),
                            ("f7_macd_5m", "F7 — MACD 5m (bearish)", "use_macd_5m"),
                            ("f7_macd_15m", "F7 — MACD 15m (bearish)", "use_macd_15m")]:
@@ -2857,7 +3004,6 @@ def _analyze_market_conditions_short(cfg: dict, symbols: list, progress_bar, sta
                      "current_pass_rate": _rate, "rec": _bool_rec(_rate, "ON"),
                      "rec_pass_rate": _rate, "reason": f"{_rate:.0f}% bearish", "icon": _icon(_rate)}
 
-    # SAR filters (SHORT: price below SAR)
     for _fk, _fl, _uk in [("f8_sar_3m", "F8 — SAR 3m (bearish)", "use_sar_3m"),
                            ("f8_sar_5m", "F8 — SAR 5m (bearish)", "use_sar_5m"),
                            ("f8_sar_15m", "F8 — SAR 15m (bearish)", "use_sar_15m")]:
@@ -2866,7 +3012,6 @@ def _analyze_market_conditions_short(cfg: dict, symbols: list, progress_bar, sta
                      "current_pass_rate": _rate, "rec": _bool_rec(_rate, "ON"),
                      "rec_pass_rate": _rate, "reason": f"{_rate:.0f}% below SAR", "icon": _icon(_rate)}
 
-    # Volume spike
     _r9 = _pr("f9_vol")
     _vvol = _d["f9_vol"]["values"]
     _cur_mlt = float(cfg.get("vol_spike_mult", 2.0))
@@ -2883,7 +3028,6 @@ def _analyze_market_conditions_short(cfg: dict, symbols: list, progress_bar, sta
                       "rec_pass_rate": (sum(1 for v in _vvol if v >= _best_mlt) / len(_vvol) * 100) if _vvol else _r9,
                       "reason": f"Median vol ratio {_med_vol}×", "icon": _icon(_r9)}
 
-    # EMA cross death cross
     _r10 = _pr("f10_ema_cross")
     _fp10 = int(cfg.get("ema_cross_fast_15m", 12))
     _sp10 = int(cfg.get("ema_cross_slow_15m", 21))
@@ -3004,7 +3148,6 @@ with st.sidebar:
 
     st.divider()
 
-    # Connection test
     _conn = getattr(_b, "_ss_api_conn_status", {"status": "untested", "message": ""})
     _has_creds = bool(_snap_cfg.get("api_key") and _snap_cfg.get("api_secret") and _snap_cfg.get("api_passphrase"))
     if st.button("🔌 Test Connection", use_container_width=True, disabled=not _has_creds):
@@ -3022,7 +3165,6 @@ with st.sidebar:
 
     st.divider()
 
-    # Filters (bearish versions)
     st.markdown("**⚡ Filters (BEARISH)**")
     new_use_pre_filter = st.checkbox("F1 — Bulk Pre-filter", value=bool(_snap_cfg.get("use_pre_filter", True)), key="cfg_use_pre_filter")
     new_use_pdz_15m = st.checkbox("F2 — PDZ 15m (Premium zone)", value=bool(_snap_cfg.get("use_pdz_15m", True)), key="cfg_use_pdz_15m")
@@ -3098,6 +3240,7 @@ with st.sidebar:
             "use_vol_spike": bool(new_use_vol_spike),
             "vol_spike_mult": float(new_vol_mult) if new_use_vol_spike else 2.0,
             "vol_spike_lookback": int(new_vol_lookback) if new_use_vol_spike else 20,
+            "scan_hour_enabled": False, "scan_hour_start": 0, "scan_hour_end": 23,
         }
         with _config_lock:
             _b._ss_cfg.clear()
@@ -3361,7 +3504,6 @@ def _build_signal_row_short(s: dict, is_open_table: bool = False, show_pnl: bool
     else:
         okx_cmd_str = "—"
 
-    # DCA Levels column
     dca_levels_col = "—"
     _dca_en_lv = bool(s.get("dca_enabled", False))
     _dca_max_lv = int(s.get("dca_max", 0) or 0)
@@ -3406,7 +3548,6 @@ def _build_signal_row_short(s: dict, is_open_table: bool = False, show_pnl: bool
         if _pnl_val is not None:
             pnl_col = f"{_pnl_val:+.2f} $"
 
-    # Est Liquidity for isolated short
     est_liq_col = "—"
     if status == "open":
         _margin_mode_rm = (s.get("order_margin_mode") or _snap_cfg.get("trade_margin_mode", "isolated") or "isolated").lower()
@@ -3417,7 +3558,6 @@ def _build_signal_row_short(s: dict, is_open_table: bool = False, show_pnl: bool
             _liq_pct = 100.0 / _lev_liq
             est_liq_col = f"{_fmt_px_auto(_liq_price)} (+{_liq_pct:.2f}%)"
 
-    # FC Trigger Price
     _fc_px_raw = s.get("fc_trigger_px")
     fc_trig_col = "—"
     if _fc_px_raw:
@@ -3433,7 +3573,6 @@ def _build_signal_row_short(s: dict, is_open_table: bool = False, show_pnl: bool
         except (TypeError, ValueError):
             fc_trig_col = "—"
 
-    # Difficulty
     diff_col = "—"
     if status == "open":
         _atr_ratio_s = crit.get("atr_ratio")
