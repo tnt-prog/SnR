@@ -717,6 +717,7 @@ if "_scanner_initialised" not in st.session_state:
         _b._bsc_aa_event        = threading.Event()  # wake early
         _b._bsc_aa_diff         = {}        # last auto-apply diff {key: (old, new)}
         _b._bsc_aa_applied_at   = 0.0       # unix ts of last auto-apply
+        _b._bsc_aa_run_now       = False     # set True to trigger immediate run
         _b._bsc_api_conn_status = {          # result of last "Test Connection" call
             "status":      "untested",       # "untested" | "ok" | "error"
             "message":     "",
@@ -757,6 +758,8 @@ if not hasattr(_b, "_bsc_aa_diff"):
     _b._bsc_aa_diff = {}
 if not hasattr(_b, "_bsc_aa_applied_at"):
     _b._bsc_aa_applied_at = 0.0
+if not hasattr(_b, "_bsc_aa_run_now"):
+    _b._bsc_aa_run_now = False
 
 _cfg             = _b._bsc_cfg
 _log             = _b._bsc_log
@@ -5371,16 +5374,22 @@ def _auto_analyse_loop():
                 # Sleep in short chunks so we re-check enable flag quickly
                 _b._bsc_aa_event.wait(timeout=60)
                 _b._bsc_aa_event.clear()
-                continue
+                if not getattr(_b, "_bsc_aa_run_now", False): continue
+            _b._bsc_aa_run_now = False
 
             # Wait for the configured interval (or wake early via event)
-            _b._bsc_aa_event.wait(timeout=_sleep)
+            # Wait for interval OR run_now flag
             _b._bsc_aa_event.clear()
+            # Honour run_now flag even if auto-analyse is disabled
+            _force_run = getattr(_b, "_bsc_aa_run_now", False)
+            if _force_run:
+                _b._bsc_aa_run_now = False
+            _b._bsc_aa_event.wait(timeout=_sleep)
 
             # Re-read cfg — might have changed while sleeping
             _cfg_snap = dict(_b._bsc_cfg)
             if not _cfg_snap.get("auto_analyse_enabled", False):
-                continue
+                if not _force_run: continue
 
             _syms = list(_cfg_snap.get("watchlist", []))
             if not _syms:
@@ -6367,6 +6376,28 @@ with st.sidebar:
             "All TP/SL math, DCA triggers, and order sides invert automatically."
         ))
     st.divider()
+    # ── Auto direction status badge ──────────────────────────────────
+    if _cur_dir == "auto":
+        _aa_resolved = getattr(_b, "_bsc_auto_direction", "long")
+        _aa_ran      = getattr(_b, "_bsc_aa_applied_at", 0.0) > 0
+        _aa_enabled  = _snap_cfg.get("auto_analyse_enabled", False)
+        if not _aa_enabled:
+            st.info("🤖 Auto direction: **enable Auto-Analyse below** to activate", icon=None)
+        elif not _aa_ran:
+            st.info("🤖 Auto direction: **waiting for first run…**", icon=None)
+        else:
+            import time as _aabadge_t
+            try:
+                import pytz as _abtz
+                from datetime import datetime as _abdt
+                _dxb_ab = _abtz.timezone("Asia/Dubai")
+                _aa_since = _abdt.fromtimestamp(
+                    getattr(_b, "_bsc_aa_applied_at", 0.0), _dxb_ab
+                ).strftime("%H:%M")
+            except Exception:
+                _aa_since = "—"
+            _dir_icon = "🔴 SHORT" if _aa_resolved == "short" else "🟢 LONG"
+            st.success(f"🤖 Auto → **{_dir_icon}** (since {_aa_since} GST)", icon=None)
 
     # ── Auto-Analyse ──────────────────────────────────────────────────
     st.markdown("**🤖 Auto-Analyse**")
@@ -6380,12 +6411,24 @@ with st.sidebar:
             "A \"What changed\" diff is shown in the sidebar after each run.\n\n"
             "Direction Auto: also picks Long or Short based on which has more qualifying coins."
         ))
-    new_auto_analyse_hours = st.number_input(
-        "Interval (hours)", min_value=0.5, max_value=24.0, step=0.5,
-        value=float(_snap_cfg.get("auto_analyse_hours", 2.0)),
-        key="cfg_auto_analyse_hours",
-        disabled=not new_auto_analyse_enabled,
-        help="How often the background auto-analyse runs (0.5 = every 30 min, 2.0 = every 2 hours).")
+    _col_hrs, _col_run = st.columns([3, 1])
+    with _col_hrs:
+        new_auto_analyse_hours = st.number_input(
+            "Interval (hours)", min_value=0.5, max_value=24.0, step=0.5,
+            value=float(_snap_cfg.get("auto_analyse_hours", 2.0)),
+            key="cfg_auto_analyse_hours",
+            disabled=not new_auto_analyse_enabled,
+            help="How often the background auto-analyse runs (0.5 = every 30 min, 2.0 = every 2 hours).")
+    with _col_run:
+        st.markdown("<div style=\"height:28px\"></div>", unsafe_allow_html=True)
+        if st.button("▶ Run Now", key="btn_aa_run_now",
+                     use_container_width=True,
+                     disabled=not new_auto_analyse_enabled,
+                     help="Trigger auto-analyse immediately without waiting for the next scheduled interval."):
+            _b._bsc_aa_run_now = True
+            if getattr(_b, "_bsc_aa_event", None):
+                _b._bsc_aa_event.set()
+            st.toast("⚙️ Auto-analyse triggered — check back in a minute.", icon="🤖")
     st.divider()
     # ── Auto-Analyse diff badge ───────────────────────────────────────
     _aa_diff = getattr(_b, "_bsc_aa_diff", {})
@@ -7605,6 +7648,45 @@ if open_count > _max_open_cap:
     )
 pre_out     = health.get("pre_filtered_out", 0)
 deep_sc     = health.get("deep_scanned",     0)
+
+# ── Auto direction tile (only shown when direction == "auto") ──────────────
+_dash_dir = _snap_cfg.get("trade_direction", "long")
+if _dash_dir == "auto":
+    _dash_resolved   = getattr(_b, "_bsc_auto_direction", "long")
+    _dash_aa_ts      = getattr(_b, "_bsc_aa_applied_at", 0.0)
+    _dash_aa_enabled = _snap_cfg.get("auto_analyse_enabled", False)
+    _dash_aa_hours   = float(_snap_cfg.get("auto_analyse_hours", 2.0))
+    if _dash_aa_ts > 0:
+        try:
+            import pytz as _dptz
+            from datetime import datetime as _dpdt
+            _dxb_dp = _dptz.timezone("Asia/Dubai")
+            _dash_since = _dpdt.fromtimestamp(_dash_aa_ts, _dxb_dp).strftime("%H:%M GST")
+            import time as _dpt
+            _dash_next_secs = max(0, int(_dash_aa_hours * 3600 - (_dpt.time() - _dash_aa_ts)))
+            _dash_next_min  = _dash_next_secs // 60
+            _dash_next_str  = f"next in {_dash_next_min}m" if _dash_aa_enabled else "auto-analyse off"
+        except Exception:
+            _dash_since = "—"
+            _dash_next_str = ""
+    else:
+        _dash_since    = "not yet run"
+        _dash_next_str = "waiting for first run" if _dash_aa_enabled else "enable auto-analyse"
+    _dir_colour = "#EF4444" if _dash_resolved == "short" else "#22C55E"
+    _dir_label  = "🔴 SHORT" if _dash_resolved == "short" else "🟢 LONG"
+    st.markdown(
+        f"""<div style="background:#0d1117;border:1px solid {_dir_colour}55;
+                        border-radius:8px;padding:12px 16px 10px 16px;
+                        margin-bottom:12px;">
+            <p style="margin:0 0 2px 0;font-size:0.72rem;font-weight:600;
+                      color:#aaa;letter-spacing:.05em;">🤖 AUTO DIRECTION</p>
+            <p style="margin:0;font-size:1.6rem;font-weight:700;
+                      color:{_dir_colour};line-height:1.2;">{_dir_label}</p>
+            <p style="margin:4px 0 0 0;font-size:0.75rem;color:#888;">
+                Since {_dash_since} &nbsp;·&nbsp; {_dash_next_str}</p>
+        </div>""",
+        unsafe_allow_html=True,
+    )
 
 # ── Row 1: Scanner health ────────────────────────────────────────────────────
 m1, m2, m3, m4, m5c = st.columns(5)
