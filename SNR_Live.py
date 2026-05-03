@@ -5303,7 +5303,8 @@ def _auto_analyse_loop():
 
     # Minimal no-op wrappers so _analyze_market_conditions gets valid widgets
     class _NoopProg:
-        def __call__(self, v): pass
+        def __call__(self, v, text=None): pass
+        def progress(self, v, text=None): pass
         def empty(self): pass
     class _NoopText:
         def __call__(self, *a, **kw): pass
@@ -5365,40 +5366,44 @@ def _auto_analyse_loop():
 
     while True:
         try:
-            _cfg_snap = dict(_b._bsc_cfg)
-            _enabled  = _cfg_snap.get("auto_analyse_enabled", False)
-            _hours    = max(0.5, float(_cfg_snap.get("auto_analyse_hours", 2.0)))
-            _sleep    = int(_hours * 3600)
+            _cfg_snap  = dict(_b._bsc_cfg)
+            _enabled   = _cfg_snap.get("auto_analyse_enabled", False)
+            _hours     = max(0.5, float(_cfg_snap.get("auto_analyse_hours", 2.0)))
+            _sleep     = int(_hours * 3600)
+            _run_now   = getattr(_b, "_bsc_aa_run_now", False)
+            _last_run  = getattr(_b, "_bsc_aa_applied_at", 0.0)
+            _now_t     = _aat.time()
+            _elapsed   = (_now_t - _last_run) if _last_run > 0 else float("inf")
+            _overdue   = _elapsed >= _sleep
 
-            if not _enabled:
-                # Sleep in short chunks so we re-check enable flag quickly
+            if _run_now:
+                # Immediate run — honour regardless of schedule or enabled state
+                _b._bsc_aa_run_now = False
+            elif _enabled and _overdue:
+                # Interval elapsed (or never run yet) — run immediately
+                pass
+            elif _enabled and not _overdue:
+                # Wait for the remaining slice of the interval, then re-evaluate
+                _remaining = max(5, _sleep - int(_elapsed))
+                _b._bsc_aa_event.wait(timeout=_remaining)
+                _b._bsc_aa_event.clear()
+                continue
+            else:
+                # Disabled and no run_now — check every 60 s for a change
                 _b._bsc_aa_event.wait(timeout=60)
                 _b._bsc_aa_event.clear()
-                if not getattr(_b, "_bsc_aa_run_now", False): continue
-            _b._bsc_aa_run_now = False
+                continue
 
-            # Wait for the configured interval (or wake early via event)
-            # Wait for interval OR run_now flag
-            _b._bsc_aa_event.clear()
-            # Honour run_now flag even if auto-analyse is disabled
-            _force_run = getattr(_b, "_bsc_aa_run_now", False)
-            if _force_run:
-                _b._bsc_aa_run_now = False
-            _b._bsc_aa_event.wait(timeout=_sleep)
-
-            # Re-read cfg — might have changed while sleeping
-            _cfg_snap = dict(_b._bsc_cfg)
-            if not _cfg_snap.get("auto_analyse_enabled", False):
-                if not _force_run: continue
-
-            _syms = list(_cfg_snap.get("watchlist", []))
+            # ── Run analysis ──────────────────────────────────────────────
+            _cfg_snap  = dict(_b._bsc_cfg)
+            _syms      = list(_cfg_snap.get("watchlist", []))
             if not _syms:
+                _aat.sleep(30)
                 continue
 
             _direction = _cfg_snap.get("trade_direction", "long")
 
             if _direction == "auto":
-                # Run both, pick winner by average pass rate
                 _res_l = _analyze_market_conditions(
                     dict(_cfg_snap), _syms, _NoopProg(), _NoopText(),
                     direction_override="long")
@@ -5409,18 +5414,19 @@ def _auto_analyse_loop():
                 _avg_s = _res_s.get("avg_pass_rate", 0.0)
                 _winner = "short" if _avg_s > _avg_l else "long"
                 _b._bsc_auto_direction = _winner
-                _res = _res_l if _winner == "long" else _res_s
+                _res      = _res_l if _winner == "long" else _res_s
                 _am_short = (_winner == "short")
             else:
-                _res = _analyze_market_conditions(
+                _res      = _analyze_market_conditions(
                     dict(_cfg_snap), _syms, _NoopProg(), _NoopText())
                 _am_short = (_direction == "short")
 
             _recs = _res.get("recommendations", {})
             if not _recs:
+                _b._bsc_aa_applied_at = _aat.time()  # mark ran even if no recs
                 continue
 
-            # Build diff and apply
+            # ── Build diff and apply ───────────────────────────────────────
             _diff  = {}
             _apply = {}
             for _fk, _rv in _recs.items():
@@ -5434,8 +5440,7 @@ def _auto_analyse_loop():
             if _apply:
                 with _config_lock:
                     _b._bsc_cfg.update(_apply)
-                _updated = dict(_b._bsc_cfg)
-                save_config(_updated)
+                save_config(dict(_b._bsc_cfg))
 
             _b._bsc_aa_diff       = _diff
             _b._bsc_aa_applied_at = _aat.time()
