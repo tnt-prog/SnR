@@ -6482,6 +6482,8 @@ with st.sidebar:
         _dbg_shutdown = getattr(_b, "_bsc_aa_shutdown", False)
         _dbg_applied  = getattr(_b, "_bsc_aa_applied_at", 0.0)
         _dbg_watchlist= list(_snap_cfg.get("watchlist", []))
+        _dbg_aa_errs = [e for e in getattr(_b, "_bsc_error_log", [])
+                        if e.get("source") == "auto-analyse"]
         st.markdown(
             f"**Thread alive:** {_dbg_alive}  \n"
             f"**Code version:** stored={_dbg_ver_cur} / expected={_AA_THREAD_VER}  \n"
@@ -6492,8 +6494,6 @@ with st.sidebar:
             f"**Watchlist size:** {len(_dbg_watchlist)}  \n"
             f"**AA errors:** {len(_dbg_aa_errs)}  \n"
         )
-        _dbg_aa_errs = [e for e in getattr(_b, "_bsc_error_log", [])
-                        if e.get("source") == "auto-analyse"]
         if _dbg_aa_errs:
             for _ee in _dbg_aa_errs[-3:]:
                 st.caption(f"❌ {_ee.get('ts','?')}: {_ee.get('message','?')[:200]}")
