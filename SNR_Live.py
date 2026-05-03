@@ -2317,6 +2317,7 @@ def process(sym, cfg: dict, super_counter: dict = None, super_lock=None,
                 "id":             str(uuid.uuid4())[:8],
                 "timestamp":      dubai_now().isoformat(),
                 "symbol":         sym,
+                "direction":      direction,
                 "entry":          entry_q,
                 "tp":             tp,
                 "sl":             sl,
@@ -2605,7 +2606,6 @@ def process(sym, cfg: dict, super_counter: dict = None, super_lock=None,
             "timestamp":      dubai_now().isoformat(),
             "symbol":         sym,
             "direction":      direction,
-                    "direction":      direction,
             "entry":          entry,
             "tp":             tp,
             "sl":             sl,
@@ -2707,7 +2707,27 @@ def scan(cfg: dict, super_slots_remaining: int = None, skip_symbols: set = None)
 
     with _filter_lock:
         _filter_counts["scan_completed_at"] = time.time()
-    return sorted(results, key=lambda x: x["symbol"]), _filter_counts.get("errors", 0)
+    # ── Priority sort (best setups get first slot when MAX_OPEN_TRADES cap is hit)
+    # 1) Super Setups first
+    # 2) Highest volume ratio (strongest momentum spike — direction-agnostic)
+    # 3) Most extreme RSI: lowest for long (oversold), highest for short (overbought)
+    # 4) Symbol alphabetically as final stable tiebreaker
+    def _sig_sort_key(s):
+        _is_super = 0 if s.get("is_super_setup") else 1          # 0 = better
+        _c = s.get("criteria", {})
+        _vol = _c.get("vol_ratio", 0)
+        try:    _vol = float(_vol)
+        except: _vol = 0.0
+        _rsi = _c.get("rsi_5m", 50)
+        try:    _rsi = float(_rsi)
+        except: _rsi = 50.0
+        # For short: highest RSI = most overbought = best → negate RSI (lower = better sort key)
+        # For long:  lowest RSI  = most oversold  = best → use RSI directly
+        _is_short = s.get("direction", "long") == "short"
+        _rsi_key  = -_rsi if _is_short else _rsi
+        return (_is_super, -_vol, _rsi_key, s["symbol"])
+
+    return sorted(results, key=_sig_sort_key), _filter_counts.get("errors", 0)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Open signal tracker
@@ -11023,9 +11043,9 @@ def _build_diagnostics_text() -> str:
     return "\n".join(_lines)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────────────────────
 # Download button -- calls the builder and streams the result
-# ─────────────────────────────────────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────────────────────
 try:
     _diag_text = _build_diagnostics_text()
 except Exception as _diag_exc:
