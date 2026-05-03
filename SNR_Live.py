@@ -718,6 +718,8 @@ if "_scanner_initialised" not in st.session_state:
         _b._bsc_aa_diff         = {}        # last auto-apply diff {key: (old, new)}
         _b._bsc_aa_applied_at   = 0.0       # unix ts of last auto-apply
         _b._bsc_aa_run_now       = False     # set True to trigger immediate run
+        _b._bsc_aa_shutdown     = False     # set True to stop thread on next iter
+        _b._bsc_aa_thread_ver   = 0         # last started version (0 = never)
         _b._bsc_api_conn_status = {          # result of last "Test Connection" call
             "status":      "untested",       # "untested" | "ok" | "error"
             "message":     "",
@@ -760,6 +762,10 @@ if not hasattr(_b, "_bsc_aa_applied_at"):
     _b._bsc_aa_applied_at = 0.0
 if not hasattr(_b, "_bsc_aa_run_now"):
     _b._bsc_aa_run_now = False
+if not hasattr(_b, "_bsc_aa_shutdown"):
+    _b._bsc_aa_shutdown = False
+if not hasattr(_b, "_bsc_aa_thread_ver"):
+    _b._bsc_aa_thread_ver = 0
 
 _cfg             = _b._bsc_cfg
 _log             = _b._bsc_log
@@ -5297,19 +5303,29 @@ def _bg_loop():
 # Auto-Analyse background thread — runs _analyze_market_conditions every N h
 # and applies the recommended settings automatically.
 # ─────────────────────────────────────────────────────────────────────────────
+# Version stamp — bump this integer whenever _auto_analyse_loop logic changes.
+# _ensure_scanner() compares it against _b._bsc_aa_thread_ver and forces a
+# thread restart when they differ, so code fixes take effect immediately
+# without requiring a full Streamlit app restart.
+_AA_THREAD_VER = 3
+
+# Noop widget wrappers at module level — thread always picks up the current
+# definition via __globals__ lookup, even without a restart.
+class _AaNoopProg:
+    def __call__(self, v, text=None): pass
+    def progress(self, v, text=None): pass
+    def empty(self): pass
+class _AaNoopText:
+    def __call__(self, *a, **kw): pass
+    def text(self, *a, **kw): pass
+    def empty(self): pass
+
 def _auto_analyse_loop():
     """Background thread: periodic market analysis + auto-apply recommendations."""
     import time as _aat
 
     # Minimal no-op wrappers so _analyze_market_conditions gets valid widgets
-    class _NoopProg:
-        def __call__(self, v, text=None): pass
-        def progress(self, v, text=None): pass
-        def empty(self): pass
-    class _NoopText:
-        def __call__(self, *a, **kw): pass
-        def text(self, *a, **kw): pass
-        def empty(self): pass
+    # Use module-level _AaNoopProg/_AaNoopText — always current via __globals__
 
     # Key map: filter_result_key → (cfg_key, value_extractor)
     # value_extractor(recs[k], am_short) → (cfg_key, value) or list of (cfg_key, value)
@@ -5366,6 +5382,10 @@ def _auto_analyse_loop():
 
     while True:
         try:
+            # Exit cleanly if _ensure_scanner signalled a version upgrade
+            if getattr(_b, "_bsc_aa_shutdown", False):
+                _b._bsc_aa_shutdown = False
+                return
             _cfg_snap  = dict(_b._bsc_cfg)
             _enabled   = _cfg_snap.get("auto_analyse_enabled", False)
             _hours     = max(0.5, float(_cfg_snap.get("auto_analyse_hours", 2.0)))
@@ -5405,10 +5425,10 @@ def _auto_analyse_loop():
 
             if _direction == "auto":
                 _res_l = _analyze_market_conditions(
-                    dict(_cfg_snap), _syms, _NoopProg(), _NoopText(),
+                    dict(_cfg_snap), _syms, _AaNoopProg(), _AaNoopText(),
                     direction_override="long")
                 _res_s = _analyze_market_conditions(
-                    dict(_cfg_snap), _syms, _NoopProg(), _NoopText(),
+                    dict(_cfg_snap), _syms, _AaNoopProg(), _AaNoopText(),
                     direction_override="short")
                 _avg_l = _res_l.get("avg_pass_rate", 50.0)
                 _avg_s = _res_s.get("avg_pass_rate", 0.0)
@@ -5418,7 +5438,7 @@ def _auto_analyse_loop():
                 _am_short = (_winner == "short")
             else:
                 _res      = _analyze_market_conditions(
-                    dict(_cfg_snap), _syms, _NoopProg(), _NoopText())
+                    dict(_cfg_snap), _syms, _AaNoopProg(), _AaNoopText())
                 _am_short = (_direction == "short")
 
             _recs = _res.get("recommendations", {})
@@ -5460,6 +5480,14 @@ def _ensure_scanner():
                               name="okx-watcher")
         wt.start(); _b._bsc_watcher_thread = wt
     # ── Start/restart the auto-analyse thread ───────────────────────────────
+    # Force-restart aa thread when code version changes
+    if getattr(_b, "_bsc_aa_thread_ver", 0) != _AA_THREAD_VER:
+        _b._bsc_aa_shutdown = True        # signal old thread to stop
+        if getattr(_b, "_bsc_aa_event", None):
+            _b._bsc_aa_event.set()        # wake it so it sees the flag
+        _b._bsc_aa_thread     = None      # force fresh start
+        _b._bsc_aa_thread_ver = _AA_THREAD_VER
+
     if _b._bsc_aa_thread is None or not _b._bsc_aa_thread.is_alive():
         at = threading.Thread(target=_auto_analyse_loop, daemon=True,
                               name="okx-auto-analyse")
@@ -6434,6 +6462,15 @@ with st.sidebar:
             if getattr(_b, "_bsc_aa_event", None):
                 _b._bsc_aa_event.set()
             st.toast("⚙️ Auto-analyse triggered — check back in a minute.", icon="🤖")
+    # Show last auto-analyse error if any
+    _aa_errors = [e for e in getattr(_b, "_bsc_error_log", [])
+                  if e.get("source") == "auto-analyse"]
+    if _aa_errors:
+        _last_aa_err = _aa_errors[-1]
+        st.error(
+            f"\u26a0\ufe0f Auto-analyse error: "
+            f"{_last_aa_err.get('message', '?')[:120]}",
+            icon=None)
     st.divider()
     # ── Auto-Analyse diff badge ───────────────────────────────────────
     _aa_diff = getattr(_b, "_bsc_aa_diff", {})
