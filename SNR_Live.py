@@ -5313,6 +5313,8 @@ def _analyze_market_conditions(cfg: dict, symbols: list,
         return {}
 
     tp_pct = float(cfg.get("tp_pct", 1.5))
+    _am_dir   = cfg.get("trade_direction", "long")
+    _am_short = _am_dir == "short"
 
     # Per-filter accumulators — pass/fail counts + raw value lists where useful
     _d: dict = {
@@ -5359,29 +5361,34 @@ def _analyze_market_conditions(cfg: dict, symbols: list,
             closes_3m  = [c["close"] for c in m3]
 
             # ── F2: PDZ 15m ───────────────────────────────────────────────
-            _p15, _z15 = calc_pdz_zone(m15, entry, tp_pct / 100.0)
+            _pdz_fn_am = calc_pdz_zone_short if _am_short else calc_pdz_zone
+            _p15, _z15 = _pdz_fn_am(m15, entry, tp_pct / 100.0)
             _d["f2_pdz15m"]["zones"].append(_z15)
             _d["f2_pdz15m"]["pass" if _p15 else "fail"] += 1
 
             # ── F3: PDZ 5m ────────────────────────────────────────────────
-            _p5, _z5 = calc_pdz_zone(m5, entry, tp_pct / 100.0)
+            _p5, _z5 = _pdz_fn_am(m5, entry, tp_pct / 100.0)
             _d["f3_pdz5m"]["zones"].append(_z5)
             _d["f3_pdz5m"]["pass" if _p5 else "fail"] += 1
 
             # ── F4: RSI 5m ────────────────────────────────────────────────
             _rsi5 = (calc_rsi_series(closes_5m) or [None])[-1]
             if _rsi5 is not None:
-                _d["f4_rsi5m"]["values"].append(_rsi5)
-                _d["f4_rsi5m"][
-                    "pass" if _rsi5 >= float(cfg.get("rsi_5m_min", 30)) else "fail"
-                ] += 1
+                _f4_ok = (_rsi5 <= float(cfg.get("rsi_5m_max_short", 70))
+                          if _am_short
+                          else _rsi5 >= float(cfg.get("rsi_5m_min", 30)))
+                _d["f4_rsi5m"]["pass" if _f4_ok else "fail"] += 1
 
             # ── F5: RSI 1h ────────────────────────────────────────────────
             _rsi1h = (calc_rsi_series(closes_1h) or [None])[-1]
             if _rsi1h is not None:
                 _d["f5_rsi1h"]["values"].append(_rsi1h)
-                _rlo = float(cfg.get("rsi_1h_min", 30))
-                _rhi = float(cfg.get("rsi_1h_max", 95))
+                if _am_short:
+                    _rlo = float(cfg.get("rsi_1h_min_short", 30))
+                    _rhi = float(cfg.get("rsi_1h_max_short", 75))
+                else:
+                    _rlo = float(cfg.get("rsi_1h_min", 30))
+                    _rhi = float(cfg.get("rsi_1h_max", 95))
                 _d["f5_rsi1h"]["pass" if _rlo <= _rsi1h <= _rhi else "fail"] += 1
 
             # ── F5b: ATR ratio 15m ────────────────────────────────────────
@@ -5403,7 +5410,8 @@ def _analyze_market_conditions(cfg: dict, symbols: list,
             ]:
                 _ema = calc_ema(_cl, max(2, int(cfg.get(_pk, 12))))
                 if _ema:
-                    _d[_fk]["pass" if entry > _ema[-1] else "fail"] += 1
+                    _ema_ok = entry < _ema[-1] if _am_short else entry > _ema[-1]
+                    _d[_fk]["pass" if _ema_ok else "fail"] += 1
 
             # ── F7: MACD per timeframe ────────────────────────────────────
             for _fk, _cl in [
@@ -5411,7 +5419,8 @@ def _analyze_market_conditions(cfg: dict, symbols: list,
                 ("f7_macd_5m",  closes_5m),
                 ("f7_macd_15m", closes_15m),
             ]:
-                _ok, _ = macd_bullish_and_value(_cl)
+                _macd_fn_am = macd_bearish_and_value if _am_short else macd_bullish_and_value
+                _ok, _ = _macd_fn_am(_cl)
                 _d[_fk]["pass" if _ok else "fail"] += 1
 
             # ── F8: Parabolic SAR per timeframe ───────────────────────────
@@ -5421,7 +5430,8 @@ def _analyze_market_conditions(cfg: dict, symbols: list,
                 ("f8_sar_15m", m15),
             ]:
                 _sar = calc_parabolic_sar(_bars)
-                _d[_fk]["pass" if (_sar and _sar[-1][1]) else "fail"] += 1
+                _sar_ok = (_sar and (not _sar[-1][1] if _am_short else _sar[-1][1]))
+                _d[_fk]["pass" if _sar_ok else "fail"] += 1
 
             # ── F9: Volume spike 15m ──────────────────────────────────────
             _lkb  = max(2, int(cfg.get("vol_spike_lookback", 20)))
@@ -5442,7 +5452,7 @@ def _analyze_market_conditions(cfg: dict, symbols: list,
             _es = calc_ema(closes_15m, _sp)
             if _ef and _es:
                 _d["f10_ema_cross"][
-                    "pass" if _ef[-1] > _es[-1] else "fail"
+                    "pass" if (_ef[-1] < _es[-1] if _am_short else _ef[-1] > _es[-1]) else "fail"
                 ] += 1
 
         except Exception:
@@ -5478,14 +5488,18 @@ def _analyze_market_conditions(cfg: dict, symbols: list,
         _zones  = _d[_fk]["zones"]
         _disc   = (_zones.count("Discount") / len(_zones) * 100) if _zones else 0
         _prem   = (_zones.count("Premium")  / len(_zones) * 100) if _zones else 0
+        _target_zone = "Premium" if _am_short else "Discount"
+        _other_zone  = "Discount" if _am_short else "Premium"
+        _target_pct  = _prem if _am_short else _disc
+        _other_pct   = _disc if _am_short else _prem
         if _rate < 15:
             _rec    = "Consider OFF"
-            _reason = (f"Only {_rate:.0f}% qualify — market is mostly Premium ({_prem:.0f}%) "
-                       f"/ Equilibrium, only {_disc:.0f}% in Discount zone")
+            _reason = (f"Only {_rate:.0f}% qualify — market is mostly {_other_zone} ({_other_pct:.0f}%) "
+                       f"/ Equilibrium, only {_target_pct:.0f}% in {_target_zone} zone")
         elif _rate < 30:
             _rec    = f"ON – tight ({_tf_label})"
-            _reason = (f"{_rate:.0f}% qualify — limited Discount zones ({_disc:.0f}%), "
-                       f"bullish pockets scarce right now")
+            _scarce = "bearish pockets scarce right now" if _am_short else "bullish pockets scarce right now"
+            _reason = f"{_rate:.0f}% qualify — limited {_target_zone} zones ({_target_pct:.0f}%), {_scarce}"
         else:
             _rec    = "ON ✓"
             _reason = (f"{_rate:.0f}% qualify — healthy zone distribution "
