@@ -11041,4 +11041,3 @@ st.download_button(
     mime="text/plain",
     key="diag_download_btn",
 )
-)
