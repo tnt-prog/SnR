@@ -7751,11 +7751,10 @@ if _dash_dir == "auto":
     _dash_aa_hours   = float(_snap_cfg.get("auto_analyse_hours", 2.0))
     if _dash_aa_ts > 0:
         try:
-            import pytz as _dptz
-            from datetime import datetime as _dpdt
-            _dxb_dp = _dptz.timezone("Asia/Dubai")
-            _dash_since = _dpdt.fromtimestamp(_dash_aa_ts, _dxb_dp).strftime("%H:%M GST")
+            from datetime import datetime as _dpdt, timezone as _dptz, timedelta as _dptd
             import time as _dpt
+            _gst_tz     = _dptz(_dptd(hours=4))
+            _dash_since = _dpdt.fromtimestamp(_dash_aa_ts, _gst_tz).strftime("%H:%M GST")
             _dash_next_secs = max(0, int(_dash_aa_hours * 3600 - (_dpt.time() - _dash_aa_ts)))
             _dash_next_min  = _dash_next_secs // 60
             _dash_next_str  = f"next in {_dash_next_min}m" if _dash_aa_enabled else "auto-analyse off"
@@ -11041,4 +11040,5 @@ st.download_button(
     file_name=_diag_filename,
     mime="text/plain",
     key="diag_download_btn",
+)
 )
