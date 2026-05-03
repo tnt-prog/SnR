@@ -220,7 +220,9 @@ DEFAULT_CONFIG: dict = {
     # ── Trade direction ──────────────────────────────────────────────────────
     # "long"  → only scan for long (buy) setups  (original behaviour)
     # "short" → only scan for short (sell) setups (inverted filters)
-    # "both"  → scan for both; long has priority if same coin qualifies
+    # "auto"  → analyse both directions, pick whichever has more qualifying coins
+    "auto_analyse_enabled":  False,  # run market analyser automatically in background
+    "auto_analyse_hours":    2.0,    # interval between auto-analyse runs (hours)
     "trade_direction":       "long",
     # ── Short-specific RSI thresholds (used when direction = short/both) ─────
     "rsi_5m_max_short":      70,    # reject if RSI 5m > this (overbought exit zone)
@@ -710,6 +712,11 @@ if "_scanner_initialised" not in st.session_state:
         # cycle, no other event — manual resume only. Do not add any code path
         # that clears this flag automatically.
         _b._bsc_sl_paused     = False
+        _b._bsc_auto_direction  = "long"   # resolved direction when trade_direction=="auto"
+        _b._bsc_aa_thread       = None      # auto-analyse background thread
+        _b._bsc_aa_event        = threading.Event()  # wake early
+        _b._bsc_aa_diff         = {}        # last auto-apply diff {key: (old, new)}
+        _b._bsc_aa_applied_at   = 0.0       # unix ts of last auto-apply
         _b._bsc_api_conn_status = {          # result of last "Test Connection" call
             "status":      "untested",       # "untested" | "ok" | "error"
             "message":     "",
@@ -740,6 +747,16 @@ if not hasattr(_b, "_bsc_watcher_last_ts"):
     _b._bsc_watcher_last_ts = 0
 if not hasattr(_b, "_bsc_watcher_last_dur"):
     _b._bsc_watcher_last_dur = 0.0
+if not hasattr(_b, "_bsc_auto_direction"):
+    _b._bsc_auto_direction = "long"
+if not hasattr(_b, "_bsc_aa_thread"):
+    _b._bsc_aa_thread = None
+if not hasattr(_b, "_bsc_aa_event"):
+    _b._bsc_aa_event = threading.Event()
+if not hasattr(_b, "_bsc_aa_diff"):
+    _b._bsc_aa_diff = {}
+if not hasattr(_b, "_bsc_aa_applied_at"):
+    _b._bsc_aa_applied_at = 0.0
 
 _cfg             = _b._bsc_cfg
 _log             = _b._bsc_log
@@ -1747,7 +1764,7 @@ def pre_filter_by_ticker(symbols: list, tickers: dict,
         short_ok = (high24h <= 0 or last <= high24h * PRE_FILTER_HIGH_BUFFER)
         if direction == "long"  and not long_ok:  continue
         if direction == "short" and not short_ok: continue
-        if direction == "both"  and not (long_ok or short_ok): continue
+        if direction in ("both", "auto") and not (long_ok or short_ok): continue
         kept.append(sym)
     return kept
 
@@ -2627,6 +2644,8 @@ def scan(cfg: dict, super_slots_remaining: int = None, skip_symbols: set = None)
     # A — bulk ticker pre-filter (1 API call → eliminates ~70 % of coins)
     tickers = get_bulk_tickers()
     _direction = cfg.get("trade_direction", "long")
+    if _direction == "auto":
+        _direction = getattr(_b, "_bsc_auto_direction", "long")
     if cfg.get("use_pre_filter", True):
         pre_filtered = pre_filter_by_ticker(symbols, tickers, direction=_direction)
     else:
@@ -5271,6 +5290,152 @@ def _bg_loop():
         _rescan_event.wait(timeout=sleep_sec)
         _rescan_event.clear()
 
+# ────────────────────────   ──────────────────────────────────  ─────────────────
+# Auto-Analyse background thread — runs _analyze_market_conditions every N h
+# and applies the recommended settings automatically.
+# ─────────────────────────────────────────────────────────────────────────────
+def _auto_analyse_loop():
+    """Background thread: periodic market analysis + auto-apply recommendations."""
+    import time as _aat
+
+    # Minimal no-op wrappers so _analyze_market_conditions gets valid widgets
+    class _NoopProg:
+        def __call__(self, v): pass
+        def empty(self): pass
+    class _NoopText:
+        def __call__(self, *a, **kw): pass
+        def text(self, *a, **kw): pass
+        def empty(self): pass
+
+    # Key map: filter_result_key → (cfg_key, value_extractor)
+    # value_extractor(recs[k], am_short) → (cfg_key, value) or list of (cfg_key, value)
+    def _extract(fk, rec_val, am_short):
+        """Convert a recommendation rec string/value to (cfg_key, python_value) pairs."""
+        _bool_map = {
+            "f2_pdz15m":   "use_pdz_15m",
+            "f3_pdz5m":    "use_pdz_5m",
+            "f5b_atr":     None,   # handled below as string
+            "f6_ema_3m":   "use_ema_3m",
+            "f6_ema_5m":   "use_ema_5m",
+            "f6_ema_15m":  "use_ema_15m",
+            "f7_macd_3m":  "use_macd_3m",
+            "f7_macd_5m":  "use_macd_5m",
+            "f7_macd_15m": "use_macd_15m",
+            "f8_sar_3m":   "use_sar_3m",
+            "f8_sar_5m":   "use_sar_5m",
+            "f8_sar_15m":  "use_sar_15m",
+            "f10_ema_cross": "use_ema_cross_15m",
+        }
+        if fk in _bool_map and _bool_map[fk]:
+            _cfg_key = _bool_map[fk]
+            _on = "OFF" not in str(rec_val)
+            return [(_cfg_key, _on)]
+        if fk == "f5b_atr":
+            if rec_val in ("Strict", "Normal", "Relaxed"):
+                return [("atr_mode", rec_val)]
+            return []
+        if fk == "f4_rsi5m":
+            # rec is "≥N" (long) or "≤N" (short)
+            import re as _re
+            m = _re.search(r"\d+", str(rec_val))
+            if not m: return []
+            val = int(m.group())
+            if am_short:
+                return [("rsi_5m_max_short", val)]
+            return [("rsi_5m_min", val)]
+        if fk == "f5_rsi1h":
+            # rec is "N–M"
+            import re as _re
+            nums = _re.findall(r"\d+", str(rec_val))
+            if len(nums) < 2: return []
+            lo, hi = int(nums[0]), int(nums[1])
+            if am_short:
+                return [("rsi_1h_min_short", lo), ("rsi_1h_max_short", hi)]
+            return [("rsi_1h_min", lo), ("rsi_1h_max", hi)]
+        if fk == "f9_vol":
+            # rec is "≥N×"
+            import re as _re
+            m = _re.search(r"[\d.]+", str(rec_val))
+            if not m: return []
+            return [("vol_spike_mult", float(m.group()))]
+        return []
+
+    while True:
+        try:
+            _cfg_snap = dict(_b._bsc_cfg)
+            _enabled  = _cfg_snap.get("auto_analyse_enabled", False)
+            _hours    = max(0.5, float(_cfg_snap.get("auto_analyse_hours", 2.0)))
+            _sleep    = int(_hours * 3600)
+
+            if not _enabled:
+                # Sleep in short chunks so we re-check enable flag quickly
+                _b._bsc_aa_event.wait(timeout=60)
+                _b._bsc_aa_event.clear()
+                continue
+
+            # Wait for the configured interval (or wake early via event)
+            _b._bsc_aa_event.wait(timeout=_sleep)
+            _b._bsc_aa_event.clear()
+
+            # Re-read cfg — might have changed while sleeping
+            _cfg_snap = dict(_b._bsc_cfg)
+            if not _cfg_snap.get("auto_analyse_enabled", False):
+                continue
+
+            _syms = list(_cfg_snap.get("watchlist", []))
+            if not _syms:
+                continue
+
+            _direction = _cfg_snap.get("trade_direction", "long")
+
+            if _direction == "auto":
+                # Run both, pick winner by average pass rate
+                _res_l = _analyze_market_conditions(
+                    dict(_cfg_snap), _syms, _NoopProg(), _NoopText(),
+                    direction_override="long")
+                _res_s = _analyze_market_conditions(
+                    dict(_cfg_snap), _syms, _NoopProg(), _NoopText(),
+                    direction_override="short")
+                _avg_l = _res_l.get("avg_pass_rate", 50.0)
+                _avg_s = _res_s.get("avg_pass_rate", 0.0)
+                _winner = "short" if _avg_s > _avg_l else "long"
+                _b._bsc_auto_direction = _winner
+                _res = _res_l if _winner == "long" else _res_s
+                _am_short = (_winner == "short")
+            else:
+                _res = _analyze_market_conditions(
+                    dict(_cfg_snap), _syms, _NoopProg(), _NoopText())
+                _am_short = (_direction == "short")
+
+            _recs = _res.get("recommendations", {})
+            if not _recs:
+                continue
+
+            # Build diff and apply
+            _diff  = {}
+            _apply = {}
+            for _fk, _rv in _recs.items():
+                _rec_val = _rv.get("rec", "")
+                for _ckey, _cval in _extract(_fk, _rec_val, _am_short):
+                    _old = _cfg_snap.get(_ckey)
+                    if _old != _cval:
+                        _diff[_ckey]  = (_old, _cval)
+                        _apply[_ckey] = _cval
+
+            if _apply:
+                with _config_lock:
+                    _b._bsc_cfg.update(_apply)
+                _updated = dict(_b._bsc_cfg)
+                save_config(_updated)
+
+            _b._bsc_aa_diff       = _diff
+            _b._bsc_aa_applied_at = _aat.time()
+
+        except Exception as _aa_err:
+            _append_error("auto-analyse", str(_aa_err))
+            _aat.sleep(60)
+
+
 def _ensure_scanner():
     if _b._bsc_thread is None or not _b._bsc_thread.is_alive():
         t = threading.Thread(target=_bg_loop, daemon=True, name="okx-scanner")
@@ -5280,12 +5445,18 @@ def _ensure_scanner():
         wt = threading.Thread(target=_watcher_loop, daemon=True,
                               name="okx-watcher")
         wt.start(); _b._bsc_watcher_thread = wt
+    # ── Start/restart the auto-analyse thread ───────────────────────────────
+    if _b._bsc_aa_thread is None or not _b._bsc_aa_thread.is_alive():
+        at = threading.Thread(target=_auto_analyse_loop, daemon=True,
+                              name="okx-auto-analyse")
+        at.start(); _b._bsc_aa_thread = at
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Market Condition Analyser — backend (on-demand, called from bottom of page)
 # ─────────────────────────────────────────────────────────────────────────────
 def _analyze_market_conditions(cfg: dict, symbols: list,
-                                progress_bar, status_text) -> dict:
+                                progress_bar, status_text,
+                                direction_override: str = "") -> dict:
     """
     Scan ALL watchlist coins live, compute every filter metric for each coin,
     and return per-filter pass rates with recommendations.
@@ -5313,7 +5484,9 @@ def _analyze_market_conditions(cfg: dict, symbols: list,
         return {}
 
     tp_pct = float(cfg.get("tp_pct", 1.5))
-    _am_dir   = cfg.get("trade_direction", "long")
+    _am_dir   = direction_override if direction_override else cfg.get("trade_direction", "long")
+    if _am_dir == "auto":
+        _am_dir = getattr(_b, "_bsc_auto_direction", "long")
     _am_short = _am_dir == "short"
 
     # Per-filter accumulators — pass/fail counts + raw value lists where useful
@@ -5517,60 +5690,102 @@ def _analyze_market_conditions(cfg: dict, symbols: list,
     # ── F4: RSI 5m ────────────────────────────────────────────────────────────
     _r4     = _pr("f4_rsi5m")
     _v5     = _d["f4_rsi5m"]["values"]
-    _cur_r5 = int(cfg.get("rsi_5m_min", 30))
-    _med_r5 = round(_stats.median(_v5)) if _v5 else _cur_r5
-    # Find the RSI min where ~35% of coins pass (≥ threshold)
-    _best_r5 = _cur_r5
-    for _t in range(20, 60):
-        _pr_t = sum(1 for v in _v5 if v >= _t) / len(_v5) * 100 if _v5 else 0
-        if abs(_pr_t - 35) < abs(
-            (sum(1 for v in _v5 if v >= _best_r5) / len(_v5) * 100 if _v5 else 0) - 35
-        ):
-            _best_r5 = _t
-    _rec_pr4 = (sum(1 for v in _v5 if v >= _best_r5) / len(_v5) * 100) if _v5 else _r4
-    if _best_r5 == _cur_r5:
-        _rsn4 = f"Optimal — median 5m RSI is {_med_r5}, {_r4:.0f}% currently pass"
-    elif _best_r5 > _cur_r5:
-        _rsn4 = f"Market is strong (median 5m RSI {_med_r5}) — raise min from {_cur_r5} → {_best_r5} for better quality"
+    if _am_short:
+        # Short: find best MAX threshold (coins pass if RSI ≤ t)
+        _cur_r5 = int(cfg.get("rsi_5m_max_short", 70))
+        _best_r5 = _cur_r5
+        for _t in range(50, 90):
+            _pr_t = sum(1 for v in _v5 if v <= _t) / len(_v5) * 100 if _v5 else 0
+            if abs(_pr_t - 35) < abs(
+                (sum(1 for v in _v5 if v <= _best_r5) / len(_v5) * 100 if _v5 else 0) - 35
+            ):
+                _best_r5 = _t
+        _rec_pr4 = (sum(1 for v in _v5 if v <= _best_r5) / len(_v5) * 100) if _v5 else _r4
+        _med_r5  = round(_stats.median(_v5)) if _v5 else _cur_r5
+        if _best_r5 == _cur_r5:
+            _rsn4 = f"Optimal — median 5m RSI is {_med_r5}, {_r4:.0f}% currently pass"
+        elif _best_r5 < _cur_r5:
+            _rsn4 = (f"Market cooling (median 5m RSI {_med_r5}) — lower max "                     f"from {_cur_r5} → {_best_r5} for better short entries")
+        else:
+            _rsn4 = (f"Market still hot (median 5m RSI {_med_r5}) — raise max "                     f"from {_cur_r5} → {_best_r5} to get more candidates")
+        recs["f4_rsi5m"] = {
+            "filter": "F4 — RSI 5m max (Short)",
+            "current": f"\u2264{_cur_r5}",
+            "current_pass_rate": _r4,
+            "rec": f"\u2264{_best_r5}",
+            "rec_pass_rate": _rec_pr4,
+            "reason": _rsn4,
+            "icon": _icon(_r4),
+        }
     else:
-        _rsn4 = f"Market is weak (median 5m RSI {_med_r5}) — lower min from {_cur_r5} → {_best_r5} to get more candidates"
-    recs["f4_rsi5m"] = {
-        "filter": "F4 — RSI 5m min",
-        "current": f"≥{_cur_r5}",
-        "current_pass_rate": _r4,
-        "rec": f"≥{_best_r5}",
-        "rec_pass_rate": _rec_pr4,
-        "reason": _rsn4,
-        "icon": _icon(_r4),
-    }
+        # Long: find best MIN threshold (coins pass if RSI ≥ t)
+        _cur_r5 = int(cfg.get("rsi_5m_min", 30))
+        _med_r5 = round(_stats.median(_v5)) if _v5 else _cur_r5
+        _best_r5 = _cur_r5
+        for _t in range(20, 60):
+            _pr_t = sum(1 for v in _v5 if v >= _t) / len(_v5) * 100 if _v5 else 0
+            if abs(_pr_t - 35) < abs(
+                (sum(1 for v in _v5 if v >= _best_r5) / len(_v5) * 100 if _v5 else 0) - 35
+            ):
+                _best_r5 = _t
+        _rec_pr4 = (sum(1 for v in _v5 if v >= _best_r5) / len(_v5) * 100) if _v5 else _r4
+        if _best_r5 == _cur_r5:
+            _rsn4 = f"Optimal — median 5m RSI is {_med_r5}, {_r4:.0f}% currently pass"
+        elif _best_r5 > _cur_r5:
+            _rsn4 = (f"Market is strong (median 5m RSI {_med_r5}) — "                     f"raise min from {_cur_r5} \u2192 {_best_r5} for better quality")
+        else:
+            _rsn4 = (f"Market is weak (median 5m RSI {_med_r5}) — "                     f"lower min from {_cur_r5} \u2192 {_best_r5} to get more candidates")
+        recs["f4_rsi5m"] = {
+            "filter": "F4 — RSI 5m min",
+            "current": f"\u2265{_cur_r5}",
+            "current_pass_rate": _r4,
+            "rec": f"\u2265{_best_r5}",
+            "rec_pass_rate": _rec_pr4,
+            "reason": _rsn4,
+            "icon": _icon(_r4),
+        }
 
     # ── F5: RSI 1h range ──────────────────────────────────────────────────────
     _r5      = _pr("f5_rsi1h")
     _v1h     = _d["f5_rsi1h"]["values"]
-    _cur_lo  = int(cfg.get("rsi_1h_min", 30))
-    _cur_hi  = int(cfg.get("rsi_1h_max", 95))
     _med_1h  = round(_stats.median(_v1h)) if _v1h else 50
     if _v1h:
         _sv = sorted(_v1h)
-        # Range that captures ~60% of coins — 20th to 80th percentile, clamped
         _lo_idx = max(0, int(0.20 * len(_sv)))
         _hi_idx = min(len(_sv) - 1, int(0.80 * len(_sv)))
         _rec_lo = max(20, round(_sv[_lo_idx]))
         _rec_hi = min(95, round(_sv[_hi_idx]))
     else:
-        _rec_lo, _rec_hi = _cur_lo, _cur_hi
-    _rec_pr5 = (sum(1 for v in _v1h if _rec_lo <= v <= _rec_hi) / len(_v1h) * 100) if _v1h else _r5
-    _rsn5 = (f"Median 1h RSI {_med_1h} — recommend range {_rec_lo}–{_rec_hi} "
-             f"(~{_rec_pr5:.0f}% pass vs current {_r5:.0f}%)")
-    recs["f5_rsi1h"] = {
-        "filter": "F5 — RSI 1h range",
-        "current": f"{_cur_lo}–{_cur_hi}",
-        "current_pass_rate": _r5,
-        "rec": f"{_rec_lo}–{_rec_hi}",
-        "rec_pass_rate": _rec_pr5,
-        "reason": _rsn5,
-        "icon": _icon(_r5),
-    }
+        _rec_lo, _rec_hi = 30, 95
+    if _am_short:
+        _cur_lo = int(cfg.get("rsi_1h_min_short", 30))
+        _cur_hi = int(cfg.get("rsi_1h_max_short", 75))
+        _rec_hi = min(80, _rec_hi)
+        _rec_pr5 = (sum(1 for v in _v1h if _rec_lo <= v <= _rec_hi) / len(_v1h) * 100) if _v1h else _r5
+        _rsn5 = (f"Median 1h RSI {_med_1h} — recommend short band {_rec_lo}\u2013{_rec_hi} "                 f"(~{_rec_pr5:.0f}% pass vs current {_r5:.0f}%)")
+        recs["f5_rsi1h"] = {
+            "filter": "F5 — RSI 1h range (Short)",
+            "current": f"{_cur_lo}\u2013{_cur_hi}",
+            "current_pass_rate": _r5,
+            "rec": f"{_rec_lo}\u2013{_rec_hi}",
+            "rec_pass_rate": _rec_pr5,
+            "reason": _rsn5,
+            "icon": _icon(_r5),
+        }
+    else:
+        _cur_lo = int(cfg.get("rsi_1h_min", 30))
+        _cur_hi = int(cfg.get("rsi_1h_max", 95))
+        _rec_pr5 = (sum(1 for v in _v1h if _rec_lo <= v <= _rec_hi) / len(_v1h) * 100) if _v1h else _r5
+        _rsn5 = (f"Median 1h RSI {_med_1h} — recommend range {_rec_lo}\u2013{_rec_hi} "                 f"(~{_rec_pr5:.0f}% pass vs current {_r5:.0f}%)")
+        recs["f5_rsi1h"] = {
+            "filter": "F5 — RSI 1h range",
+            "current": f"{_cur_lo}\u2013{_cur_hi}",
+            "current_pass_rate": _r5,
+            "rec": f"{_rec_lo}\u2013{_rec_hi}",
+            "rec_pass_rate": _rec_pr5,
+            "reason": _rsn5,
+            "icon": _icon(_r5),
+        }
 
     # ── F5b: ATR mode ─────────────────────────────────────────────────────────
     _r5b     = _pr("f5b_atr")
@@ -5737,6 +5952,7 @@ def _analyze_market_conditions(cfg: dict, symbols: list,
         "total_coins":     n,
         "valid_coins":     n - errors,
         "errors":          errors,
+        "avg_pass_rate":    (sum(_pr(k) for k in _d) / len(_d)) if _d else 0.0,
     }
 
 
@@ -6135,21 +6351,100 @@ with st.sidebar:
         ))
     # ── Trade Direction ────────────────────────────────────────────────────
     _cur_dir = _snap_cfg.get("trade_direction", "long")
-    _dir_opts = ["long", "short", "both"]
+    _dir_opts = ["long", "short", "auto"]
     _dir_idx  = _dir_opts.index(_cur_dir) if _cur_dir in _dir_opts else 0
     new_trade_direction = st.radio(
         "Trade Direction", _dir_opts,
         index=_dir_idx, horizontal=True, key="cfg_trade_direction",
-        format_func=lambda x: {"long": "🟢 Long", "short": "🔴 Short",
-                                "both": "🔄 Both"}[x],
+        format_func=lambda x: {"long": "\U0001f7e2 Long", "short": "\U0001f534 Short",
+                                "auto": "\U0001f916 Auto"}[x],
         help=(
             "Controls which direction the scanner looks for and places trades.\n\n"
             "  • Long  — standard setup (price dips into discount, reversal up)\n"
             "  • Short — inverted setup (price rises into premium, reversal down)\n"
-            "  • Both  — run both passes each cycle\n\n"
-            "Short entries sell on OKX (posSide=short in hedge mode). "
+            "  • Auto  — runs market analysis for both directions, picks the one\n"
+            "           with more qualifying coins each auto-analyse cycle\n\n"
             "All TP/SL math, DCA triggers, and order sides invert automatically."
         ))
+    st.divider()
+
+    # ── Auto-Analyse ──────────────────────────────────────────────────
+    st.markdown("**🤖 Auto-Analyse**")
+    new_auto_analyse_enabled = st.checkbox(
+        "Enable auto-analyse",
+        value=bool(_snap_cfg.get("auto_analyse_enabled", False)),
+        key="cfg_auto_analyse_enabled",
+        help=(
+            "When enabled, the market analyser runs in the background every N hours "
+            "and automatically applies the recommended filter settings.\n\n"
+            "A \"What changed\" diff is shown in the sidebar after each run.\n\n"
+            "Direction Auto: also picks Long or Short based on which has more qualifying coins."
+        ))
+    new_auto_analyse_hours = st.number_input(
+        "Interval (hours)", min_value=0.5, max_value=24.0, step=0.5,
+        value=float(_snap_cfg.get("auto_analyse_hours", 2.0)),
+        key="cfg_auto_analyse_hours",
+        disabled=not new_auto_analyse_enabled,
+        help="How often the background auto-analyse runs (0.5 = every 30 min, 2.0 = every 2 hours).")
+    st.divider()
+    # ── Auto-Analyse diff badge ───────────────────────────────────────
+    _aa_diff = getattr(_b, "_bsc_aa_diff", {})
+    _aa_ts   = getattr(_b, "_bsc_aa_applied_at", 0.0)
+    if _aa_diff and _aa_ts > 0:
+        import time as _aaui_t
+        _aa_age_min = int((_aaui_t.time() - _aa_ts) / 60)
+        try:
+            import pytz as _aaui_tz
+            from datetime import datetime as _aaui_dt
+            _dxb = _aaui_tz.timezone("Asia/Dubai")
+            _aa_hhmm = _aaui_dt.fromtimestamp(_aa_ts, _dxb).strftime("%H:%M")
+        except Exception:
+            _aa_hhmm = "—"
+        _auto_dir_info = ""
+        if _snap_cfg.get("trade_direction", "long") == "auto":
+            _resolved = getattr(_b, "_bsc_auto_direction", "long").upper()
+            _auto_dir_info = f"  ·  Direction → **{_resolved}**"
+        st.success(f"⚙️ Settings auto-updated at **{_aa_hhmm}**{_auto_dir_info}")
+        with st.expander("📋 What changed", expanded=False):
+            _CFG_LABELS = {
+                "use_pdz_15m":      "F2 PDZ 15m",
+                "use_pdz_5m":       "F3 PDZ 5m",
+                "rsi_5m_min":       "F4 RSI 5m min",
+                "rsi_5m_max_short": "F4 RSI 5m max (Short)",
+                "rsi_1h_min":       "F5 RSI 1h min",
+                "rsi_1h_max":       "F5 RSI 1h max",
+                "rsi_1h_min_short": "F5 RSI 1h min (Short)",
+                "rsi_1h_max_short": "F5 RSI 1h max (Short)",
+                "atr_mode":         "F5b ATR mode",
+                "use_ema_3m":       "F6 EMA 3m",
+                "use_ema_5m":       "F6 EMA 5m",
+                "use_ema_15m":      "F6 EMA 15m",
+                "use_macd_3m":      "F7 MACD 3m",
+                "use_macd_5m":      "F7 MACD 5m",
+                "use_macd_15m":     "F7 MACD 15m",
+                "use_sar_3m":       "F8 SAR 3m",
+                "use_sar_5m":       "F8 SAR 5m",
+                "use_sar_15m":      "F8 SAR 15m",
+                "vol_spike_mult":   "F9 Vol multiplier",
+                "use_ema_cross_15m":"F10 EMA cross 15m",
+            }
+            if _aa_diff:
+                _diff_rows = []
+                for _dk, (_dold, _dnew) in _aa_diff.items():
+                    _lbl = _CFG_LABELS.get(_dk, _dk)
+                    _diff_rows.append({
+                        "Setting": _lbl,
+                        "Was":     str(_dold),
+                        "Now":     str(_dnew),
+                    })
+                st.dataframe(_diff_rows, hide_index=True,
+                             use_container_width=True)
+            else:
+                st.caption("All settings already at recommended values.")
+            if st.button("Dismiss", key="btn_aa_dismiss"):
+                _b._bsc_aa_diff = {}
+                _b._bsc_aa_applied_at = 0.0
+                st.rerun()
     st.divider()
 
     new_margin_mode = st.selectbox(
@@ -6535,7 +6830,7 @@ with st.sidebar:
                                     value=int(_snap_cfg["rsi_5m_min"]), key="cfg_rsi5",
                                     disabled=not new_use_rsi_5m)
     # Short mode: overbought threshold (reject if > this)
-    if new_trade_direction in ("short", "both"):
+    if new_trade_direction in ("short", "auto"):
         new_rsi5_max_short = st.number_input(
             "5m RSI max (Short)", min_value=0, max_value=100, step=1,
             value=int(_snap_cfg.get("rsi_5m_max_short", 70)),
@@ -6565,7 +6860,7 @@ with st.sidebar:
                                      value=int(_snap_cfg["rsi_1h_max"]), key="cfg_rsi1h_max",
                                      disabled=not new_use_rsi_1h)
     # Short mode: 1h RSI band (bearish momentum zone)
-    if new_trade_direction in ("short", "both"):
+    if new_trade_direction in ("short", "auto"):
         cs1, cs2 = st.columns(2)
         new_rsi1h_min_short = cs1.number_input(
             "1h min (Short)", min_value=0, max_value=100, step=1,
@@ -7087,6 +7382,9 @@ with st.sidebar:
             "rsi_5m_max_short":     int(new_rsi5_max_short),
             "rsi_1h_min_short":     int(new_rsi1h_min_short),
             "rsi_1h_max_short":     int(new_rsi1h_max_short),
+            # ── Auto-Analyse ─────────────────────────────────────────────
+            "auto_analyse_enabled": bool(new_auto_analyse_enabled),
+            "auto_analyse_hours":   float(new_auto_analyse_hours),
         }
         with _config_lock: _b._bsc_cfg.clear(); _b._bsc_cfg.update(new_cfg)
         save_config(new_cfg)
@@ -7094,6 +7392,8 @@ with st.sidebar:
         if new_wl != _snap_cfg.get("watchlist", []):
             _b._bsc_symbol_cache["fetched_at"] = 0
         _b._bsc_rescan_event.set()   # wake bg thread immediately — no waiting for next cycle
+        if getattr(_b, "_bsc_aa_event", None):
+            _b._bsc_aa_event.set()   # wake auto-analyse thread on config change
         _b._bsc_watcher_event.set()  # wake watcher so new watcher_minutes applies right away
         st.success(f"✅ Saved — {len(new_wl)} coins — rescanning now…"); st.rerun()
 
@@ -7438,7 +7738,7 @@ def _cfg_panel(cfg: dict) -> str:
     _fpill(f"F3 PDZ 5m",                        _c.get("use_pdz_5m",  True))
     _d = _c.get("trade_direction","long")
     _f4_lbl = (f"F4 RSI5m ≤{_c.get('rsi_5m_max_short',70)}" if _d=="short"
-               else (f"F4 RSI5m {_c.get('rsi_5m_min',30)}–{_c.get('rsi_5m_max_short',70)}" if _d=="both"
+               else (f"F4 RSI5m {_c.get('rsi_5m_min',30)}–{_c.get('rsi_5m_max_short',70)}" if _d=="auto"
                else f"F4 RSI5m ≥{_c.get('rsi_5m_min',30)}"))
     _fpill(_f4_lbl, _c.get("use_rsi_5m", True))
     _f5_lbl = (f"F5 RSI1h {_c.get('rsi_1h_min_short',30)}–{_c.get('rsi_1h_max_short',75)}" if _d=="short"
