@@ -1922,18 +1922,20 @@ def macd_bearish_and_value(closes: list, crossover_lookback: int = 12):
     """
     SHORT mirror of macd_bullish_and_value.
     True when:
-      1. MACD line < 0
-      2. Signal line < 0
-      3. Histogram < 0 AND falling (dark red)
-      4. Bearish crossover within last crossover_lookback candles
+      1. Histogram < 0 AND falling (dark red / bearish momentum building)
+      2. Bearish crossover within last crossover_lookback candles
+
+    Deliberately does NOT require MACD line or signal line to be < 0 — a coin
+    near its Premium PDZ zone (near recent highs) that is starting to reverse
+    will show a falling histogram and bearish crossover before MACD goes fully
+    negative.  Requiring both lines < 0 created an irresolvable conflict with
+    the Premium zone filter and produced zero short signals in practice.
 
     Returns (is_bearish: bool, macd_line_value: float | None).
     """
     macd_line, sig_line, histogram = calc_macd(closes)
     _last_val = macd_line[-1] if macd_line else None
     if not histogram or len(histogram) < 2:
-        return False, _last_val
-    if macd_line[-1] >= 0 or sig_line[-1] >= 0:
         return False, _last_val
     if histogram[-1] >= 0 or histogram[-1] >= histogram[-2]:
         return False, _last_val
@@ -5706,7 +5708,11 @@ def _analyze_market_conditions(cfg: dict, symbols: list,
         return "🟢" if rate >= 35 else ("🟡" if rate >= 15 else "🔴")
 
     def _bool_rec(rate: float, label_on: str) -> str:
-        if rate < 15:  return "Consider OFF"
+        # Short signals are naturally rarer — raise the OFF threshold from 15%→25%
+        # so filters that aren't pulling weight get turned off sooner, preventing
+        # combined-pass-rate collapse to near-zero.
+        _off_thresh = 25 if _am_short else 15
+        if rate < _off_thresh: return "Consider OFF"
         if rate < 35:  return f"{label_on} (tight)"
         if rate > 75:  return f"{label_on} (permissive)"
         return f"{label_on} ✓"
