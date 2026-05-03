@@ -6471,6 +6471,57 @@ with st.sidebar:
             f"\u26a0\ufe0f Auto-analyse error: "
             f"{_last_aa_err.get('message', '?')[:120]}",
             icon=None)
+    # ── Auto-Analyse diagnostics ──────────────────────────────────────
+    with st.expander("🔧 Auto-Analyse Diagnostics", expanded=True):
+        import time as _dbgt
+        _dbg_thread   = getattr(_b, "_bsc_aa_thread", None)
+        _dbg_alive    = _dbg_thread.is_alive() if _dbg_thread else False
+        _dbg_ver_cur  = getattr(_b, "_bsc_aa_thread_ver", "—")
+        _dbg_enabled  = _snap_cfg.get("auto_analyse_enabled", False)
+        _dbg_run_now  = getattr(_b, "_bsc_aa_run_now", False)
+        _dbg_shutdown = getattr(_b, "_bsc_aa_shutdown", False)
+        _dbg_applied  = getattr(_b, "_bsc_aa_applied_at", 0.0)
+        _dbg_watchlist= list(_snap_cfg.get("watchlist", []))
+        st.markdown(
+            f"**Thread alive:** {_dbg_alive}  \n"
+            f"**Code version:** stored={_dbg_ver_cur} / expected={_AA_THREAD_VER}  \n"
+            f"**Enabled:** {_dbg_enabled}  \n"
+            f"**Run-now flag:** {_dbg_run_now}  \n"
+            f"**Shutdown flag:** {_dbg_shutdown}  \n"
+            f"**Applied at:** {_dbg_applied}  \n"
+            f"**Watchlist size:** {len(_dbg_watchlist)}  \n"
+            f"**AA errors:** {len(_dbg_aa_errs)}  \n"
+        )
+        _dbg_aa_errs = [e for e in getattr(_b, "_bsc_error_log", [])
+                        if e.get("source") == "auto-analyse"]
+        if _dbg_aa_errs:
+            for _ee in _dbg_aa_errs[-3:]:
+                st.caption(f"❌ {_ee.get('ts','?')}: {_ee.get('message','?')[:200]}")
+
+        st.markdown("---")
+        st.caption("**Direct test** — runs analysis now in the UI thread (bypasses background thread entirely):")
+        if st.button("🧪 Test Run (synchronous)", key="btn_aa_direct_test",
+                     use_container_width=True):
+            _test_syms = list(_snap_cfg.get("watchlist", []))
+            if not _test_syms:
+                st.error("Watchlist is empty — add coins first.")
+            else:
+                _prog = st.progress(0.0)
+                _stat = st.empty()
+                with st.spinner("Running direct test…"):
+                    try:
+                        _test_res = _analyze_market_conditions(
+                            dict(_snap_cfg), _test_syms, _prog, _stat)
+                        _b._bsc_aa_applied_at = _dbgt.time()
+                        _b._bsc_aa_diff = {}
+                        _b._bsc_auto_direction = _snap_cfg.get("trade_direction", "long")
+                        _prog.empty(); _stat.empty()
+                        _vc = _test_res.get("valid_coins", 0)
+                        st.success(f"\u2705 Test OK \u2014 {_vc} coins analysed")
+                    except Exception as _te:
+                        _prog.empty(); _stat.empty()
+                        st.error(f"Test failed: {_te}")
+
     st.divider()
     # ── Auto-Analyse diff badge ───────────────────────────────────────
     _aa_diff = getattr(_b, "_bsc_aa_diff", {})
