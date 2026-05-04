@@ -229,6 +229,9 @@ DEFAULT_CONFIG: dict = {
     "rsi_5m_max_short":      70,    # reject if RSI 5m > this (overbought exit zone)
     "rsi_1h_min_short":      30,    # reject if RSI 1h < this (no bearish momentum)
     "rsi_1h_max_short":      75,    # reject if RSI 1h > this
+    # ── Dynamic short filter mode thresholds ───────────────────────────────
+    "short_mode_threshold":       0.55, # avg 24h-range position: >=threshold → Reversal, <threshold → Trend Follow
+    "rsi_5m_min_short_reversal":  60,   # RSI 5m floor for Reversal short (overbought required)
         "watchlist": [
         "XPDUSDT","WIFUSDT","PIUSDT","EDGEUSDT","RECALLUSDT","SUSHIUSDT","RAVEUSDT","XLMUSDT","DASHUSDT","TRUSTUSDT",
         "GPSUSDT","CROUSDT","ACUUSDT","UNIUSDT","STRKUSDT","NEIROUSDT","ZKPUSDT","APEUSDT","MSTRUSDT","ENJUSDT",
@@ -714,6 +717,8 @@ if "_scanner_initialised" not in st.session_state:
         # that clears this flag automatically.
         _b._bsc_sl_paused     = False
         _b._bsc_auto_direction  = "long"   # resolved direction when trade_direction=="auto"
+        _b._bsc_short_mode      = "reversal"  # current short filter mode: reversal | trend_follow
+        _b._bsc_market_score    = 0.5         # avg 24h-range position score (0=bearish, 1=bullish)
         _b._bsc_aa_thread       = None      # auto-analyse background thread
         _b._bsc_aa_event        = threading.Event()  # wake early
         _b._bsc_aa_diff         = {}        # last auto-apply diff {key: (old, new)}
@@ -753,6 +758,10 @@ if not hasattr(_b, "_bsc_watcher_last_dur"):
     _b._bsc_watcher_last_dur = 0.0
 if not hasattr(_b, "_bsc_auto_direction"):
     _b._bsc_auto_direction = "long"
+if not hasattr(_b, "_bsc_short_mode"):
+    _b._bsc_short_mode = "reversal"
+if not hasattr(_b, "_bsc_market_score"):
+    _b._bsc_market_score = 0.5
 if not hasattr(_b, "_bsc_aa_thread"):
     _b._bsc_aa_thread = None
 if not hasattr(_b, "_bsc_aa_event"):
@@ -2225,7 +2234,7 @@ def _flush_tl_counts() -> None:
 # Per-coin processing
 # ─────────────────────────────────────────────────────────────────────────────
 def process(sym, cfg: dict, super_counter: dict = None, super_lock=None,
-            direction: str = "long"):
+            direction: str = "long", short_mode: str = "reversal"):
     """Per-coin pipeline.
 
     super_counter / super_lock — shared atomic slot tracker for Super-cap
@@ -2360,9 +2369,16 @@ def process(sym, cfg: dict, super_counter: dict = None, super_lock=None,
         rsi5_q = (calc_rsi_series(closes_5m_q) or [0])[-1]
         if cfg.get("use_rsi_5m", True):
             if direction == "short":
-                if rsi5_q > cfg.get("rsi_5m_max_short", 70):
-                    _record_elim("f4_rsi5m", "f4_elim_syms", sym)
-                    return None
+                if short_mode == "reversal":
+                    # Reversal: REQUIRE overbought RSI (coin stretched upward at resistance)
+                    _rsi5_floor = float(cfg.get("rsi_5m_min_short_reversal", 60))
+                    if rsi5_q < _rsi5_floor:
+                        _record_elim("f4_rsi5m", "f4_elim_syms", sym)
+                        return None
+                else:  # trend_follow
+                    if rsi5_q > cfg.get("rsi_5m_max_short", 70):
+                        _record_elim("f4_rsi5m", "f4_elim_syms", sym)
+                        return None
             else:
                 if rsi5_q < cfg["rsi_5m_min"]:
                     _record_elim("f4_rsi5m", "f4_elim_syms", sym)
@@ -2442,28 +2458,35 @@ def process(sym, cfg: dict, super_counter: dict = None, super_lock=None,
                 return None
 
         # ── F6: EMA (per-timeframe tracking) ────────────────────────────────
+        # Reversal short: EMA direction gate is SKIPPED (price is above EMA
+        # in an uptrend — that is the desired entry point for a reversal short).
+        # Trend-follow short: price must be BELOW EMA (downtrend confirmed).
+        _skip_ema_gate = (direction == "short" and short_mode == "reversal")
         ema_3m_val = ema_5m_val = ema_15m_val = None
         if cfg.get("use_ema_3m"):
             ema = calc_ema(closes_3m, max(2, int(cfg.get("ema_period_3m", 12))))
-            _ema_fail = (not ema or (entry < ema[-1] if direction != "short" else entry > ema[-1]))
-            if _ema_fail:
-                _record_elim("f6_ema_3m", "f6_ema_3m_elim_syms", sym)
-                return None
-            ema_3m_val = _pround(ema[-1])
+            if not _skip_ema_gate:
+                _ema_fail = (not ema or (entry < ema[-1] if direction != "short" else entry > ema[-1]))
+                if _ema_fail:
+                    _record_elim("f6_ema_3m", "f6_ema_3m_elim_syms", sym)
+                    return None
+            ema_3m_val = _pround(ema[-1]) if ema else None
         if cfg.get("use_ema_5m"):
             ema = calc_ema(closes_5m, max(2, int(cfg.get("ema_period_5m", 12))))
-            _ema_fail = (not ema or (entry < ema[-1] if direction != "short" else entry > ema[-1]))
-            if _ema_fail:
-                _record_elim("f6_ema_5m", "f6_ema_5m_elim_syms", sym)
-                return None
-            ema_5m_val = _pround(ema[-1])
+            if not _skip_ema_gate:
+                _ema_fail = (not ema or (entry < ema[-1] if direction != "short" else entry > ema[-1]))
+                if _ema_fail:
+                    _record_elim("f6_ema_5m", "f6_ema_5m_elim_syms", sym)
+                    return None
+            ema_5m_val = _pround(ema[-1]) if ema else None
         if cfg.get("use_ema_15m"):
             ema = calc_ema(closes_15m, max(2, int(cfg.get("ema_period_15m", 12))))
-            _ema_fail = (not ema or (entry < ema[-1] if direction != "short" else entry > ema[-1]))
-            if _ema_fail:
-                _record_elim("f6_ema_15m", "f6_ema_15m_elim_syms", sym)
-                return None
-            ema_15m_val = _pround(ema[-1])
+            if not _skip_ema_gate:
+                _ema_fail = (not ema or (entry < ema[-1] if direction != "short" else entry > ema[-1]))
+                if _ema_fail:
+                    _record_elim("f6_ema_15m", "f6_ema_15m_elim_syms", sym)
+                    return None
+            ema_15m_val = _pround(ema[-1]) if ema else None
 
         # ── F7: MACD dark-green — per-timeframe independent checks ──────────
         # Each enabled timeframe is checked in order (3m → 5m → 15m).
@@ -2476,32 +2499,37 @@ def process(sym, cfg: dict, super_counter: dict = None, super_lock=None,
         _macd_3m_on  = cfg.get("use_macd_3m",  True)
         _macd_5m_on  = cfg.get("use_macd_5m",  True)
         _macd_15m_on = cfg.get("use_macd_15m", True)
+        # Reversal short: MACD direction gate skipped — MACD lags reversals.
+        _skip_macd_gate = (direction == "short" and short_mode == "reversal")
         _macd_fn = macd_bearish_and_value if direction == "short" else macd_bullish_and_value
         if _macd_3m_on:
             _ok_3m, _ml3 = _macd_fn(closes_3m)
             if _ml3 is not None:
                 macd_3m_val = round(_ml3, 8)
-            if not _ok_3m:
+            if not _ok_3m and not _skip_macd_gate:
                 _record_elim("f7_macd_3m", "f7_macd_3m_elim_syms", sym)
                 return None
         if _macd_5m_on:
             _ok_5m, _ml5 = _macd_fn(closes_5m)
             if _ml5 is not None:
                 macd_5m_val = round(_ml5, 8)
-            if not _ok_5m:
+            if not _ok_5m and not _skip_macd_gate:
                 _record_elim("f7_macd_5m", "f7_macd_5m_elim_syms", sym)
                 return None
         if _macd_15m_on:
             _ok_15m, _ml15 = _macd_fn(closes_15m)
             if _ml15 is not None:
                 macd_15m_val = round(_ml15, 8)
-            if not _ok_15m:
+            if not _ok_15m and not _skip_macd_gate:
                 _record_elim("f7_macd_15m", "f7_macd_15m_elim_syms", sym)
                 return None
 
         # ── F8: Parabolic SAR — per-timeframe independent checks ─────────────
         # Each enabled timeframe checked in order (3m → 5m → 15m).
         # First failure increments that timeframe's counter and eliminates the coin.
+        # Reversal short: SAR direction gate skipped — SAR is bullish when
+        # the coin is still rising toward resistance (desired entry condition).
+        _skip_sar_gate = (direction == "short" and short_mode == "reversal")
         sar_3m_val = sar_5m_val = sar_15m_val = None
         _sar_3m_on  = cfg.get("use_sar_3m",  True)
         _sar_5m_on  = cfg.get("use_sar_5m",  True)
@@ -2509,24 +2537,24 @@ def process(sym, cfg: dict, super_counter: dict = None, super_lock=None,
         if _sar_3m_on:
             sar_3m = calc_parabolic_sar(m3_candles)
             _sar3_ok = (sar_3m and (sar_3m[-1][1] if direction != "short" else not sar_3m[-1][1]))
-            if not _sar3_ok:
+            if not _sar3_ok and not _skip_sar_gate:
                 _record_elim("f8_sar_3m", "f8_sar_3m_elim_syms", sym)
                 return None
-            sar_3m_val = _pround(sar_3m[-1][0])
+            sar_3m_val = _pround(sar_3m[-1][0]) if sar_3m else None
         if _sar_5m_on:
             sar_5m = calc_parabolic_sar(m5)
             _sar5_ok = (sar_5m and (sar_5m[-1][1] if direction != "short" else not sar_5m[-1][1]))
-            if not _sar5_ok:
+            if not _sar5_ok and not _skip_sar_gate:
                 _record_elim("f8_sar_5m", "f8_sar_5m_elim_syms", sym)
                 return None
-            sar_5m_val = _pround(sar_5m[-1][0])
+            sar_5m_val = _pround(sar_5m[-1][0]) if sar_5m else None
         if _sar_15m_on:
             sar_15m = calc_parabolic_sar(m15)
             _sar15_ok = (sar_15m and (sar_15m[-1][1] if direction != "short" else not sar_15m[-1][1]))
-            if not _sar15_ok:
+            if not _sar15_ok and not _skip_sar_gate:
                 _record_elim("f8_sar_15m", "f8_sar_15m_elim_syms", sym)
                 return None
-            sar_15m_val = _pround(sar_15m[-1][0])
+            sar_15m_val = _pround(sar_15m[-1][0]) if sar_15m else None
 
         # ── F9: Volume Spike ──────────────────────────────────────────────────
         vol_ratio = None
@@ -2557,7 +2585,9 @@ def process(sym, cfg: dict, super_counter: dict = None, super_lock=None,
             _cross_fail = (ema_fast_15m[-1] <= ema_slow_15m[-1]
                            if direction != "short"
                            else ema_fast_15m[-1] >= ema_slow_15m[-1])
-            if _cross_fail:
+            # Reversal short: EMA cross gate skipped — bullish cross means
+            # the coin still has upward momentum, which is the reversal entry point.
+            if _cross_fail and not (direction == "short" and short_mode == "reversal"):
                 _record_elim("f10_ema_cross", "f10_elim_syms", sym)
                 return None
             ema_cross_12_15m_val = _pround(ema_fast_15m[-1])
@@ -2632,7 +2662,8 @@ def process(sym, cfg: dict, super_counter: dict = None, super_lock=None,
         _flush_tl_counts()
 
 def scan(cfg: dict, super_slots_remaining: int = None, skip_symbols: set = None,
-         direction_override: str = None, _accumulate_counts: bool = False):
+         direction_override: str = None, _accumulate_counts: bool = False,
+         short_mode: str = "reversal"):
     """Full watchlist scan. Returns (sorted_results, error_count).
 
     super_slots_remaining — number of additional Super Setup trades this cycle
@@ -2713,7 +2744,7 @@ def scan(cfg: dict, super_slots_remaining: int = None, skip_symbols: set = None,
     # 10 outer workers — semaphore(5) caps actual concurrent HTTP requests to 5
     # so more workers just means less idle time between coin batches, not more API pressure.
     with ThreadPoolExecutor(max_workers=10) as exe:
-        futs = [exe.submit(process, s, cfg, super_counter, super_lock, _direction)
+        futs = [exe.submit(process, s, cfg, super_counter, super_lock, _direction, short_mode)
                 for s in pre_filtered]
         for f in as_completed(futs):
             r = f.result()
@@ -4988,6 +5019,37 @@ def _check_sl_circuit_breaker():
     return len(_closed) >= 3 and all(s["status"] == "sl_hit" for s in _closed[-3:])
 
 
+def _detect_short_mode(tickers: dict, watchlist: list, threshold: float = 0.55):
+    """Determine short filter mode for this scan cycle using live ticker data.
+
+    Computes average 24h range position across the watchlist:
+        score = (last - low24h) / (high24h - low24h)  per coin
+
+    avg >= threshold -> market mostly bullish -> "reversal"
+        (short at RESISTANCE when coin is overbought / overextended)
+    avg <  threshold -> market mostly bearish -> "trend_follow"
+        (short only when trend indicators confirm downtrend)
+
+    Returns (mode: str, score: float).
+    """
+    _scores = []
+    for _sym in watchlist:
+        _t = tickers.get(_sym)
+        if not _t:
+            continue
+        _lo   = float(_t.get("low24h",  0) or 0)
+        _hi   = float(_t.get("high24h", 0) or 0)
+        _last = float(_t.get("last",    0) or 0)
+        _rng  = _hi - _lo
+        if _rng > 0 and _last > 0:
+            _scores.append((_last - _lo) / _rng)
+    if not _scores:
+        return "reversal", 0.5
+    _avg  = sum(_scores) / len(_scores)
+    _mode = "reversal" if _avg >= threshold else "trend_follow"
+    return _mode, round(_avg, 3)
+
+
 def _calc_closed_pnl(sig: dict, cfg: dict) -> float | None:
     """Return realised PNL in USD for a closed signal, or None if not calculable.
 
@@ -5204,6 +5266,19 @@ def _bg_loop():
             _pre_scan_skip = cooled | active
 
             _cfg_dir = cfg.get("trade_direction", "long")
+
+            # ── Detect short filter mode (Option D: dynamic per-cycle) ─────────
+            # Uses already-fetched bulk ticker data (get_bulk_tickers() is cached).
+            # score = avg (last - low24h) / (high24h - low24h) across watchlist.
+            # >= threshold -> market bullish -> Reversal short (sell at resistance).
+            # <  threshold -> market bearish -> Trend Follow short (confirm downtrend).
+            _sm_thresh  = float(cfg.get("short_mode_threshold", 0.55))
+            _wl_syms_sm = get_symbols_cached(cfg.get("watchlist", []))
+            _short_mode, _mkt_score = _detect_short_mode(
+                get_bulk_tickers(), _wl_syms_sm, _sm_thresh)
+            _b._bsc_short_mode   = _short_mode
+            _b._bsc_market_score = _mkt_score
+
             if _cfg_dir == "auto":
                 # AUTO mode: scan BOTH directions every cycle.
                 # Dominant direction (set by auto-analyse) gets priority
@@ -5219,6 +5294,7 @@ def _bg_loop():
                     super_slots_remaining=_super_slots_left,
                     skip_symbols=_pre_scan_skip,
                     direction_override=_dominant,
+                    short_mode=_short_mode,
                 )
                 # Secondary scan -- non-dominant direction
                 # Coins already found in primary pass are excluded so
@@ -5230,6 +5306,7 @@ def _bg_loop():
                     skip_symbols=_skip_sec,
                     direction_override=_secondary,
                     _accumulate_counts=True,
+                    short_mode=_short_mode,
                 )
                 new_sigs = _sigs_pri + _sigs_sec
                 errors   = _errs_pri + _errs_sec
@@ -5239,6 +5316,7 @@ def _bg_loop():
                     cfg,
                     super_slots_remaining=_super_slots_left,
                     skip_symbols=_pre_scan_skip,
+                    short_mode=_short_mode,
                 )
 
             with _log_lock:
@@ -6554,8 +6632,14 @@ with st.sidebar:
                 ).strftime("%H:%M")
             except Exception:
                 _aa_since = "—"
-            _dir_icon = "🔴 SHORT" if _aa_resolved == "short" else "🟢 LONG"
+            _dir_icon  = "🔴 SHORT" if _aa_resolved == "short" else "🟢 LONG"
+            _sm_now    = getattr(_b, "_bsc_short_mode",   "reversal")
+            _ms_now    = getattr(_b, "_bsc_market_score", 0.5)
+            _sm_icon   = "🔄" if _sm_now == "reversal" else "📉"
+            _sm_label  = "Reversal" if _sm_now == "reversal" else "Trend Follow"
+            _ms_pct    = f"{_ms_now * 100:.0f}%"
             st.success(f"🤖 Auto → **{_dir_icon}** (since {_aa_since} GST)", icon=None)
+            st.caption(f"{_sm_icon} Short mode: **{_sm_label}** · Market score: **{_ms_pct}**")
 
     # ── Auto-Analyse ──────────────────────────────────────────────────
     st.markdown("**🤖 Auto-Analyse**")
@@ -10757,6 +10841,11 @@ def _build_diagnostics_text() -> str:
     _auto_dir = getattr(_b, "_bsc_auto_direction", "—")
     _kv("trade_direction (config)",   _cfg_dir)
     _kv("_bsc_auto_direction",        _auto_dir + (" <-- ACTIVE SCAN DIRECTION" if _cfg_dir == "auto" else ""))
+    _short_mode_d  = getattr(_b, "_bsc_short_mode",   "reversal")
+    _mkt_score_d   = getattr(_b, "_bsc_market_score", 0.5)
+    _sm_thresh_d   = float(_snap_cfg.get("short_mode_threshold", 0.55))
+    _kv("_bsc_short_mode",    _short_mode_d + f" (market score {_mkt_score_d:.3f}, threshold {_sm_thresh_d})")
+    _kv("_bsc_market_score",  f"{_mkt_score_d:.3f}  (>= {_sm_thresh_d} = Reversal, < {_sm_thresh_d} = Trend Follow)")
     try:
         _bg_t = getattr(_b, "_bsc_thread", None)
         _kv("bg_thread_alive", bool(_bg_t is not None and _bg_t.is_alive()))
@@ -11183,10 +11272,4 @@ except Exception as _diag_ex:
 import datetime as _diag_dt
 _diag_fname = "diagnostics_" + _diag_dt.datetime.now().strftime("%Y%m%d_%H%M%S") + ".txt"
 
-st.download_button(
-    label="📥 Download Diagnostics",
-    data=_diag_text.encode("utf-8"),
-    file_name=_diag_fname,
-    mime="text/plain",
-    use_container_width=True,
-)
+st.d
