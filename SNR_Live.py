@@ -232,6 +232,8 @@ DEFAULT_CONFIG: dict = {
     # ── Dynamic short filter mode thresholds ───────────────────────────────
     "short_mode_threshold":       0.55, # avg 24h-range position: >=threshold → Reversal, <threshold → Trend Follow
     "rsi_5m_min_short_reversal":  60,   # RSI 5m floor for Reversal short (overbought required)
+    "rsi_1h_min_short_reversal":  55,   # RSI 1h floor for Reversal short (must be in overbought zone)
+    "rsi_1h_max_short_reversal":  95,   # RSI 1h cap  for Reversal short (allow very overbought)
         "watchlist": [
         "XPDUSDT","WIFUSDT","PIUSDT","EDGEUSDT","RECALLUSDT","SUSHIUSDT","RAVEUSDT","XLMUSDT","DASHUSDT","TRUSTUSDT",
         "GPSUSDT","CROUSDT","ACUUSDT","UNIUSDT","STRKUSDT","NEIROUSDT","ZKPUSDT","APEUSDT","MSTRUSDT","ENJUSDT",
@@ -1762,12 +1764,17 @@ def get_bulk_tickers() -> dict:
     return result
 
 def pre_filter_by_ticker(symbols: list, tickers: dict,
-                          direction: str = "long") -> list:
+                          direction: str = "long", short_mode: str = "reversal") -> list:
     """
     Zero extra API calls. Long: price near lows. Short: price near highs.
     Both: coin qualifies for either direction.
+    Reversal short uses a relaxed HIGH_BUFFER (0.99) so coins that have
+    pulled back slightly from their 24h high are not filtered out before
+    the deep-scan can evaluate them at resistance.
     """
-    PRE_FILTER_HIGH_BUFFER = 0.995
+    # Reversal: accept coins up to 1% below their 24h high (resistance candidates).
+    # Trend-follow: tighter 0.5% — already below high confirms pullback.
+    PRE_FILTER_HIGH_BUFFER = 0.99 if (direction == "short" and short_mode == "reversal") else 0.995
     kept = []
     for sym in symbols:
         t = tickers.get(sym)
@@ -2423,8 +2430,14 @@ def process(sym, cfg: dict, super_counter: dict = None, super_lock=None,
         rsi1h = (calc_rsi_series(closes_1h) or [0])[-1]
         if cfg.get("use_rsi_1h", True):
             if direction == "short":
-                _r1h_lo = cfg.get("rsi_1h_min_short", 30)
-                _r1h_hi = cfg.get("rsi_1h_max_short", 75)
+                if short_mode == "reversal":
+                    # Reversal: require overbought 1h RSI — coin must be
+                    # stretched upward to be a candidate for resistance rejection.
+                    _r1h_lo = float(cfg.get("rsi_1h_min_short_reversal", 55))
+                    _r1h_hi = float(cfg.get("rsi_1h_max_short_reversal", 95))
+                else:  # trend_follow
+                    _r1h_lo = float(cfg.get("rsi_1h_min_short", 30))
+                    _r1h_hi = float(cfg.get("rsi_1h_max_short", 75))
                 if not (_r1h_lo <= rsi1h <= _r1h_hi):
                     _record_elim("f5_rsi1h", "f5_elim_syms", sym)
                     return None
@@ -2702,7 +2715,7 @@ def scan(cfg: dict, super_slots_remaining: int = None, skip_symbols: set = None,
         if _direction == "auto":
             _direction = getattr(_b, "_bsc_auto_direction", "long")
     if cfg.get("use_pre_filter", True):
-        pre_filtered = pre_filter_by_ticker(symbols, tickers, direction=_direction)
+        pre_filtered = pre_filter_by_ticker(symbols, tickers, direction=_direction, short_mode=short_mode)
     else:
         pre_filtered = list(symbols)   # pre-filter disabled — deep-scan all
     with _filter_lock:
