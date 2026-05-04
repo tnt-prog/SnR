@@ -2349,6 +2349,7 @@ def process(sym, cfg: dict, super_counter: dict = None, super_lock=None,
         # ── SUPER SETUP — BOTH 15m AND 1h Discount → instant trade ───────────
         # Atomic slot check: only take the Super shortcut if slots remain.
         # If the cap is exhausted, fall through to F3-F10 and open as normal.
+        _take_super_slot = False  # initialise — set True inside block only if eligible
         if is_super_eligible:
             _take_super_slot = True
             if super_counter is not None and super_lock is not None:
@@ -5612,7 +5613,7 @@ def _bg_loop():
         _rescan_event.wait(timeout=sleep_sec)
         _rescan_event.clear()
 
-# ────────────────────────���──────────────────────────────────��─────────────────
+# ────────────────────────   ──────────────────────────────────  ─────────────────
 # Auto-Analyse background thread — runs _analyze_market_conditions every N h
 # and applies the recommended settings automatically.
 # ─────────────────────────────────────────────────────────────────────────────
