@@ -112,6 +112,7 @@ DEFAULT_CONFIG: dict = {
     "rsi_1h_max":           95,
     "loop_minutes":         4,
     "cooldown_minutes":     2,
+    "tp_cooldown_min_pnl":  4.0,   # Min realised PNL ($) to trigger TP cooldown.
     "use_ema_3m":           False,
     "ema_period_3m":      12,
     "use_ema_5m":         False,
@@ -4975,6 +4976,46 @@ def _check_sl_circuit_breaker():
     return len(_closed) >= 3 and all(s["status"] == "sl_hit" for s in _closed[-3:])
 
 
+def _calc_closed_pnl(sig: dict, cfg: dict) -> float | None:
+    """Return realised PNL in USD for a closed signal, or None if not calculable.
+
+    Used by the cooldown logic to decide which cooldown pool (TP / SL / none)
+    a closed trade falls into.  Open trades and dca_sl_hit trades are excluded
+    by the caller — this function just does the maths.
+
+    Sign convention: positive = profit, negative = loss.
+    """
+    _close = sig.get("close_price")
+    try:
+        _close = float(_close or 0)
+    except (TypeError, ValueError):
+        return None
+    if _close <= 0:
+        return None
+    _direction = sig.get("direction", "long")
+    _mult = -1.0 if _direction == "short" else 1.0
+    # DCA trade: use avg_entry and total_notional
+    _dcn = int(sig.get("dca_count", 0) or 0)
+    if _dcn > 0:
+        try:
+            _avg = float(sig.get("avg_entry") or 0)
+            _tnl = float(sig.get("total_notional") or 0)
+        except (TypeError, ValueError):
+            _avg, _tnl = 0.0, 0.0
+        if _avg > 0 and _tnl > 0:
+            return _mult * (_close / _avg - 1.0) * _tnl
+    # Non-DCA trade: use entry, trade_usdt, trade_lev
+    try:
+        _ent = float(sig.get("entry") or 0)
+        _usd = float(sig.get("trade_usdt") or cfg.get("trade_usdt_amount") or 0)
+        _lev = int(sig.get("trade_lev") or cfg.get("trade_leverage") or 0)
+    except (TypeError, ValueError):
+        return None
+    if _ent <= 0 or _usd <= 0 or _lev <= 0:
+        return None
+    return _mult * (_close / _ent - 1.0) * (_usd * _lev)
+
+
 def _bg_loop():
     while True:
         # Pause if user manually stopped OR circuit breaker fired (3 consec SL).
@@ -5097,22 +5138,30 @@ def _bg_loop():
             sl_cd_hours = max(1, int(cfg.get("sl_cooldown_hours", 24)))
             sl_cutoff   = now_dubai - timedelta(hours=sl_cd_hours)
 
+            _tp_pnl_thresh = float(cfg.get("tp_cooldown_min_pnl", 4.0))
             with _log_lock:
-                # TP cooldown — short (minutes), blocks re-entry after a TP close
-                cooled_tp = {s["symbol"] for s in _b._bsc_log["signals"]
-                             if s.get("close_time")
-                             and s.get("status") == "tp_hit"
-                             and datetime.fromisoformat(
-                                 s["close_time"].replace("Z","+00:00")) >= tp_cutoff}
-                # SL cooldown — long (hours, default 24), applies UNIVERSALLY
-                # including to Super Setups. A stopped-out coin is blacklisted
-                # for the full sl_cooldown_hours window regardless of what new
-                # setup it might qualify for.
-                cooled_sl = {s["symbol"] for s in _b._bsc_log["signals"]
-                             if s.get("close_time")
-                             and s.get("status") == "sl_hit"
-                             and datetime.fromisoformat(
-                                 s["close_time"].replace("Z","+00:00")) >= sl_cutoff}
+                # PNL-based cooldown pools
+                # dca_sl_hit is intentionally excluded from both pools.
+                # Open trades (no close_time) are ignored.
+                _closed_candidates = [
+                    s for s in _b._bsc_log["signals"]
+                    if s.get("close_time")
+                    and s.get("status") in ("tp_hit", "sl_hit")
+                ]
+                cooled_tp = set()
+                cooled_sl = set()
+                for _cs in _closed_candidates:
+                    _ct = datetime.fromisoformat(
+                        _cs["close_time"].replace("Z", "+00:00"))
+                    _pnl = _calc_closed_pnl(_cs, cfg)
+                    if _pnl is None:
+                        continue
+                    # TP cooldown: realised profit >= threshold, within TP window
+                    if _pnl >= _tp_pnl_thresh and _ct >= tp_cutoff:
+                        cooled_tp.add(_cs["symbol"])
+                    # SL cooldown: any real loss, within SL window
+                    elif _pnl < 0 and _ct >= sl_cutoff:
+                        cooled_sl.add(_cs["symbol"])
                 cooled = cooled_tp | cooled_sl
                 active = {s["symbol"] for s in _b._bsc_log["signals"] if s["status"]=="open"}
 
@@ -7253,11 +7302,22 @@ with st.sidebar:
         "Cooldown (TP, min)", min_value=1, max_value=120, step=1,
         value=int(_snap_cfg["cooldown_minutes"]), key="cfg_cool",
         help=(
-            "After a TP or SL close, skip this coin for N minutes before "
-            "allowing re-entry.\n\n"
-            "⚠️ Note: This is the **short TP cooldown**. SL losses have a "
-            "separate, longer cooldown ('SL Cooldown (hrs)') so a freshly "
-            "stopped-out coin is not re-entered too quickly."
+            "After a trade closes with realised PNL \u2265 'TP Cooldown min PNL ($)', "
+            "skip this coin for N minutes before re-entry.\n\n"
+            "  \u2022 Small win (PNL < threshold) \u2192 no cooldown, re-scan immediately.\n"
+            "  \u2022 Real loss (PNL < $0) \u2192 SL cooldown (hrs) applies instead."
+        ))
+    new_tp_cooldown_min_pnl = st.number_input(
+        "TP Cooldown min PNL ($)", min_value=0.0, max_value=500.0, step=0.5,
+        value=float(_snap_cfg.get("tp_cooldown_min_pnl", 4.0)),
+        key="cfg_tp_cooldown_min_pnl",
+        help=(
+            "Minimum realised profit (USD) a closed trade must have made "
+            "to trigger the TP cooldown timer.\n\n"
+            "  \u2022 PNL \u2265 this value \u2192 TP cooldown applies (coin blocked for N minutes).\n"
+            "  \u2022 PNL between $0 and this value \u2192 no cooldown, re-scan immediately.\n"
+            "  \u2022 PNL < $0 \u2192 SL cooldown applies regardless of close label.\n\n"
+            "Default: $4. Set to $0 to trigger TP cooldown on any profitable close."
         ))
     # ── Open-Trade Watcher interval ──────────────────────────────────────────
     # Runs a dedicated short-interval thread that only updates OPEN trades
@@ -7520,6 +7580,7 @@ with st.sidebar:
             "max_open_trades":    max(1, int(new_max_open_trades)),
             "max_super_trades":   max(1, int(new_max_super_trades)),
             "sl_cooldown_hours":  max(1, int(new_sl_cooldown_hours)),
+            "tp_cooldown_min_pnl": max(0.0, float(new_tp_cooldown_min_pnl)),
             "watcher_minutes":         max(0, min(60,  int(new_watcher_minutes))),
             "reconcile_t1_minutes":    max(0, min(60,  int(new_reconcile_t1_minutes))),
             "reconcile_t2_minutes":    max(0, min(120, int(new_reconcile_t2_minutes))),
@@ -11024,38 +11085,4 @@ def _build_diagnostics_text() -> str:
                                        f"usdt=${f.get('usdt','?')} "
                                        f"{'[paper]' if f.get('paper') else '[live]'}"
                                        for i, f in enumerate(_fills[1:], 1)))
-    # ── Active Watchlist ──────────────────────────────────────────────────────
-    _hdr("WATCHLIST")
-    try:
-        _wl = list(_snap_cfg.get("watchlist") or [])
-        _push(f"  Total: {len(_wl)} symbols")
-        for _wi, _wsym in enumerate(_wl, 1):
-            _push(f"  {_wi:>3}. {_wsym}")
-    except Exception as _we:
-        _push(f"  <error reading watchlist: {_we}>")
-
-    # ── API Error Log ─────────────────────────────────────────────────────────
-    _hdr("API ERROR LOG (last 200 entries, newest first)")
-    try:
-        with getattr(_b, "_bsc_error_log_lock", threading.Lock()):
-            _err_entries = list(reversed(getattr(_b, "_bsc_error_log", [])))[:200]
-        if not _err_entries:
-            _push("  (no errors)")
-        else:
-            for _ei, _err in enumerate(_err_entries, 1):
-                _push(f"  [{_ei:>3}] {_fmt_ts(_err.get('ts',''))} "
-                      f"| {_err.get('type','?'):8} "
-                      f"| {_err.get('symbol',''):15} "
-                      f"| {_err.get('endpoint',''):40} "
-                      f"| {str(_err.get('msg',''))[:120]}")
-    except Exception as _ele:
-        _push(f"  <error reading error log: {_ele}>")
-
-    _push("")
-    _push("=" * 78)
-    _push("END OF DIAGNOSTICS")
-    _push("=" * 78)
-    return "\n".join(_lines)
-
-
-# ───────────────────────────────────────────────────────────────── 
+    # ── Active Watchlist ───────────────────────────── 
