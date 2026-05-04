@@ -11085,4 +11085,61 @@ def _build_diagnostics_text() -> str:
                                        f"usdt=${f.get('usdt','?')} "
                                        f"{'[paper]' if f.get('paper') else '[live]'}"
                                        for i, f in enumerate(_fills[1:], 1)))
-    # ── Active Watchlist ───────────────────────────── 
+    # ── Active Watchlist ──────────────────────────────────────────────────
+    _hdr("WATCHLIST")
+    try:
+        _wl = list(_snap_cfg.get("watchlist", []))
+        _push(f"  Total: {len(_wl)} symbols")
+        for _wi, _ws in enumerate(_wl, 1):
+            _push(f"  {_wi:>4}. {_ws}")
+    except Exception as _wle:
+        _push(f"  <error: {_wle}>")
+
+    # ── API Error Log ───────────────────────────────────────────────────────────
+    _hdr("API ERROR LOG (last 200 entries, newest first)")
+    try:
+        _errs = list(getattr(_b, "_bsc_error_log", []) or [])
+        _errs_show = list(reversed(_errs[-200:]))
+        if not _errs_show:
+            _push("  (none)")
+        else:
+            for _ei, _err in enumerate(_errs_show, 1):
+                _ts  = _err.get("ts", "")
+                try:
+                    _ts_fmt = fmt_dubai(_ts) if _ts else "--"
+                except Exception:
+                    _ts_fmt = str(_ts or "--")
+                _src = (_err.get("source") or "").ljust(12)
+                _sym = (_err.get("symbol") or "").ljust(16)
+                _ep  = (_err.get("endpoint") or "")[:42].ljust(42)
+                _msg = (_err.get("message") or "")[:120]
+                _push(f"  [{_ei:>4}] {_ts_fmt} | {_src} | {_sym} | {_ep} | {_msg}")
+    except Exception as _ele:
+        _push(f"  <error: {_ele}>")
+
+    # ── Footer ───────────────────────────────────────────────────────────────────────
+    _push("")
+    _push("=" * 78)
+    _push("END OF DIAGNOSTICS")
+    _push("=" * 78)
+    return "\n".join(_lines)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Download button — renders the button in the Streamlit UI
+# ──────────────────────────────────────────────────────────────────────────────
+try:
+    _diag_text = _build_diagnostics_text()
+except Exception as _diag_ex:
+    _diag_text = f"Error building diagnostics: {_diag_ex}"
+
+import datetime as _diag_dt
+_diag_fname = "diagnostics_" + _diag_dt.datetime.now().strftime("%Y%m%d_%H%M%S") + ".txt"
+
+st.download_button(
+    label="📥 Download Diagnostics",
+    data=_diag_text.encode("utf-8"),
+    file_name=_diag_fname,
+    mime="text/plain",
+    use_container_width=True,
+)
