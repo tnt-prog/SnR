@@ -5829,6 +5829,11 @@ def _analyze_market_conditions(cfg: dict, symbols: list,
         _cur_lo = int(cfg.get("rsi_1h_min_short", 30))
         _cur_hi = int(cfg.get("rsi_1h_max_short", 75))
         _rec_hi = min(80, _rec_hi)
+        # Enforce minimum band width of 35 RSI points for short direction.
+        # A bullish market has 1h RSI bunched at 47-65; the 20th-80th pct
+        # produces a 15-pt band (e.g. 47-62) that blocks nearly everything.
+        if (_rec_hi - _rec_lo) < 35:
+            _rec_lo = max(20, _rec_hi - 35)
         _rec_pr5 = (sum(1 for v in _v1h if _rec_lo <= v <= _rec_hi) / len(_v1h) * 100) if _v1h else _r5
         _rsn5 = (f"Median 1h RSI {_med_1h} — recommend short band {_rec_lo}\u2013{_rec_hi} "                 f"(~{_rec_pr5:.0f}% pass vs current {_r5:.0f}%)")
         recs["f5_rsi1h"] = {
@@ -6510,6 +6515,8 @@ with st.sidebar:
         _dbg_watchlist= list(_snap_cfg.get("watchlist", []))
         _dbg_aa_errs = [e for e in getattr(_b, "_bsc_error_log", [])
                         if e.get("source") == "auto-analyse"]
+        _dbg_auto_dir = getattr(_b, "_bsc_auto_direction", "—")
+        _dbg_cfg_dir  = _snap_cfg.get("trade_direction", "—")
         st.markdown(
             f"**Thread alive:** {_dbg_alive}  \n"
             f"**Code version:** stored={_dbg_ver_cur} / expected={_AA_THREAD_VER}  \n"
@@ -6519,6 +6526,8 @@ with st.sidebar:
             f"**Applied at:** {_dbg_applied}  \n"
             f"**Watchlist size:** {len(_dbg_watchlist)}  \n"
             f"**AA errors:** {len(_dbg_aa_errs)}  \n"
+            f"**cfg trade_direction:** {_dbg_cfg_dir}  \n"
+            f"**_bsc_auto_direction:** {_dbg_auto_dir}  \n"
         )
         if _dbg_aa_errs:
             for _ee in _dbg_aa_errs[-3:]:
@@ -11049,21 +11058,4 @@ def _build_diagnostics_text() -> str:
     return "\n".join(_lines)
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Download button -- calls the builder and streams the result
-# ──────────────────────────────────────────────────────────────────────────────
-try:
-    _diag_text = _build_diagnostics_text()
-except Exception as _diag_exc:
-    _diag_text = f"Error building diagnostics: {_diag_exc}"
-
-st.text_area("Diagnostics Preview", _diag_text, height=300, key="debug_snap_area")
-
-_diag_filename = f"diagnostics_{dubai_now().strftime('%Y%m%d_%H%M%S')}.txt"
-st.download_button(
-    label="Download Diagnostics",
-    data=_diag_text.encode("utf-8"),
-    file_name=_diag_filename,
-    mime="text/plain",
-    key="diag_download_btn",
-)
+# ───────────────────────────────────────────────────────────────── 
