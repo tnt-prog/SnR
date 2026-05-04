@@ -1739,11 +1739,25 @@ def place_okx_manual_order(sym: str, entry: float, tp: float, sl: float,
 # ─────────────────────────────────────────────────────────────────────────────
 # A — Bulk ticker fetch + pre-filter (single API call)
 # ─────────────────────────────────────────────────────────────────────────────
+_TICKERS_CACHE: dict = {"data": {}, "ts": 0.0}
+_TICKERS_CACHE_LOCK = threading.Lock()
+_TICKERS_CACHE_TTL  = 45  # seconds — shared by _detect_short_mode + scan()
+
 def get_bulk_tickers() -> dict:
     """
     ONE API call → dict {BTCUSDT: {last, open24h, high24h, low24h, volCcy24h}}
     for every USDT-SWAP pair on OKX.
+
+    Result is cached for _TICKERS_CACHE_TTL seconds so that the two callers
+    per bg-loop cycle (_detect_short_mode then scan) share the same response.
+    This also ensures _detect_short_mode never gets an empty dict when the
+    OKX API is temporarily slow on a second back-to-back call.
     """
+    with _TICKERS_CACHE_LOCK:
+        now = time.time()
+        if now - _TICKERS_CACHE["ts"] < _TICKERS_CACHE_TTL and _TICKERS_CACHE["data"]:
+            return dict(_TICKERS_CACHE["data"])   # ← return cached copy
+
     data   = safe_get(f"{BASE}/api/v5/market/tickers", {"instType": "SWAP"})
     result = {}
     for t in data.get("data", []):
@@ -1761,6 +1775,10 @@ def get_bulk_tickers() -> dict:
             }
         except Exception:
             pass
+    if result:                                     # only update cache on success
+        with _TICKERS_CACHE_LOCK:
+            _TICKERS_CACHE["data"] = result
+            _TICKERS_CACHE["ts"]   = time.time()
     return result
 
 def pre_filter_by_ticker(symbols: list, tickers: dict,
@@ -1768,12 +1786,16 @@ def pre_filter_by_ticker(symbols: list, tickers: dict,
     """
     Zero extra API calls. Long: price near lows. Short: price near highs.
     Both: coin qualifies for either direction.
-    Reversal short uses a relaxed HIGH_BUFFER (0.99) so coins that have
-    pulled back slightly from their 24h high are not filtered out before
-    the deep-scan can evaluate them at resistance.
+
+    Reversal short  — coin must be near 24h HIGH (overbought at resistance).
+    Trend-follow short — coin is already in a confirmed downtrend; no position
+    requirement.  EMA/MACD/SAR gates in process() provide the confirmation.
+    We only reject coins that are already at the very bottom of their 24h range
+    (no room left to fall) or below minimum volume.
     """
-    # Reversal: accept coins up to 1% below their 24h high (resistance candidates).
-    # Trend-follow: tighter 0.5% — already below high confirms pullback.
+    # Reversal short: within 1 % of 24h high (resistance candidate).
+    # Trend-follow short: no high-proximity requirement — just volume + not already
+    # at the 24h low (must have at least 2 % downside room to the 24h low).
     PRE_FILTER_HIGH_BUFFER = 0.99 if (direction == "short" and short_mode == "reversal") else 0.995
     kept = []
     for sym in symbols:
@@ -1788,9 +1810,20 @@ def pre_filter_by_ticker(symbols: list, tickers: dict,
             continue
         long_ok  = (low24h  <= 0 or last >= low24h  * PRE_FILTER_LOW_BUFFER)
         short_ok = (high24h <= 0 or last <= high24h * PRE_FILTER_HIGH_BUFFER)
-        if direction == "long"  and not long_ok:  continue
-        if direction == "short" and not short_ok: continue
-        if direction in ("both", "auto") and not (long_ok or short_ok): continue
+        if direction == "long" and not long_ok:
+            continue
+        if direction == "short":
+            if short_mode == "reversal" and not short_ok:
+                continue   # reversal short: must be near 24h high
+            elif short_mode == "trend_follow":
+                # trend-follow short: reject only coins glued to 24h low
+                # (i.e. no room to fall). Allow anything else.
+                _at_bottom = (low24h > 0 and last <= low24h * 1.005)
+                if _at_bottom:
+                    continue
+            # else: unknown mode — let it through, process() will filter
+        if direction in ("both", "auto") and not (long_ok or short_ok):
+            continue
         kept.append(sym)
     return kept
 
@@ -2285,14 +2318,24 @@ def process(sym, cfg: dict, super_counter: dict = None, super_lock=None,
         entry_q     = _pround(m5_quick[-1]["close"])
 
         # ── F2: PDZ 15m — direction-aware ──
+        # Reversal short / long: price must be in Premium (short) or Discount (long)
+        # zone of the 290-candle range — the key entry filter.
+        # Trend-follow short: PDZ gate is SKIPPED.  In a bearish market the coin
+        # is already well below its 290-candle high, so calc_pdz_zone_short would
+        # return "Discount" (rejected) even though the coin IS a valid short
+        # candidate.  EMA/MACD/SAR gates (active in trend_follow mode) provide
+        # the necessary downtrend confirmation instead.
         pdz_zone_15m       = "—"
         pdz_zone_1h        = "—"
         is_super_eligible  = False
         _pdz_fn    = calc_pdz_zone_short if direction == "short" else calc_pdz_zone
         _super_zone = "Premium" if direction == "short" else "Discount"
+        _skip_pdz_gate = (direction == "short" and short_mode == "trend_follow")
         if cfg.get("use_pdz_15m", True):
             pdz_pass_15m, pdz_zone_15m = _pdz_fn(m15_quick, entry_q, float(cfg.get("tp_pct", 1.2)) / 100.0)
-            if pdz_zone_15m == _super_zone:
+            if _skip_pdz_gate:
+                pass  # trend-follow short — store zone label but don't gate on it
+            elif pdz_zone_15m == _super_zone:
                 if m1h_quick:
                     _, pdz_zone_1h = _pdz_fn(m1h_quick, entry_q, float(cfg.get("tp_pct", 1.2)) / 100.0)
                 if pdz_zone_1h == _super_zone:
@@ -2365,10 +2408,12 @@ def process(sym, cfg: dict, super_counter: dict = None, super_lock=None,
             _record_elim("super_cap_demoted", "super_cap_demoted_syms", sym)
 
         # ── F3: PDZ 5m — direction-aware ──
+        # Skipped for trend-follow short (same reason as F2: 290-candle
+        # range shows Discount for bearish coins, not their 5m structure).
         pdz_zone_5m = "—"
         if cfg.get("use_pdz_5m", True):
             pdz_pass_5m, pdz_zone_5m = _pdz_fn(m5_quick, entry_q, float(cfg.get("tp_pct", 1.2)) / 100.0)
-            if not pdz_pass_5m:
+            if not _skip_pdz_gate and not pdz_pass_5m:
                 _record_elim("f3_pdz5m", "f3_elim_syms", sym)
                 return None
 
@@ -2721,6 +2766,8 @@ def scan(cfg: dict, super_slots_remaining: int = None, skip_symbols: set = None,
     with _filter_lock:
         _filter_counts["pre_filtered_out"] = len(symbols) - len(pre_filtered)
         _filter_counts["pre_filter_passed_syms"] = list(pre_filtered)
+        _filter_counts["scan_direction"]  = _direction   # logged per-scan for diagnostics
+        _filter_counts["scan_short_mode"] = short_mode
 
     # ── Cooldown / active blacklist ─────────────────────────────────────────
     # Drop these BEFORE deep-scan so:
@@ -5366,11 +5413,15 @@ def _bg_loop():
                 new_sigs = _sigs_pri + _sigs_sec
                 errors   = _errs_pri + _errs_sec
             else:
-                # Single-direction scan (long or short fixed)
+                # Single-direction scan (long or short fixed).
+                # Pass direction_override explicitly — never rely on cfg fallback
+                # inside scan() so the direction is unambiguous even if cfg is
+                # momentarily stale or being updated by the sidebar save path.
                 new_sigs, errors = scan(
                     cfg,
                     super_slots_remaining=_super_slots_left,
                     skip_symbols=_pre_scan_skip,
+                    direction_override=_cfg_dir,
                     short_mode=_short_mode,
                 )
 
@@ -5548,7 +5599,7 @@ def _bg_loop():
         _rescan_event.wait(timeout=sleep_sec)
         _rescan_event.clear()
 
-# ────────────────────────   ──────────────────────────────────  ─────────────────
+# ────────────────────────���──────────────────────────────────��─────────────────
 # Auto-Analyse background thread — runs _analyze_market_conditions every N h
 # and applies the recommended settings automatically.
 # ─────────────────────────────────────────────────────────────────────────────
@@ -11143,6 +11194,10 @@ def _build_diagnostics_text() -> str:
     _hdr("FILTER FUNNEL -- LAST SCAN")
     try:
         _fc = getattr(_b, "_bsc_filter_counts", {}) or {}
+        # Show what direction + short_mode the last scan ACTUALLY used
+        _ff_dir        = _fc.get("scan_direction",  "?")
+        _ff_short_mode = _fc.get("scan_short_mode", "?")
+        _push(f"  scan direction={_ff_dir}  short_mode={_ff_short_mode}")
         _fmap = [
             ("pre_filtered_out",  "Pre-filter eliminated"),
             ("checked",           "Deep-scanned"),
@@ -11179,6 +11234,7 @@ def _build_diagnostics_text() -> str:
     # ── Per-signal detail (all buckets) ──────────────────────────────────────
     def _sig_lines(sig: dict, idx: int):
         _push(f"  [{idx}] {sig.get('symbol','?')} | status={sig.get('status','?')} "
+              f"| dir={sig.get('direction','?')} "
               f"| entry={sig.get('entry','--')} | tp={sig.get('tp','--')} "
               f"| sl={sig.get('sl','--')} | avg_entry={sig.get('avg_entry','--')} "
               f"| original_entry={sig.get('original_entry','--')} "
@@ -11268,7 +11324,6 @@ def _build_diagnostics_text() -> str:
                              f"(blend={item.get('blended_avg','?')} tp={item.get('tp_px','?')})"
                              for item in _ladder]
                     _push(f"    dca_ladder: {' | '.join(_lvls)}")
-                # DCA fills
                 _fills = _s.get("dca_fills") or []
                 if len(_fills) > 1:
                     _push(f"    dca_fills : {len(_fills)-1} DCA(s) fired -- "
