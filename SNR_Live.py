@@ -2631,7 +2631,8 @@ def process(sym, cfg: dict, super_counter: dict = None, super_lock=None,
         # return path (None, signal dict, "error").
         _flush_tl_counts()
 
-def scan(cfg: dict, super_slots_remaining: int = None, skip_symbols: set = None):
+def scan(cfg: dict, super_slots_remaining: int = None, skip_symbols: set = None,
+         direction_override: str = None, _accumulate_counts: bool = False):
     """Full watchlist scan. Returns (sorted_results, error_count).
 
     super_slots_remaining — number of additional Super Setup trades this cycle
@@ -2643,8 +2644,16 @@ def scan(cfg: dict, super_slots_remaining: int = None, skip_symbols: set = None)
     active). Removed from the deep-scan pool BEFORE any candle fetches so that
     (a) no API calls are wasted on coins that will be rejected at placement
     time, and (b) SL-cooldown-blocked coins can never consume Super slots.
+
+    direction_override — when set, forces this direction regardless of config.
+    Used by the AUTO dual-scan to run each direction in a separate pass.
+
+    _accumulate_counts — when True, adds to existing filter counts instead of
+    resetting them. Used for the secondary AUTO scan so combined totals are
+    visible in the filter funnel.
     """
-    _reset_filter_counts()
+    if not _accumulate_counts:
+        _reset_filter_counts()
     with _filter_lock:                          # store config used for this scan
         _filter_counts["scan_cfg"] = dict(cfg)
 
@@ -2655,9 +2664,12 @@ def scan(cfg: dict, super_slots_remaining: int = None, skip_symbols: set = None)
 
     # A — bulk ticker pre-filter (1 API call → eliminates ~70 % of coins)
     tickers = get_bulk_tickers()
-    _direction = cfg.get("trade_direction", "long")
-    if _direction == "auto":
-        _direction = getattr(_b, "_bsc_auto_direction", "long")
+    if direction_override is not None:
+        _direction = direction_override
+    else:
+        _direction = cfg.get("trade_direction", "long")
+        if _direction == "auto":
+            _direction = getattr(_b, "_bsc_auto_direction", "long")
     if cfg.get("use_pre_filter", True):
         pre_filtered = pre_filter_by_ticker(symbols, tickers, direction=_direction)
     else:
@@ -5190,11 +5202,44 @@ def _bg_loop():
             # Pass the full skip set (TP cooldown ∪ SL cooldown ∪ currently open)
             # into scan() so these coins are dropped pre-deep-scan.
             _pre_scan_skip = cooled | active
-            new_sigs, errors = scan(
-                cfg,
-                super_slots_remaining=_super_slots_left,
-                skip_symbols=_pre_scan_skip,
-            )
+
+            _cfg_dir = cfg.get("trade_direction", "long")
+            if _cfg_dir == "auto":
+                # AUTO mode: scan BOTH directions every cycle.
+                # Dominant direction (set by auto-analyse) gets priority
+                # so its results fill available slots first. A coin can
+                # only appear once: secondary scan skips everything
+                # already picked up in the primary pass.
+                _dominant  = getattr(_b, "_bsc_auto_direction", "long")
+                _secondary = "short" if _dominant == "long" else "long"
+
+                # Primary scan -- dominant direction
+                _sigs_pri, _errs_pri = scan(
+                    cfg,
+                    super_slots_remaining=_super_slots_left,
+                    skip_symbols=_pre_scan_skip,
+                    direction_override=_dominant,
+                )
+                # Secondary scan -- non-dominant direction
+                # Coins already found in primary pass are excluded so
+                # no symbol gets conflicting long + short signals.
+                _skip_sec = _pre_scan_skip | {s["symbol"] for s in _sigs_pri}
+                _sigs_sec, _errs_sec = scan(
+                    cfg,
+                    super_slots_remaining=max(0, _super_slots_left - len(_sigs_pri)),
+                    skip_symbols=_skip_sec,
+                    direction_override=_secondary,
+                    _accumulate_counts=True,
+                )
+                new_sigs = _sigs_pri + _sigs_sec
+                errors   = _errs_pri + _errs_sec
+            else:
+                # Single-direction scan (long or short fixed)
+                new_sigs, errors = scan(
+                    cfg,
+                    super_slots_remaining=_super_slots_left,
+                    skip_symbols=_pre_scan_skip,
+                )
 
             with _log_lock:
                 # ── Queue-limit check ─────────────────────────────────────────
@@ -10710,6 +10755,10 @@ def _build_diagnostics_text() -> str:
     _kv("bsc_sl_paused",              getattr(_b, "_bsc_sl_paused", False))
     _kv("bsc_sl_paused_reason",       getattr(_b, "_bsc_sl_paused_reason", "") or "—")
     _kv("bsc_sl_paused_ts",           _fmt_ts(getattr(_b, "_bsc_sl_paused_ts", "")))
+    _cfg_dir  = _snap_cfg.get("trade_direction", "—")
+    _auto_dir = getattr(_b, "_bsc_auto_direction", "—")
+    _kv("trade_direction (config)",   _cfg_dir)
+    _kv("_bsc_auto_direction",        _auto_dir + (" <-- ACTIVE SCAN DIRECTION" if _cfg_dir == "auto" else ""))
     try:
         _bg_t = getattr(_b, "_bsc_thread", None)
         _kv("bg_thread_alive", bool(_bg_t is not None and _bg_t.is_alive()))
