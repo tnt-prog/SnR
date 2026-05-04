@@ -3429,6 +3429,33 @@ def _place_dca_oco_algo(sig: dict, cfg: dict, new_tp: float,
                 cfg.get("trade_margin_mode", "isolated")).strip().lower()
         is_hedge = bool(sig.get("order_is_hedge", False))
         _is_short_dco = sig.get("direction", "long") == "short"
+
+        # ── SL safety clamp (OKX error 51304 prevention) ─────────────────────
+        # After a DCA fill at price X, the blended-average SL can end up
+        # fractionally ABOVE X (because the blend pulls avg up toward entry).
+        # OKX rejects OCO with error 51304 "SL trigger price cannot be higher
+        # than the mark price" when the SL trigger is at or above the live
+        # mark price, which equals the DCA fill price at placement time.
+        # Fix: clamp SL to at most 0.2% below the most-recent fill price
+        # (LONG) or at least 0.2% above fill price (SHORT).
+        _fills = sig.get("fills", [])
+        _last_fill_px = float((_fills[-1].get("price", 0) if _fills else 0) or 0)
+        if _last_fill_px > 0:
+            if not _is_short_dco and new_sl >= _last_fill_px:
+                _clamped = _pround(_last_fill_px * 0.998)
+                _append_error("trade",
+                    f"DCA OCO SL clamp [LONG]: sl={new_sl} >= fill={_last_fill_px};"
+                    f" clamped to {_clamped} (was causing OKX 51304)",
+                    symbol=sym, endpoint="/api/v5/trade/order-algo")
+                new_sl = _clamped
+            elif _is_short_dco and new_sl <= _last_fill_px:
+                _clamped = _pround(_last_fill_px * 1.002)
+                _append_error("trade",
+                    f"DCA OCO SL clamp [SHORT]: sl={new_sl} <= fill={_last_fill_px};"
+                    f" clamped to {_clamped} (was causing OKX 51304)",
+                    symbol=sym, endpoint="/api/v5/trade/order-algo")
+                new_sl = _clamped
+
         algo_body: dict = {
             "instId":          _to_okx(sym),
             "tdMode":          mode,
@@ -5057,9 +5084,17 @@ def _detect_short_mode(tickers: dict, watchlist: list, threshold: float = 0.55):
         if _rng > 0 and _last > 0:
             _scores.append((_last - _lo) / _rng)
     if not _scores:
+        # Debug: log why scores are empty so we can diagnose in Streamlit logs
+        _sample_wl  = watchlist[:3] if watchlist else []
+        _sample_tk  = list(tickers.keys())[:3] if tickers else []
+        print(f"[ShortMode] WARN: no scores computed — "
+              f"tickers={len(tickers)} watchlist={len(watchlist)} "
+              f"wl_sample={_sample_wl} ticker_sample={_sample_tk}")
         return "reversal", 0.5
     _avg  = sum(_scores) / len(_scores)
     _mode = "reversal" if _avg >= threshold else "trend_follow"
+    print(f"[ShortMode] scored={len(_scores)}/{len(watchlist)} "
+          f"avg={_avg:.3f} mode={_mode} threshold={threshold}")
     return _mode, round(_avg, 3)
 
 
@@ -5281,16 +5316,23 @@ def _bg_loop():
             _cfg_dir = cfg.get("trade_direction", "long")
 
             # ── Detect short filter mode (Option D: dynamic per-cycle) ─────────
-            # Uses already-fetched bulk ticker data (get_bulk_tickers() is cached).
             # score = avg (last - low24h) / (high24h - low24h) across watchlist.
             # >= threshold -> market bullish -> Reversal short (sell at resistance).
             # <  threshold -> market bearish -> Trend Follow short (confirm downtrend).
+            # Isolated in its own try/except — a ticker API hiccup must never
+            # prevent the main scan from running.
             _sm_thresh  = float(cfg.get("short_mode_threshold", 0.55))
             _wl_syms_sm = get_symbols_cached(cfg.get("watchlist", []))
-            _short_mode, _mkt_score = _detect_short_mode(
-                get_bulk_tickers(), _wl_syms_sm, _sm_thresh)
-            _b._bsc_short_mode   = _short_mode
-            _b._bsc_market_score = _mkt_score
+            try:
+                _short_mode, _mkt_score = _detect_short_mode(
+                    get_bulk_tickers(), _wl_syms_sm, _sm_thresh)
+                _b._bsc_short_mode   = _short_mode
+                _b._bsc_market_score = _mkt_score
+            except Exception as _sm_err:
+                _append_error("loop", f"Short mode detect failed: {_sm_err}")
+                # Keep last known mode so scan can proceed
+                _short_mode = getattr(_b, "_bsc_short_mode",   "reversal")
+                _mkt_score  = getattr(_b, "_bsc_market_score", 0.5)
 
             if _cfg_dir == "auto":
                 # AUTO mode: scan BOTH directions every cycle.
@@ -11234,7 +11276,6 @@ def _build_diagnostics_text() -> str:
                                        f"usdt=${f.get('usdt','?')} "
                                        f"{'[paper]' if f.get('paper') else '[live]'}"
                                        for i, f in enumerate(_fills[1:], 1)))
-    # ── Active Watchlist ──────────────────────────────────────────────────
     _hdr("WATCHLIST")
     try:
         _wl = list(_snap_cfg.get("watchlist", []))
@@ -11244,7 +11285,7 @@ def _build_diagnostics_text() -> str:
     except Exception as _wle:
         _push(f"  <error: {_wle}>")
 
-    # ── API Error Log ───────────────────────────────────────────────────────────
+    # ── API Error Log ─────────────────────────────────────
     _hdr("API ERROR LOG (last 200 entries, newest first)")
     try:
         _errs = list(getattr(_b, "_bsc_error_log", []) or [])
@@ -11266,7 +11307,7 @@ def _build_diagnostics_text() -> str:
     except Exception as _ele:
         _push(f"  <error: {_ele}>")
 
-    # ── Footer ───────────────────────────────────────────────────────────────────────
+    # ── Footer ────────────────────────────────────────────────
     _push("")
     _push("=" * 78)
     _push("END OF DIAGNOSTICS")
@@ -11274,9 +11315,9 @@ def _build_diagnostics_text() -> str:
     return "\n".join(_lines)
 
 
-# ──────────────────────────────────────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────────────────────────
 # Download button — renders the button in the Streamlit UI
-# ──────────────────────────────────────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────────────────────────
 try:
     _diag_text = _build_diagnostics_text()
 except Exception as _diag_ex:
