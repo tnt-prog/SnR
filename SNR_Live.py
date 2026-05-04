@@ -11272,4 +11272,9 @@ except Exception as _diag_ex:
 import datetime as _diag_dt
 _diag_fname = "diagnostics_" + _diag_dt.datetime.now().strftime("%Y%m%d_%H%M%S") + ".txt"
 
-st.d
+st.download_button(
+    label="⬇️ Download Diagnostics",
+    data=_diag_text,
+    file_name=_diag_fname,
+    mime="text/plain",
+)
