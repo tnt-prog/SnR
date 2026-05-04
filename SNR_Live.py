@@ -5612,7 +5612,7 @@ def _bg_loop():
         _rescan_event.wait(timeout=sleep_sec)
         _rescan_event.clear()
 
-# ────────────────────────���──────────────────────────────────��─────────────────
+# ────────────────────────   ──────────────────────────────────  ─────────────────
 # Auto-Analyse background thread — runs _analyze_market_conditions every N h
 # and applies the recommended settings automatically.
 # ─────────────────────────────────────────────────────────────────────────────
