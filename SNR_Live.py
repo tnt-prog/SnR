@@ -230,6 +230,7 @@ DEFAULT_CONFIG: dict = {
     "rsi_1h_min_short":      30,    # reject if RSI 1h < this (no bearish momentum)
     "rsi_1h_max_short":      75,    # reject if RSI 1h > this
     # ── Dynamic short filter mode thresholds ───────────────────────────────
+    "short_mode_override":        "auto",  # "auto" | "reversal" | "trend_follow"
     "short_mode_threshold":       0.55, # avg 24h-range position: >=threshold → Reversal, <threshold → Trend Follow
     "rsi_5m_min_short_reversal":  60,   # RSI 5m floor for Reversal short (overbought required)
     "rsi_1h_min_short_reversal":  55,   # RSI 1h floor for Reversal short (must be in overbought zone)
@@ -5137,7 +5138,12 @@ def _detect_short_mode(tickers: dict, watchlist: list, threshold: float = 0.55):
         print(f"[ShortMode] WARN: no scores computed — "
               f"tickers={len(tickers)} watchlist={len(watchlist)} "
               f"wl_sample={_sample_wl} ticker_sample={_sample_tk}")
-        return "reversal", 0.5
+        # Score 0.5 < threshold 0.55 → correct fallback is trend_follow,
+        # not reversal.  Reversal requires Premium zone (near 24h high) which
+        # is almost never satisfied in a bearish / sideways market, producing
+        # zero short signals.  trend_follow lets EMA/MACD/SAR confirm the
+        # downtrend instead.
+        return "trend_follow", 0.5
     _avg  = sum(_scores) / len(_scores)
     _mode = "reversal" if _avg >= threshold else "trend_follow"
     print(f"[ShortMode] scored={len(_scores)}/{len(watchlist)} "
@@ -5368,18 +5374,25 @@ def _bg_loop():
             # <  threshold -> market bearish -> Trend Follow short (confirm downtrend).
             # Isolated in its own try/except — a ticker API hiccup must never
             # prevent the main scan from running.
-            _sm_thresh  = float(cfg.get("short_mode_threshold", 0.55))
-            _wl_syms_sm = get_symbols_cached(cfg.get("watchlist", []))
-            try:
-                _short_mode, _mkt_score = _detect_short_mode(
-                    get_bulk_tickers(), _wl_syms_sm, _sm_thresh)
-                _b._bsc_short_mode   = _short_mode
-                _b._bsc_market_score = _mkt_score
-            except Exception as _sm_err:
-                _append_error("loop", f"Short mode detect failed: {_sm_err}")
-                # Keep last known mode so scan can proceed
-                _short_mode = getattr(_b, "_bsc_short_mode",   "reversal")
-                _mkt_score  = getattr(_b, "_bsc_market_score", 0.5)
+            _sm_thresh    = float(cfg.get("short_mode_threshold", 0.55))
+            _sm_override  = cfg.get("short_mode_override", "auto")
+            _wl_syms_sm   = get_symbols_cached(cfg.get("watchlist", []))
+            if _sm_override in ("reversal", "trend_follow"):
+                # User manually pinned the mode — skip market detection
+                _short_mode  = _sm_override
+                _mkt_score   = getattr(_b, "_bsc_market_score", 0.5)
+                _b._bsc_short_mode = _short_mode
+            else:
+                try:
+                    _short_mode, _mkt_score = _detect_short_mode(
+                        get_bulk_tickers(), _wl_syms_sm, _sm_thresh)
+                    _b._bsc_short_mode   = _short_mode
+                    _b._bsc_market_score = _mkt_score
+                except Exception as _sm_err:
+                    _append_error("loop", f"Short mode detect failed: {_sm_err}")
+                    # Keep last known mode so scan can proceed
+                    _short_mode = getattr(_b, "_bsc_short_mode",   "trend_follow")
+                    _mkt_score  = getattr(_b, "_bsc_market_score", 0.5)
 
             if _cfg_dir == "auto":
                 # AUTO mode: scan BOTH directions every cycle.
@@ -7216,6 +7229,44 @@ with st.sidebar:
     )
     st.divider()
 
+    # ── Short Mode Override ────────────────────────────────────────────────────
+    if new_trade_direction in ("short", "auto"):
+        st.markdown("**🔻 Short Filter Mode**")
+        _smo_opts   = ["auto", "trend_follow", "reversal"]
+        _smo_cur    = _snap_cfg.get("short_mode_override", "auto")
+        _smo_idx    = _smo_opts.index(_smo_cur) if _smo_cur in _smo_opts else 0
+        new_short_mode_override = st.radio(
+            "Short Mode Override",
+            _smo_opts,
+            index=_smo_idx,
+            horizontal=True,
+            key="cfg_short_mode_override",
+            format_func=lambda x: {
+                "auto":         "🤖 Auto (market score)",
+                "trend_follow": "📉 Trend Follow",
+                "reversal":     "🔄 Reversal",
+            }[x],
+            help=(
+                "Controls how the scanner looks for short entry points.\n\n"
+                "**Trend Follow** — coin is already in a confirmed downtrend "
+                "(price below EMA, bearish MACD/SAR). No zone requirement. "
+                "Best for *bearish* markets where coins have already been falling.\n\n"
+                "**Reversal** — coin is at a Premium zone (near 24h high/resistance) "
+                "with overbought RSI. Best for *bullish* markets where coins have "
+                "pumped to resistance and may reverse down.\n\n"
+                "**Auto** — detects market state from average 24h range position: "
+                "score ≥ 0.55 → Reversal, score < 0.55 → Trend Follow."
+            ))
+        _smo_labels = {
+            "auto":         f"🤖 Auto — current market score: {getattr(_b, '_bsc_market_score', 0.5):.3f} → **{getattr(_b, '_bsc_short_mode', '?')}**",
+            "trend_follow": "📉 Trend Follow pinned — EMA/MACD/SAR confirm downtrend",
+            "reversal":     "🔄 Reversal pinned — Premium zone + overbought RSI required",
+        }
+        st.caption(_smo_labels.get(new_short_mode_override, ""))
+        st.divider()
+    else:
+        new_short_mode_override = _snap_cfg.get("short_mode_override", "auto")
+
     # ── F1: Bulk Pre-filter ────────────────────────────────────────────────────
     st.markdown("**⚡ F1 — Bulk Pre-filter**")
     new_use_pre_filter = st.checkbox(
@@ -7844,6 +7895,7 @@ with st.sidebar:
             "use_dca_sl":           bool(new_use_dca_sl),
             # ── Direction & short RSI thresholds ─────────────────────────
             "trade_direction":      new_trade_direction,
+            "short_mode_override":  new_short_mode_override,
             "rsi_5m_max_short":     int(new_rsi5_max_short),
             "rsi_1h_min_short":     int(new_rsi1h_min_short),
             "rsi_1h_max_short":     int(new_rsi1h_max_short),
@@ -10947,11 +10999,14 @@ def _build_diagnostics_text() -> str:
     _auto_dir = getattr(_b, "_bsc_auto_direction", "—")
     _kv("trade_direction (config)",   _cfg_dir)
     _kv("_bsc_auto_direction",        _auto_dir + (" <-- ACTIVE SCAN DIRECTION" if _cfg_dir == "auto" else ""))
-    _short_mode_d  = getattr(_b, "_bsc_short_mode",   "reversal")
-    _mkt_score_d   = getattr(_b, "_bsc_market_score", 0.5)
-    _sm_thresh_d   = float(_snap_cfg.get("short_mode_threshold", 0.55))
-    _kv("_bsc_short_mode",    _short_mode_d + f" (market score {_mkt_score_d:.3f}, threshold {_sm_thresh_d})")
+    _short_mode_d   = getattr(_b, "_bsc_short_mode",   "trend_follow")
+    _mkt_score_d    = getattr(_b, "_bsc_market_score", 0.5)
+    _sm_thresh_d    = float(_snap_cfg.get("short_mode_threshold", 0.55))
+    _sm_override_d  = _snap_cfg.get("short_mode_override", "auto")
+    _override_note  = f" [PINNED — override={_sm_override_d}]" if _sm_override_d != "auto" else ""
+    _kv("_bsc_short_mode",    _short_mode_d + f" (market score {_mkt_score_d:.3f}, threshold {_sm_thresh_d}){_override_note}")
     _kv("_bsc_market_score",  f"{_mkt_score_d:.3f}  (>= {_sm_thresh_d} = Reversal, < {_sm_thresh_d} = Trend Follow)")
+    _kv("short_mode_override", _sm_override_d)
     try:
         _bg_t = getattr(_b, "_bsc_thread", None)
         _kv("bg_thread_alive", bool(_bg_t is not None and _bg_t.is_alive()))
