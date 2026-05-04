@@ -6652,48 +6652,46 @@ with st.sidebar:
                         st.error(f"Test failed: {_te}")
 
     st.divider()
-    # ── Auto-Analyse diff badge ───────────────────────────────────────
+    # ── Auto-Analyse last-run badge + diff ───────────────────────────
+    # Show badge whenever auto-analyse has run (regardless of whether
+    # any settings changed). Show the "What changed" expander only when
+    # there are actual changes to display.
     _aa_diff = getattr(_b, "_bsc_aa_diff", {})
     _aa_ts   = getattr(_b, "_bsc_aa_applied_at", 0.0)
-    if _aa_diff and _aa_ts > 0:
+    if _aa_ts > 0:
         import time as _aaui_t
-        _aa_age_min = int((_aaui_t.time() - _aa_ts) / 60)
-        try:
-            import pytz as _aaui_tz
-            from datetime import datetime as _aaui_dt
-            _dxb = _aaui_tz.timezone("Asia/Dubai")
-            _aa_hhmm = _aaui_dt.fromtimestamp(_aa_ts, _dxb).strftime("%H:%M")
-        except Exception:
-            _aa_hhmm = "—"
+        from datetime import datetime as _aaui_dt, timezone as _aaui_tz, timedelta as _aaui_td
+        _gst_tz  = _aaui_tz(_aaui_td(hours=4))
+        _aa_hhmm = _aaui_dt.fromtimestamp(_aa_ts, _gst_tz).strftime("%H:%M GST")
         _auto_dir_info = ""
         if _snap_cfg.get("trade_direction", "long") == "auto":
             _resolved = getattr(_b, "_bsc_auto_direction", "long").upper()
             _auto_dir_info = f"  ·  Direction → **{_resolved}**"
-        st.success(f"⚙️ Settings auto-updated at **{_aa_hhmm}**{_auto_dir_info}")
-        with st.expander("📋 What changed", expanded=False):
-            _CFG_LABELS = {
-                "use_pdz_15m":      "F2 PDZ 15m",
-                "use_pdz_5m":       "F3 PDZ 5m",
-                "rsi_5m_min":       "F4 RSI 5m min",
-                "rsi_5m_max_short": "F4 RSI 5m max (Short)",
-                "rsi_1h_min":       "F5 RSI 1h min",
-                "rsi_1h_max":       "F5 RSI 1h max",
-                "rsi_1h_min_short": "F5 RSI 1h min (Short)",
-                "rsi_1h_max_short": "F5 RSI 1h max (Short)",
-                "atr_mode":         "F5b ATR mode",
-                "use_ema_3m":       "F6 EMA 3m",
-                "use_ema_5m":       "F6 EMA 5m",
-                "use_ema_15m":      "F6 EMA 15m",
-                "use_macd_3m":      "F7 MACD 3m",
-                "use_macd_5m":      "F7 MACD 5m",
-                "use_macd_15m":     "F7 MACD 15m",
-                "use_sar_3m":       "F8 SAR 3m",
-                "use_sar_5m":       "F8 SAR 5m",
-                "use_sar_15m":      "F8 SAR 15m",
-                "vol_spike_mult":   "F9 Vol multiplier",
-                "use_ema_cross_15m":"F10 EMA cross 15m",
-            }
-            if _aa_diff:
+        if _aa_diff:
+            st.success(f"⚙️ Auto-analyse ran at **{_aa_hhmm}**{_auto_dir_info}")
+            with st.expander("📋 What changed", expanded=True):
+                _CFG_LABELS = {
+                    "use_pdz_15m":      "F2 PDZ 15m",
+                    "use_pdz_5m":       "F3 PDZ 5m",
+                    "rsi_5m_min":       "F4 RSI 5m min",
+                    "rsi_5m_max_short": "F4 RSI 5m max (Short)",
+                    "rsi_1h_min":       "F5 RSI 1h min",
+                    "rsi_1h_max":       "F5 RSI 1h max",
+                    "rsi_1h_min_short": "F5 RSI 1h min (Short)",
+                    "rsi_1h_max_short": "F5 RSI 1h max (Short)",
+                    "atr_mode":         "F5b ATR mode",
+                    "use_ema_3m":       "F6 EMA 3m",
+                    "use_ema_5m":       "F6 EMA 5m",
+                    "use_ema_15m":      "F6 EMA 15m",
+                    "use_macd_3m":      "F7 MACD 3m",
+                    "use_macd_5m":      "F7 MACD 5m",
+                    "use_macd_15m":     "F7 MACD 15m",
+                    "use_sar_3m":       "F8 SAR 3m",
+                    "use_sar_5m":       "F8 SAR 5m",
+                    "use_sar_15m":      "F8 SAR 15m",
+                    "vol_spike_mult":   "F9 Vol multiplier",
+                    "use_ema_cross_15m":"F10 EMA cross 15m",
+                }
                 _diff_rows = []
                 for _dk, (_dold, _dnew) in _aa_diff.items():
                     _lbl = _CFG_LABELS.get(_dk, _dk)
@@ -6704,12 +6702,12 @@ with st.sidebar:
                     })
                 st.dataframe(_diff_rows, hide_index=True,
                              use_container_width=True)
-            else:
-                st.caption("All settings already at recommended values.")
-            if st.button("Dismiss", key="btn_aa_dismiss"):
-                _b._bsc_aa_diff = {}
-                _b._bsc_aa_applied_at = 0.0
-                st.rerun()
+                if st.button("Dismiss", key="btn_aa_dismiss"):
+                    _b._bsc_aa_diff = {}
+                    st.rerun()
+        else:
+            st.info(f"⚙️ Auto-analyse ran at **{_aa_hhmm}**{_auto_dir_info}  \n"
+                    f"All settings already at recommended values — nothing changed.")
     st.divider()
 
     new_margin_mode = st.selectbox(
