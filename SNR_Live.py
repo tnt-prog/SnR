@@ -2357,56 +2357,56 @@ def process(sym, cfg: dict, super_counter: dict = None, super_lock=None,
                         super_counter["slots"] -= 1
                     else:
                         _take_super_slot = False
-        if _take_super_slot:
-            if direction == "short":
-                tp      = _pround(entry_q * (1 - cfg["tp_pct"] / 100))
-                _ss_lev = max(1, int(cfg.get("trade_leverage", 10)))
-                sl      = (_pround(entry_q * (1 + 1 / _ss_lev))
-                           if cfg.get("trade_margin_mode", "isolated") == "isolated"
-                           else _pround(entry_q * (1 + cfg["sl_pct"] / 100)))
-            else:
-                tp      = _pround(entry_q * (1 + cfg["tp_pct"] / 100))
-                _ss_lev = max(1, int(cfg.get("trade_leverage", 10)))
-                sl      = (_pround(entry_q * (1 - 1 / _ss_lev))
-                           if cfg.get("trade_margin_mode", "isolated") == "isolated"
-                           else _pround(entry_q * (1 - cfg["sl_pct"] / 100)))
-            sec     = SECTORS.get(sym, "Other")
-            max_lev = get_max_leverage(sym)
-            _incr_filter("passed")
-            _incr_filter("super_setup")
-            _filter_counts["passed_syms"].append(sym)
-            _filter_counts["super_setup_syms"].append(sym)
-            return {
-                "id":             str(uuid.uuid4())[:8],
-                "timestamp":      dubai_now().isoformat(),
-                "symbol":         sym,
-                "direction":      direction,
-                "entry":          entry_q,
-                "tp":             tp,
-                "sl":             sl,
-                "sector":         sec,
-                "status":         "open",
-                "close_price":    None,
-                "close_time":     None,
-                "max_lev":        max_lev,
-                "is_super_setup": True,
-                "criteria": {
-                    "rsi_5m": "—", "rsi_1h": "—",
-                    "ema_3m": "—", "ema_5m": "—", "ema_15m": "—",
-                    "macd_3m": "—", "macd_5m": "—", "macd_15m": "—",
-                    "sar_3m": "—", "sar_5m": "—", "sar_15m": "—",
-                    "vol_ratio": "—",
-                    "pdz_zone_5m":  "—",
-                    "pdz_zone_15m": pdz_zone_15m,
-                    "pdz_zone_1h":  pdz_zone_1h,
-                    "ema_cross_12_15m": "—",
-                    "ema_cross_21_15m": "—",
-                    "atr_15m": "—",
-                    "atr_ratio": "—",
-                },
-            }
-            # else: super cap exhausted — demote and fall through to F3-F10
-            _record_elim("super_cap_demoted", "super_cap_demoted_syms", sym)
+            if _take_super_slot:
+                if direction == "short":
+                    tp      = _pround(entry_q * (1 - cfg["tp_pct"] / 100))
+                    _ss_lev = max(1, int(cfg.get("trade_leverage", 10)))
+                    sl      = (_pround(entry_q * (1 + 1 / _ss_lev))
+                               if cfg.get("trade_margin_mode", "isolated") == "isolated"
+                               else _pround(entry_q * (1 + cfg["sl_pct"] / 100)))
+                else:
+                    tp      = _pround(entry_q * (1 + cfg["tp_pct"] / 100))
+                    _ss_lev = max(1, int(cfg.get("trade_leverage", 10)))
+                    sl      = (_pround(entry_q * (1 - 1 / _ss_lev))
+                               if cfg.get("trade_margin_mode", "isolated") == "isolated"
+                               else _pround(entry_q * (1 - cfg["sl_pct"] / 100)))
+                sec     = SECTORS.get(sym, "Other")
+                max_lev = get_max_leverage(sym)
+                _incr_filter("passed")
+                _incr_filter("super_setup")
+                _filter_counts["passed_syms"].append(sym)
+                _filter_counts["super_setup_syms"].append(sym)
+                return {
+                    "id":             str(uuid.uuid4())[:8],
+                    "timestamp":      dubai_now().isoformat(),
+                    "symbol":         sym,
+                    "direction":      direction,
+                    "entry":          entry_q,
+                    "tp":             tp,
+                    "sl":             sl,
+                    "sector":         sec,
+                    "status":         "open",
+                    "close_price":    None,
+                    "close_time":     None,
+                    "max_lev":        max_lev,
+                    "is_super_setup": True,
+                    "criteria": {
+                        "rsi_5m": "—", "rsi_1h": "—",
+                        "ema_3m": "—", "ema_5m": "—", "ema_15m": "—",
+                        "macd_3m": "—", "macd_5m": "—", "macd_15m": "—",
+                        "sar_3m": "—", "sar_5m": "—", "sar_15m": "—",
+                        "vol_ratio": "—",
+                        "pdz_zone_5m":  "—",
+                        "pdz_zone_15m": pdz_zone_15m,
+                        "pdz_zone_1h":  pdz_zone_1h,
+                        "ema_cross_12_15m": "—",
+                        "ema_cross_21_15m": "—",
+                        "atr_15m": "—",
+                        "atr_ratio": "—",
+                    },
+                }
+                # else: super cap exhausted — demote and fall through to F3-F10
+                _record_elim("super_cap_demoted", "super_cap_demoted_syms", sym)
 
         # ── F3: PDZ 5m — direction-aware ──
         # Skipped for trend-follow short (same reason as F2: 290-candle
