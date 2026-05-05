@@ -146,6 +146,11 @@ DEFAULT_CONFIG: dict = {
     "f2_supertrend":         True,   # F2 SuperTrend (ATR 10, mult 3.0) on 15m
     "f3_chandelier":         True,   # F3 Chandelier Exit (ATR 22, mult 3.0) on 15m
     "f4_lux":                True,   # F4 Lux Trend (ATR 14, mult 2.0) on 15m
+    # —— DZ_SAFM Premium Zone Filter ——————————————————————————————
+    "use_dzsafm_filter":     True,   # Skip entries in/near Premium zone (DZ_SAFM)
+    "dzsafm_lookback":       200,    # Candles to look back for swing high/low (15m)
+    "dzsafm_premium_pct":    5.0,    # Top X% of range = Premium zone
+    "dzsafm_buffer_pct":     2.0,    # Extra % buffer below Premium zone boundary
     "scan_hour_enabled":     False,
     "scan_hour_start":       0,    # 0–23 GST
     "scan_hour_end":         23,   # 0–23 GST
@@ -1760,6 +1765,8 @@ def _reset_filter_counts():
         "pre_filtered_out":          0,
         "checked":                   0,
         "f_trend_filter":            0,
+        "f_premium_zone":             0,
+        "f_premium_zone_syms":        [],
         "f_empty_data":              0,
         "passed":                    0,
         "f_sl_cooldown":             0,
@@ -1859,7 +1866,7 @@ def process(sym, cfg: dict, **_kwargs):
         _entry_indicators = []
         if _use_st or _use_ce or _use_lux:
             # [:-1] excludes the currently forming candle; [-1] = last closed bar
-            _c15 = get_klines(sym, "15m", 100)[:-1]
+            _c15 = get_klines(sym, "15m", 200)[:-1]
             _confirmed, _entry_indicators, _flip_close = _check_trend_confirmation(
                 _c15, _use_st, _use_ce, _use_lux)
             if not _confirmed:
@@ -1872,6 +1879,26 @@ def process(sym, cfg: dict, **_kwargs):
             if _flip_close is not None and entry > _flip_close * 1.005:
                 _record_elim("f_price_drift", "f_price_drift_syms", sym)
                 return None
+
+        # —— DZ_SAFM Premium Zone Filter ————————————————————————————
+        if cfg.get("use_dzsafm_filter", True) and _c15:
+            _dz_lookback  = int(cfg.get("dzsafm_lookback",    200))
+            _dz_prem_pct  = float(cfg.get("dzsafm_premium_pct", 5.0))
+            _dz_buf_pct   = float(cfg.get("dzsafm_buffer_pct",  2.0))
+            _dz_candles   = _c15[-_dz_lookback:] if len(_c15) >= _dz_lookback else _c15
+            _dz_high      = max(c["high"] for c in _dz_candles)
+            _dz_low       = min(c["low"]  for c in _dz_candles)
+            _dz_range     = _dz_high - _dz_low
+            if _dz_range > 0:
+                _prem_frac    = _dz_prem_pct / 100.0
+                _buf_frac     = _dz_buf_pct  / 100.0
+                # Premium zone boundary: top _prem_frac of the swing range
+                _prem_thresh  = (1 - _prem_frac) * _dz_high + _prem_frac * _dz_low
+                # Extended skip zone: entry must be below threshold*(1 - buffer)
+                _skip_thresh  = _prem_thresh * (1 - _buf_frac)
+                if entry >= _skip_thresh:
+                    _record_elim("f_premium_zone", "f_premium_zone_syms", sym)
+                    return None
 
         _incr_filter("passed")
         _filter_counts["passed_syms"].append(sym)
@@ -3176,6 +3203,49 @@ with st.sidebar:
         st.caption("⚠️ All disabled — trend filter bypassed")
     st.divider()
 
+    # ── DZ_SAFM Premium Zone Filter ────────────────────────
+    st.markdown(
+        "**🛡️ F5 — DZ_SAFM Premium Zone Filter**",
+        help=(
+            "Skips entry if the coin's current price is inside or approaching the Premium zone.\n\n"
+            "Premium zone = top X% of the swing range (highest high / lowest low over the lookback).\n\n"
+            "Buffer: additionally skips coins within Y% below the Premium zone boundary.\n\n"
+            "Example: swing high=2.40, swing low=2.00, range=0.40\n"
+            "Premium boundary (5%) = 0.95×2.40 + 0.05×2.00 = 2.38\n"
+            "With 2% buffer, skip if price ≥ 2.38×0.98 = 2.332"
+        )
+    )
+    new_use_dzsafm = st.checkbox(
+        "Enable F5 — DZ_SAFM Premium Zone Filter",
+        value=bool(_snap_cfg.get("use_dzsafm_filter", True)), key="cfg_use_dzsafm",
+    )
+    if new_use_dzsafm:
+        new_dzsafm_lookback = st.number_input(
+            "Lookback candles (15m)", min_value=50, max_value=500,
+            value=int(_snap_cfg.get("dzsafm_lookback", 200)),
+            step=50, key="cfg_dzsafm_lookback",
+            help="Number of 15m candles to compute swing high/low. 200 = ~50 hours."
+        )
+        new_dzsafm_premium_pct = st.number_input(
+            "Premium zone top % of range", min_value=1.0, max_value=20.0,
+            value=float(_snap_cfg.get("dzsafm_premium_pct", 5.0)),
+            step=0.5, format="%.1f", key="cfg_dzsafm_premium_pct",
+            help="Top X% of swing range is the Premium (resistance) zone."
+        )
+        new_dzsafm_buffer_pct = st.number_input(
+            "Approach buffer % below boundary", min_value=0.0, max_value=10.0,
+            value=float(_snap_cfg.get("dzsafm_buffer_pct", 2.0)),
+            step=0.5, format="%.1f", key="cfg_dzsafm_buffer_pct",
+            help="Skip entry if price is within this % below the Premium zone boundary."
+        )
+        st.caption(f"✅ Top {new_dzsafm_premium_pct:.1f}% of swing range skipped + {new_dzsafm_buffer_pct:.1f}% approach buffer")
+    else:
+        new_dzsafm_lookback    = int(_snap_cfg.get("dzsafm_lookback",     200))
+        new_dzsafm_premium_pct = float(_snap_cfg.get("dzsafm_premium_pct", 5.0))
+        new_dzsafm_buffer_pct  = float(_snap_cfg.get("dzsafm_buffer_pct",  2.0))
+        st.caption("⏸️ Disabled — entries near Premium zone are allowed")
+    st.divider()
+
     # ── Exit Criteria ─────────────────────────────────────────────────────────
     st.markdown(
         "**🚪 Exit Criteria**",
@@ -3592,6 +3662,10 @@ with st.sidebar:
             "f2_supertrend":       bool(new_f2_st),
             "f3_chandelier":       bool(new_f3_ce),
             "f4_lux":              bool(new_f4_lux),
+            "use_dzsafm_filter":   bool(new_use_dzsafm),
+            "dzsafm_lookback":     int(new_dzsafm_lookback),
+            "dzsafm_premium_pct":  float(new_dzsafm_premium_pct),
+            "dzsafm_buffer_pct":   float(new_dzsafm_buffer_pct),
             "loop_minutes": int(new_loop), "cooldown_minutes": int(new_cool),
             "max_open_trades":    max(1, int(new_max_open_trades)),
             "sl_cooldown_hours":  max(1, int(new_sl_cooldown_hours)),
@@ -3627,7 +3701,12 @@ with st.sidebar:
 # ─────────────────────────────────────────────────────────────────────────────
 # MAIN AREA
 # ─────────────────────────────────────────────────────────────────────────────
-st.title("S&R — Crypto Intelligent Portal")
+st.markdown(
+    "<h1 style='margin-bottom:4px;'>S&amp;R — Crypto Intelligent Portal"
+    " <span style='font-size:0.55em;font-weight:400;vertical-align:middle;"
+    "color:#007a7a;'>v2.0</span></h1>",
+    unsafe_allow_html=True,
+)
 
 # ── Total Realized PnL computation ─────────────────────────────────────────────
 # Moved above the account summary box so _total_pnl is available for the
@@ -3761,15 +3840,15 @@ if col_h2.button("🔄 Refresh", key="manual_refresh"): st.rerun()
 _cb_paused_hdr = getattr(_b, "_bsc_sl_paused", False)
 if _cb_paused_hdr:
     col_h4.markdown(
-        '<div style="background:#FFF3CD;border:1px solid #FFCA28;border-radius:6px;'
-        'padding:3px 8px;font-size:0.78rem;font-weight:600;color:#7B4F00;'
-        'display:inline-block;">🔴 Circuit Breaker: PAUSED</div>',
+        '<div style="background:#FFF3CD;border:1px solid #FFCA28;border-radius:8px;'
+        'padding:10px 16px;font-size:0.88rem;font-weight:700;color:#7B4F00;'
+        'display:inline-block;line-height:1.4;">🔴 Circuit Breaker: PAUSED</div>',
         unsafe_allow_html=True)
 else:
     col_h4.markdown(
-        '<div style="background:#E8F5E9;border:1px solid #A5D6A7;border-radius:6px;'
-        'padding:3px 8px;font-size:0.78rem;font-weight:600;color:#1B5E20;'
-        'display:inline-block;">✅ Circuit Breaker: OK</div>',
+        '<div style="background:#E8F5E9;border:1px solid #A5D6A7;border-radius:8px;'
+        'padding:10px 16px;font-size:0.88rem;font-weight:700;color:#1B5E20;'
+        'display:inline-block;line-height:1.4;">✅ Circuit Breaker: OK</div>',
         unsafe_allow_html=True)
 
 # ── API connection status badge ───────────────────────────────────────────────
@@ -3873,6 +3952,7 @@ _health_items = [
     ("API Errors",      health.get("total_api_errors", 0),                "Cumulative OKX API errors logged since startup"),
     ("Pre-filtered ⚡", pre_out,                                          "Coins removed by bulk ticker pre-filter (saves API calls)"),
     ("Deep Scanned",    deep_sc,                                          "Coins that passed pre-filter and received full candle analysis"),
+    ("⏳ Queued",        queue_count,                                      f"Signals detected while the {_max_open_cap}-trade limit was reached — no order placed"),
 ]
 _health_boxes = "".join(
     f'<div title="{h}" style="background:#E0F2F1;border:1px solid #B2DFDB;border-radius:8px;'
@@ -3890,7 +3970,7 @@ st.markdown(
 )
 
 # ── Row 2: Trade results ──────────────────────────────────────────────────────
-m6, m7, m8, m8b, m8c, m8d, m9 = st.columns(7)
+m6, m7, m8, m8b, m8c, m8d = st.columns(6)
 # ── Open — large orange ─────────────────────────────────────────────────
 with m6:
     st.markdown(
@@ -3982,20 +4062,6 @@ with m8d:
         unsafe_allow_html=True,
     )
 # ── Queued — gray ────────────────────────────────────────────────────────
-with m9:
-    st.markdown(
-        f"""<div style="background:#F0F0F0;border:1px solid #9E9E9E66;border-radius:8px;
-                        padding:12px 16px 10px 16px;min-height:88px;"
-             title="Signals detected while the {_max_open_cap}-trade limit was reached — no order placed, coin rescanned each cycle">
-            <p style="margin:0 0 4px 0;font-size:0.72rem;font-weight:700;
-                      color:#424242;letter-spacing:.05em;line-height:1.2;">⏳ QUEUED</p>
-            <p style="margin:0;font-size:1.9rem;font-weight:700;
-                      color:#424242;line-height:1.1;">{queue_count}</p>
-            <p style="margin:2px 0 0 0;font-size:0.68rem;font-weight:500;
-                      color:#616161;line-height:1.2;">no trade placed</p>
-        </div>""",
-        unsafe_allow_html=True,
-    )
 
 if getattr(_b, "_bsc_last_error", ""):
     st.warning(f"⚠️ {_b._bsc_last_error}")
@@ -5775,7 +5841,7 @@ if signals:
         except Exception:
             pass
     _has_per_day = len(signals) > 1 and bool(_dc)
-    ch1, ch2, ch3 = st.columns(3)
+    ch1, ch2, ch3, ch4 = st.columns(4)
     sec_counts: dict = {}
     for s in signals:
         k = s.get("sector","Other"); sec_counts[k] = sec_counts.get(k,0)+1
@@ -5819,6 +5885,46 @@ if signals:
             xaxis=dict(gridcolor="rgba(0,122,128,0.2)"),
             margin=dict(t=40, b=10, l=10, r=10),
         ), use_container_width=True)
+
+    # ── Daily PnL chart ────────────────────
+    _pnl_by_day: dict = {}
+    for _ps in signals:
+        if _ps.get("status") not in ("tp_hit", "sl_hit", "trend_exit", "safestop", "time_limit"):
+            continue
+        try:
+            _ct = _ps.get("close_time")
+            if not _ct:
+                continue
+            _day = to_dubai(datetime.fromisoformat(_ct.replace("Z","+00:00"))).strftime("%m/%d")
+            _pv  = _pnl_topline(_ps, _pnl_fb_usdt, _pnl_fb_lev)
+            if _pv is not None:
+                _pnl_by_day[_day] = _pnl_by_day.get(_day, 0.0) + _pv
+        except Exception:
+            pass
+    if _pnl_by_day:
+        _pnl_days  = sorted(_pnl_by_day.keys())
+        _pnl_vals  = [_pnl_by_day[_d] for _d in _pnl_days]
+        _pnl_colors = ["#2E7D32" if v >= 0 else "#C0392B" for v in _pnl_vals]
+        _pnl_texts  = [f"+${v:.2f}" if v >= 0 else f"-${abs(v):.2f}" for v in _pnl_vals]
+        ch4.plotly_chart(go.Figure(go.Bar(
+            x=_pnl_days, y=_pnl_vals,
+            width=0.2,
+            marker=dict(color=_pnl_colors, opacity=0.9),
+            text=_pnl_texts, textposition="outside",
+            textfont=dict(size=11),
+        )).update_layout(
+            title=dict(text="Daily PnL USD (Dubai/GST)", font=dict(size=13, color="#1E4848")),
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+            font=dict(color="#062020"),
+            bargap=0.7,
+            yaxis=dict(gridcolor="rgba(0,122,128,0.2)", zeroline=True,
+                       zerolinecolor="rgba(0,0,0,0.3)", zerolinewidth=1),
+            xaxis=dict(gridcolor="rgba(0,122,128,0.2)"),
+            margin=dict(t=40, b=10, l=10, r=10),
+        ), use_container_width=True)
+    else:
+        ch4.caption("No closed trades yet for PnL chart.")
 
 # ── Filter funnel ──────────────────────────────────────────────────────────────
 # Deep-copy under lock so background thread can't mutate lists mid-render
@@ -6112,6 +6218,17 @@ def _build_diagnostics_text() -> str:
         _kv("disqualifier",
             "if ANY indicator fires a SELL after the earlier of the two buy flips → skip coin")
         _kv("candle_window_restriction", "NONE — buys can be any distance apart")
+        _sub("DZ_SAFM Premium Zone Filter (F5)")
+        _use_dz = bool(_snap_cfg.get("use_dzsafm_filter", True))
+        _dz_lb  = int(_snap_cfg.get("dzsafm_lookback", 200))
+        _dz_pp  = float(_snap_cfg.get("dzsafm_premium_pct", 5.0))
+        _dz_bp  = float(_snap_cfg.get("dzsafm_buffer_pct",  2.0))
+        _kv("dzsafm_filter",     "ENABLED" if _use_dz else "DISABLED")
+        if _use_dz:
+            _kv("dzsafm_lookback_candles",  f"{_dz_lb} × 15m = {round(_dz_lb*15/60,1)}h of context")
+            _kv("dzsafm_premium_zone_top",  f"top {_dz_pp}% of swing range")
+            _kv("dzsafm_approach_buffer",   f"{_dz_bp}% below Premium boundary")
+            _kv("dzsafm_skip_condition",    f"skip if price ≥ premium_boundary × (1 - {_dz_bp}%/100)")
         _sub("Exit Criteria")
         _use_tp_exit_d  = bool(_snap_cfg.get("use_tp_exit",    False))
         _use_sl_exit_d  = bool(_snap_cfg.get("use_sl_exit",    False))
@@ -6163,9 +6280,10 @@ def _build_diagnostics_text() -> str:
     _kv("trend_exit",  len(_trend_exit_sigs))
     _kv("safestop",    len(_safestop_sigs))
     _kv("time_limit",  len(_timelimit_sigs))
-    _kv("queue_limit", len(_queue_sigs))
-    _kv("closed_okx",  len(_closed_okx_sigs))
-    _kv("total",       len(signals))
+    _kv("queue_limit",           len(_queue_sigs))
+    _kv("closed_okx",            len(_closed_okx_sigs))
+    _kv("premium_zone_skipped",  _filter_counts.get("f_premium_zone", 0))
+    _kv("total",                 len(signals))
 
 
     # ── Capital Requirement Summary ──────────────────────────────────────────
