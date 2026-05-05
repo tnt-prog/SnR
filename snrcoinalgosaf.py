@@ -5841,7 +5841,7 @@ if signals:
         except Exception:
             pass
     _has_per_day = len(signals) > 1 and bool(_dc)
-    ch1, ch2, ch3, ch4 = st.columns(4)
+    ch1, ch2 = st.columns(2)
     sec_counts: dict = {}
     for s in signals:
         k = s.get("sector","Other"); sec_counts[k] = sec_counts.get(k,0)+1
@@ -5863,6 +5863,7 @@ if signals:
                      plot_bgcolor="rgba(0,0,0,0)", font=dict(color="#062020"),
                      yaxis=dict(gridcolor="rgba(0,122,128,0.2)"), margin=dict(t=40,b=10,l=10,r=10)),
                      use_container_width=True)
+    ch3, ch4 = st.columns(2)
     if _has_per_day:
         _days = sorted(_dc.keys())
         ch3.plotly_chart(go.Figure(go.Bar(
@@ -5913,53 +5914,51 @@ if signals:
         _pnl_colors = ["#2E7D32" if v >= 0 else "#C0392B" for v in _pnl_vals]
         # Outside-bar labels: net PnL per day
         _pnl_texts  = [f"+${v:.2f}" if v >= 0 else f"-${abs(v):.2f}" for v in _pnl_vals]
-        # Inside-bar annotations: gross profit + gross loss breakdown
-        _annotations = []
-        for _i, _d in enumerate(_pnl_days):
-            _p   = _pnl_profit_day.get(_d, 0.0)
-            _l   = _pnl_loss_day.get(_d, 0.0)
-            _net = _pnl_vals[_i]
-            _parts = []
-            if _p > 0.0: _parts.append(f"+${_p:.2f}")
-            if _l < 0.0: _parts.append(f"-${abs(_l):.2f}")
-            if _parts and abs(_net) > 0.01:
-                _annotations.append(dict(
-                    x=_d, y=_net * 0.45,
-                    text="<br>".join(_parts),
-                    showarrow=False,
-                    font=dict(size=9, color="white", family="monospace"),
-                    align="center",
-                    bgcolor="rgba(0,0,0,0)",
-                ))
         # Grand total annotation at top of chart
         _grand_total = sum(_pnl_vals)
         _gt_sign     = "+" if _grand_total >= 0 else ""
         _gt_color    = "#1B5E20" if _grand_total >= 0 else "#B71C1C"
-        _annotations.append(dict(
+        _total_ann   = [dict(
             xref="paper", yref="paper",
-            x=0.5, y=1.13,
+            x=0.5, y=1.10,
             text=f"<b>Total PnL: {_gt_sign}${_grand_total:.2f}</b>",
             showarrow=False,
             font=dict(size=13, color=_gt_color),
             align="center",
-        ))
+        )]
+        # Build per-day hover text with profit/loss breakdown
+        _hover_texts = []
+        for _i, _d in enumerate(_pnl_days):
+            _p   = _pnl_profit_day.get(_d, 0.0)
+            _l   = _pnl_loss_day.get(_d, 0.0)
+            _net = _pnl_vals[_i]
+            _net_str = f"+${_net:.2f}" if _net >= 0 else f"-${abs(_net):.2f}"
+            _hover_texts.append(
+                f"<b>{_d}</b><br>"
+                f"Net PnL: {_net_str}<br>"
+                + (f"Profit:  +${_p:.2f}<br>" if _p > 0 else "")
+                + (f"Loss:    -${abs(_l):.2f}" if _l < 0 else "")
+            )
         ch4.plotly_chart(go.Figure(go.Bar(
             x=_pnl_days, y=_pnl_vals,
             width=0.2,
             marker=dict(color=_pnl_colors, opacity=0.9),
             text=_pnl_texts, textposition="outside",
             textfont=dict(size=11),
+            hovertext=_hover_texts,
+            hoverinfo="text",
         )).update_layout(
             title=dict(text="Daily PnL USD (Dubai/GST)", font=dict(size=13, color="#1E4848")),
             paper_bgcolor="rgba(0,0,0,0)",
             plot_bgcolor="rgba(0,0,0,0)",
             font=dict(color="#062020"),
             bargap=0.7,
-            annotations=_annotations,
+            annotations=_total_ann,
             yaxis=dict(gridcolor="rgba(0,122,128,0.2)", zeroline=True,
                        zerolinecolor="rgba(0,0,0,0.3)", zerolinewidth=1),
             xaxis=dict(gridcolor="rgba(0,122,128,0.2)"),
             margin=dict(t=55, b=10, l=10, r=10),
+            hoverlabel=dict(bgcolor="white", font_size=12),
         ), use_container_width=True)
     else:
         ch4.caption("No closed trades yet for PnL chart.")
