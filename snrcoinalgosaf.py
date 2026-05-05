@@ -5887,7 +5887,9 @@ if signals:
         ), use_container_width=True)
 
     # ── Daily PnL chart ────────────────────
-    _pnl_by_day: dict = {}
+    _pnl_by_day:     dict = {}
+    _pnl_profit_day: dict = {}  # gross profit per day
+    _pnl_loss_day:   dict = {}  # gross loss per day
     for _ps in signals:
         if _ps.get("status") not in ("tp_hit", "sl_hit", "trend_exit", "safestop", "time_limit"):
             continue
@@ -5899,13 +5901,48 @@ if signals:
             _pv  = _pnl_topline(_ps, _pnl_fb_usdt, _pnl_fb_lev)
             if _pv is not None:
                 _pnl_by_day[_day] = _pnl_by_day.get(_day, 0.0) + _pv
+                if _pv >= 0:
+                    _pnl_profit_day[_day] = _pnl_profit_day.get(_day, 0.0) + _pv
+                else:
+                    _pnl_loss_day[_day]   = _pnl_loss_day.get(_day, 0.0) + _pv
         except Exception:
             pass
     if _pnl_by_day:
-        _pnl_days  = sorted(_pnl_by_day.keys())
-        _pnl_vals  = [_pnl_by_day[_d] for _d in _pnl_days]
+        _pnl_days   = sorted(_pnl_by_day.keys())
+        _pnl_vals   = [_pnl_by_day[_d] for _d in _pnl_days]
         _pnl_colors = ["#2E7D32" if v >= 0 else "#C0392B" for v in _pnl_vals]
+        # Outside-bar labels: net PnL per day
         _pnl_texts  = [f"+${v:.2f}" if v >= 0 else f"-${abs(v):.2f}" for v in _pnl_vals]
+        # Inside-bar annotations: gross profit + gross loss breakdown
+        _annotations = []
+        for _i, _d in enumerate(_pnl_days):
+            _p   = _pnl_profit_day.get(_d, 0.0)
+            _l   = _pnl_loss_day.get(_d, 0.0)
+            _net = _pnl_vals[_i]
+            _parts = []
+            if _p > 0.0: _parts.append(f"+${_p:.2f}")
+            if _l < 0.0: _parts.append(f"-${abs(_l):.2f}")
+            if _parts and abs(_net) > 0.01:
+                _annotations.append(dict(
+                    x=_d, y=_net * 0.45,
+                    text="<br>".join(_parts),
+                    showarrow=False,
+                    font=dict(size=9, color="white", family="monospace"),
+                    align="center",
+                    bgcolor="rgba(0,0,0,0)",
+                ))
+        # Grand total annotation at top of chart
+        _grand_total = sum(_pnl_vals)
+        _gt_sign     = "+" if _grand_total >= 0 else ""
+        _gt_color    = "#1B5E20" if _grand_total >= 0 else "#B71C1C"
+        _annotations.append(dict(
+            xref="paper", yref="paper",
+            x=0.5, y=1.13,
+            text=f"<b>Total PnL: {_gt_sign}${_grand_total:.2f}</b>",
+            showarrow=False,
+            font=dict(size=13, color=_gt_color),
+            align="center",
+        ))
         ch4.plotly_chart(go.Figure(go.Bar(
             x=_pnl_days, y=_pnl_vals,
             width=0.2,
@@ -5918,10 +5955,11 @@ if signals:
             plot_bgcolor="rgba(0,0,0,0)",
             font=dict(color="#062020"),
             bargap=0.7,
+            annotations=_annotations,
             yaxis=dict(gridcolor="rgba(0,122,128,0.2)", zeroline=True,
                        zerolinecolor="rgba(0,0,0,0.3)", zerolinewidth=1),
             xaxis=dict(gridcolor="rgba(0,122,128,0.2)"),
-            margin=dict(t=40, b=10, l=10, r=10),
+            margin=dict(t=55, b=10, l=10, r=10),
         ), use_container_width=True)
     else:
         ch4.caption("No closed trades yet for PnL chart.")
