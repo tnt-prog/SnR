@@ -1487,16 +1487,26 @@ def place_okx_order(sig: dict, cfg: dict) -> dict:
 
         # ── Isolated: OCO (TP + SL) ───────────────────────────────────────────
         # In hedge mode, closing a long requires posSide="long" on the sell too.
+        # OKX BUY-side OCO field semantics (closing a short):
+        #   tpTriggerPx fires when price RISES  → use for SHORT SL (loss = price rises)
+        #   slTriggerPx fires when price FALLS   → use for SHORT TP (profit = price falls)
+        # For LONG OCO (sell-side): standard mapping applies (tp=rises, sl=falls).
+        if _is_short_ord:
+            _oco_tp_px  = str(actual_sl)   # short SL price → tpTriggerPx (fires on rise)
+            _oco_sl_px  = str(actual_tp)   # short TP price → slTriggerPx (fires on fall)
+        else:
+            _oco_tp_px  = str(actual_tp)
+            _oco_sl_px  = str(actual_sl)
         algo_body: dict = {
             "instId":          _to_okx(sym),
             "tdMode":          mode,
             "side":            "buy" if _is_short_ord else "sell",
             "ordType":         "oco",
             "sz":              str(contracts),
-            "tpTriggerPx":     str(actual_tp),
+            "tpTriggerPx":     _oco_tp_px,
             "tpTriggerPxType": "mark",
             "tpOrdPx":         "-1",    # market fill when TP triggers
-            "slTriggerPx":     str(actual_sl),
+            "slTriggerPx":     _oco_sl_px,
             "slTriggerPxType": "mark",
             "slOrdPx":         "-1",    # market fill when SL triggers
         }
@@ -1698,15 +1708,20 @@ def place_okx_manual_order(sym: str, entry: float, tp: float, sl: float,
                         "status": "error", "error": err}
 
             # OCO with user-specified TP/SL (no recalculation for manual orders)
+            # OKX BUY-side OCO (closing short): tpTriggerPx fires on RISE (→ use for SL),
+            #                                   slTriggerPx fires on FALL  (→ use for TP)
+            _man_is_short = (direction == "short")
+            _man_tp_px = str(_pround(sl if _man_is_short else tp))
+            _man_sl_px = str(_pround(tp if _man_is_short else sl))
             algo_body: dict = {
                 "instId":      _to_okx(sym),
                 "tdMode":      mode,
-                "side":        "buy" if direction == "short" else "sell",
+                "side":        "buy" if _man_is_short else "sell",
                 "ordType":     "oco",
                 "sz":          str(contracts),
-                "tpTriggerPx": str(_pround(tp)),
+                "tpTriggerPx": _man_tp_px,
                 "tpOrdPx":     "-1",
-                "slTriggerPx": str(_pround(sl)),
+                "slTriggerPx": _man_sl_px,
                 "slOrdPx":     "-1",
             }
             if is_hedge:
@@ -3505,16 +3520,25 @@ def _place_dca_oco_algo(sig: dict, cfg: dict, new_tp: float,
                     symbol=sym, endpoint="/api/v5/trade/order-algo")
                 new_sl = _clamped
 
+        # OKX BUY-side OCO field semantics (closing a short):
+        #   tpTriggerPx fires when price RISES  → use for SHORT SL (loss)
+        #   slTriggerPx fires when price FALLS   → use for SHORT TP (profit)
+        if _is_short_dco:
+            _dco_tp_px = str(_pround(new_sl))   # short SL → tpTriggerPx (fires on rise)
+            _dco_sl_px = str(_pround(new_tp))   # short TP → slTriggerPx (fires on fall)
+        else:
+            _dco_tp_px = str(_pround(new_tp))
+            _dco_sl_px = str(_pround(new_sl))
         algo_body: dict = {
             "instId":          _to_okx(sym),
             "tdMode":          mode,
             "side":            "buy" if _is_short_dco else "sell",
             "ordType":         "oco",
             "sz":              str(int(total_contracts)),
-            "tpTriggerPx":     str(_pround(new_tp)),
+            "tpTriggerPx":     _dco_tp_px,
             "tpTriggerPxType": "mark",
             "tpOrdPx":         "-1",
-            "slTriggerPx":     str(_pround(new_sl)),
+            "slTriggerPx":     _dco_sl_px,
             "slTriggerPxType": "mark",
             "slOrdPx":         "-1",
         }
@@ -3552,16 +3576,30 @@ def _place_tp_only_order(sig: dict, cfg: dict,
                     cfg.get("trade_margin_mode", "isolated")).strip().lower()
         is_hedge = bool(sig.get("order_is_hedge", False))
         _is_short_tp = sig.get("direction", "long") == "short"
+        # OKX BUY-side conditional order field semantics are inverted vs intuition:
+        #   tpTriggerPx  → fires when price RISES  (= short SL / long TP)
+        #   slTriggerPx  → fires when price FALLS   (= short TP / long SL)
+        # For SHORT TP (close short when price falls to profit target):
+        #   use slTriggerPx = tp_price
+        # For LONG TP (close long when price rises to profit target):
+        #   use tpTriggerPx = tp_price  (standard behaviour)
+        if _is_short_tp:
+            _tp_trigger_field     = "slTriggerPx"
+            _tp_trigger_type_field = "slTriggerPxType"
+            _tp_ord_field         = "slOrdPx"
+        else:
+            _tp_trigger_field     = "tpTriggerPx"
+            _tp_trigger_type_field = "tpTriggerPxType"
+            _tp_ord_field         = "tpOrdPx"
         algo_body: dict = {
-            "instId":         _to_okx(sym),
-            "tdMode":         mode,
-            "side":           "buy" if _is_short_tp else "sell",
-            "ordType":        "conditional",
-            "sz":             str(int(max(1, total_contracts))),
-            "tpTriggerPx":    str(_pround(tp_price)),
-            "tpTriggerPxType": "mark",   # use mark price — more reliable than
-                                         # last price for low-liquidity tokens
-            "tpOrdPx":        "-1",      # market fill when TP triggers
+            "instId":              _to_okx(sym),
+            "tdMode":              mode,
+            "side":                "buy" if _is_short_tp else "sell",
+            "ordType":             "conditional",
+            "sz":                  str(int(max(1, total_contracts))),
+            _tp_trigger_field:     str(_pround(tp_price)),
+            _tp_trigger_type_field: "mark",
+            _tp_ord_field:         "-1",
         }
         if is_hedge:
             algo_body["posSide"] = "short" if _is_short_tp else "long"
