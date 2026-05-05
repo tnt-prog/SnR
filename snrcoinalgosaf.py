@@ -19,7 +19,7 @@ v2 additions:
   F. Alert column (col 2)     — signals table column 2 shows a quick visual status flag;
                                  turns 🔴 red when an open trade's latest price has dropped
                                  ≥5% below its entry price (early warning, before SL is hit).
-                                 Threshold constant: _PRICE_ALERT_PCT = 5.0
+                                 Threshold constant: _PRICE_ALERT_PCT = 3.0
 """
 
 import base64, hashlib, hmac, json, math, os, pathlib, threading, time, uuid, traceback
@@ -521,7 +521,8 @@ if "_scanner_initialised" not in st.session_state:
         _b._bsc_error_log       = []         # structured API error log (max 500 entries)
         _b._bsc_error_log_lock  = threading.Lock()
         # D — symbol cache (also stores ctVal per symbol for position sizing)
-        _b._bsc_symbol_cache  = {"symbols": [], "fetched_at": 0, "wl_key": "", "ct_val": {}}
+        _b._bsc_symbol_cache      = {"symbols": [], "fetched_at": 0, "wl_key": "", "ct_val": {}}
+        _b._bsc_symbol_cache_lock = threading.Lock()
     st.session_state["_scanner_initialised"] = True
 
 import builtins as _b
@@ -671,17 +672,19 @@ def get_symbols(watchlist: list) -> tuple:
 def get_symbols_cached(watchlist: list) -> list:
     now    = time.time()
     cache  = _b._bsc_symbol_cache
+    _sym_lock = getattr(_b, "_bsc_symbol_cache_lock", None)
     wl_key = ",".join(sorted(watchlist))
-    if (not cache["symbols"] or
-            now - cache["fetched_at"] > _SYMBOL_CACHE_TTL or
-            cache["wl_key"] != wl_key):
-        print("[Scanner] Refreshing OKX symbol cache…")
-        syms, ct_vals       = get_symbols(watchlist)
-        cache["symbols"]    = syms
-        cache["ct_val"]     = ct_vals
-        cache["fetched_at"] = now
-        cache["wl_key"]     = wl_key
-    return list(cache["symbols"])
+    with (_sym_lock if _sym_lock else threading.Lock()):
+        if (not cache["symbols"] or
+                now - cache["fetched_at"] > _SYMBOL_CACHE_TTL or
+                cache["wl_key"] != wl_key):
+            print("[Scanner] Refreshing OKX symbol cache…")
+            syms, ct_vals       = get_symbols(watchlist)
+            cache["symbols"]    = syms
+            cache["ct_val"]     = ct_vals
+            cache["fetched_at"] = now
+            cache["wl_key"]     = wl_key
+        return list(cache["symbols"])
 
 # ─────────────────────────────────────────────────────────────────────────────
 # OKX Auto-Trading — authentication + order placement
@@ -718,7 +721,7 @@ def _trade_post(path: str, body: dict, cfg: dict) -> dict:
     merged = {**dict(sess.headers), **headers}
     with _api_sem:
         r = sess.post(f"{BASE}{path}", headers=merged,
-                      data=body_str, timeout=20)
+                      data=body_str, timeout=30)
     r.raise_for_status()
     try:
         return r.json()
@@ -752,7 +755,7 @@ def _trade_get(path: str, params: dict, cfg: dict) -> dict:
     merged = {**dict(sess.headers), **headers}
     with _api_sem:
         r = sess.get(f"{BASE}{path}", params=params,
-                     headers=merged, timeout=20)
+                     headers=merged, timeout=30)
     r.raise_for_status()
     try:
         return r.json()
@@ -845,7 +848,9 @@ def _get_ct_val(sym: str) -> float:
     a fallback for a token whose real ctVal is e.g. 10 would send 10× the
     intended position size.
     """
-    ct = _b._bsc_symbol_cache.get("ct_val", {}).get(sym)
+    _sym_lock = getattr(_b, "_bsc_symbol_cache_lock", None)
+    with (_sym_lock if _sym_lock else threading.Lock()):
+        ct = _b._bsc_symbol_cache.get("ct_val", {}).get(sym)
     if ct and ct > 0:
         return ct
     # Cache miss — fetch on-demand (rare, e.g. first run before any scan)
@@ -860,7 +865,8 @@ def _get_ct_val(sym: str) -> float:
             # ctMult intentionally excluded — OKX uses only ctVal for position notional.
             eff = val if val > 0 else 0.0   # ctMult excluded (see get_symbols note)
             if eff > 0:
-                _b._bsc_symbol_cache.setdefault("ct_val", {})[sym] = eff
+                with (_sym_lock if _sym_lock else threading.Lock()):
+                    _b._bsc_symbol_cache.setdefault("ct_val", {})[sym] = eff
                 _append_error("info",
                     f"ctVal for {_to_okx(sym)} fetched on-demand: {eff} "
                     f"(ctVal={val} ctMult={cmul} excluded) — cache populated now")
@@ -1231,7 +1237,7 @@ def place_okx_order(sig: dict, cfg: dict) -> dict:
             algo_body["posSide"] = "long"    # closing a long in hedge mode
         else:
             # Prevent oversell flipping LONG → SHORT in cross net mode.
-            algo_body["reduceOnly"] = "true"
+            algo_body["reduceOnly"] = True
         algo_resp = _trade_post("/api/v5/trade/order-algo", algo_body, cfg)
         ad        = (algo_resp.get("data") or [{}])[0]
         algo_id   = ad.get("algoId", "")
@@ -1864,6 +1870,7 @@ def process(sym, cfg: dict, **_kwargs):
         _use_ce  = bool(cfg.get("f3_chandelier", True))
         _use_lux = bool(cfg.get("f4_lux",        True))
         _entry_indicators = []
+        _c15 = None  # initialised here; assigned inside indicator block if enabled
         if _use_st or _use_ce or _use_lux:
             # [:-1] excludes the currently forming candle; [-1] = last closed bar
             _c15 = get_klines(sym, "15m", 200)[:-1]
@@ -2036,7 +2043,7 @@ def _place_tp_only_order(sig: dict, cfg: dict,
         else:
             # Prevent oversell flipping LONG → SHORT in cross net mode.
             # OKX caps execution at the actual position size when reduceOnly=true.
-            algo_body["reduceOnly"] = "true"
+            algo_body["reduceOnly"] = True
         resp = _trade_post("/api/v5/trade/order-algo", algo_body, cfg)
         ad   = (resp.get("data") or [{}])[0]
         if resp.get("code") != "0" or (ad.get("sCode", "0") not in ("0", "") and ad.get("sCode")):
@@ -2133,7 +2140,7 @@ def _place_market_close_order(sig: dict, cfg: dict, reason: str = "trend_exit") 
         if is_hedge:
             body["posSide"] = "long"
         else:
-            body["reduceOnly"] = "true"
+            body["reduceOnly"] = True
 
         resp = _trade_post("/api/v5/trade/order", body, cfg)
         if resp.get("code") != "0":
@@ -3509,7 +3516,7 @@ with st.sidebar:
                     "(Dubai / GST, UTC+4).\n\n"
                     "When enabled, the scanner pauses new signal detection "
                     "outside the defined window. Open-trade monitoring "
-                    "(TP / SL / DCA) always runs 24/7 regardless of this setting.\n\n"
+                    "(TP / SL) always runs 24/7 regardless of this setting.\n\n"
                     "Midnight-crossing windows are supported — e.g. Start 22, "
                     "End 06 means the scanner is active 22:00–23:59 and "
                     "00:00–06:00 GST."
@@ -3711,9 +3718,8 @@ st.markdown(
 # ── Total Realized PnL computation ─────────────────────────────────────────────
 # Moved above the account summary box so _total_pnl is available for the
 # Realized PnL metric card. Display banner (st.markdown) remains below.
-# Sums realized PnL across every closed signal (tp_hit + sl_hit + dca_sl_hit):
-#   • DCA trades  → (close / avg_entry − 1) × total_notional
-#   • Non-DCA     → (close / entry     − 1) × (trade_usdt × trade_lev)
+# Sums realized PnL across every closed signal:
+#   (close / entry - 1) × (trade_usdt × trade_lev)
 def _pnl_topline(sig: dict, usdt_fb: float, lev_fb: int):
     try:
         _close = float(sig.get("close_price") or 0)
@@ -3721,15 +3727,6 @@ def _pnl_topline(sig: dict, usdt_fb: float, lev_fb: int):
         return None
     if _close <= 0:
         return None
-    _dcn = int(sig.get("dca_count", 0) or 0)
-    if _dcn > 0:
-        try:
-            _avg = float(sig.get("avg_entry", 0) or 0)
-            _tnl = float(sig.get("total_notional", 0) or 0)
-        except (TypeError, ValueError):
-            _avg, _tnl = 0.0, 0.0
-        if _avg > 0 and _tnl > 0:
-            return (_close / _avg - 1.0) * _tnl
     try:
         _ent = float(sig.get("entry", 0) or 0)
         _usd = float(sig.get("trade_usdt", usdt_fb) or 0)
@@ -3748,7 +3745,7 @@ _total_sl_ct     = 0
 _cfg_usdt_fb_top = float(_snap_cfg.get("trade_usdt_amount", 0) or 0)
 _cfg_lev_fb_top  = int(_snap_cfg.get("trade_leverage", 10) or 0)
 for _s in signals:
-    if _s.get("status") not in ("tp_hit", "sl_hit", "dca_sl_hit", "trend_exit", "safestop", "time_limit"):
+    if _s.get("status") not in ("tp_hit", "sl_hit", "trend_exit", "safestop", "time_limit"):
         continue
     _v = _pnl_topline(_s, _cfg_usdt_fb_top, _cfg_lev_fb_top)
     if _v is None:
@@ -4190,11 +4187,9 @@ st.markdown(_cfg_panel(_snap_cfg), unsafe_allow_html=True)
 #   • PnL $ column in the Open Signals / Closed Signals table
 # Returns None if any input is missing or non-numeric — callers render "—".
 def _calc_pnl_usd(sig: dict, ref_price, usdt_fallback: float, lev_fallback: int):
-    """PnL $ for a signal — uses blended avg + total notional for DCA trades.
+    """PnL $ for a signal: (ref / entry - 1) x (usdt x lev).
 
-    For DCA trades (dca_count > 0) the reference is the blended average
-    entry price and the notional is the cumulative total across all fills.
-    For non-DCA trades this reduces to the original `(ref/entry − 1) × (usdt × lev)`.
+    Returns None if any input is missing or non-numeric.
     """
     try:
         _ref   = float(ref_price) if ref_price is not None else 0.0
@@ -4202,17 +4197,6 @@ def _calc_pnl_usd(sig: dict, ref_price, usdt_fallback: float, lev_fallback: int)
         return None
     if _ref <= 0:
         return None
-    # DCA trade — use blended avg + cumulative notional.
-    _dca_count = int(sig.get("dca_count", 0) or 0)
-    if _dca_count > 0:
-        try:
-            _avg   = float(sig.get("avg_entry", 0) or 0)
-            _tnot  = float(sig.get("total_notional", 0) or 0)
-        except (TypeError, ValueError):
-            _avg = 0.0; _tnot = 0.0
-        if _avg > 0 and _tnot > 0:
-            return (_ref / _avg - 1.0) * _tnot
-    # Non-DCA (or DCA with no fills yet beyond entry) — legacy formula.
     try:
         _entry = float(sig.get("entry", 0) or 0)
         _usdt  = float(sig.get("trade_usdt", usdt_fallback) or 0)
@@ -4237,7 +4221,7 @@ _pnl_24h_sl_ct     = 0
 _cfg_usdt_fallback = float(_snap_cfg.get("trade_usdt_amount", 0) or 0)
 _cfg_lev_fallback  = int(_snap_cfg.get("trade_leverage", 10) or 0)
 for _s in signals:
-    if _s.get("status") not in ("tp_hit", "sl_hit", "dca_sl_hit", "trend_exit", "safestop", "time_limit"):
+    if _s.get("status") not in ("tp_hit", "sl_hit", "trend_exit", "safestop", "time_limit"):
         continue
     _ct_raw = _s.get("close_time")
     if not _ct_raw:
@@ -4394,7 +4378,6 @@ def _build_signal_row(s: dict, is_open_table: bool = False,
         "open":        "🔵 Open",
         "tp_hit":      "✅ TP Hit",
         "sl_hit":      "❌ SL Hit",
-        "dca_sl_hit":  "❌ DCA SL Hit",
         "trend_exit":  "🚨 Trend Exit",
         "safestop":    "🛡️ SafeStop",
         "time_limit":  "🕐 Time Limit",
@@ -4457,8 +4440,6 @@ def _build_signal_row(s: dict, is_open_table: bool = False,
             exit_reason_col = "❌ SL Hit"
         elif status == "trend_exit":
             exit_reason_col = "🚨 Trend Exit"
-        elif status == "dca_sl_hit":
-            exit_reason_col = "❌ DCA SL Hit"
         elif status == "closed_okx":
             exit_reason_col = "🟠 Closed on OKX"
         # Format stored exit_indicators to add emoji prefix
@@ -4483,7 +4464,7 @@ def _build_signal_row(s: dict, is_open_table: bool = False,
     #   • sl_hit  → sig["close_price"] (= SL level — realized loss)
     #   • queue   → "—" (no trade was ever opened)
     pnl_col = "—"
-    if status in ("open", "tp_hit", "sl_hit", "dca_sl_hit", "fc_hit", "trend_exit", "safestop", "time_limit"):
+    if status in ("open", "tp_hit", "sl_hit", "fc_hit", "trend_exit", "safestop", "time_limit"):
         if status == "open":
             _ref_pnl = s.get("latest_price")
             if _ref_pnl is None:
@@ -4507,7 +4488,7 @@ def _build_signal_row(s: dict, is_open_table: bool = False,
     # DCA trades, original entry otherwise).
     #   Positive = closed above entry (TP or FC)  Negative = closed below (SL)
     exit_pct_col = "—"
-    if status in ("tp_hit", "sl_hit", "dca_sl_hit", "fc_hit", "trend_exit", "safestop", "time_limit"):
+    if status in ("tp_hit", "sl_hit", "fc_hit", "trend_exit", "safestop", "time_limit"):
         try:
             _close_ep  = float(s.get("close_price", 0) or 0)
             _ref_ep    = float(s.get("signal_entry", s.get("entry", 0)) or 0)
@@ -4533,19 +4514,7 @@ def _build_signal_row(s: dict, is_open_table: bool = False,
     _entry_p = float(s.get("entry", 0) or 0)
     _tp_p    = float(s.get("tp",    0) or 0)
     _sl_p    = float(s.get("sl",    0) or 0)
-    # For DCA trades, TP $ / SL $ use the blended average and cumulative
-    # notional so the dollar figures reflect the ACTUAL committed position
-    # across all ladder fills.
-    _dca_n_row = int(s.get("dca_count", 0) or 0)
-    if _dca_n_row > 0:
-        _avg_row = float(s.get("avg_entry", 0) or 0)
-        _pos_row = float(s.get("total_notional", 0) or 0)
-        if _avg_row > 0 and _pos_row > 0 and _tp_p > 0 and _sl_p > 0:
-            tp_usd_str = f"+${_pos_row * (_tp_p - _avg_row) / _avg_row:.2f}"
-            sl_usd_str = f"-${_pos_row * (_avg_row - _sl_p) / _avg_row:.2f}"
-        else:
-            tp_usd_str = sl_usd_str = "—"
-    elif _usdt > 0 and _lev > 0 and _entry_p > 0:
+    if _usdt > 0 and _lev > 0 and _entry_p > 0:
         _pos = _usdt * _lev
         tp_usd_str = f"+${_pos * (_tp_p - _entry_p) / _entry_p:.2f}"
         sl_usd_str = f"-${_pos * (_entry_p - _sl_p) / _entry_p:.2f}"
@@ -4684,10 +4653,6 @@ def _build_signal_row(s: dict, is_open_table: bool = False,
                         current_price_col = f"{_lp:.8f}"
             except (TypeError, ValueError):
                 pass
-
-    dca_levels_col = "—"
-
-    next_dca_col = "—"
 
     # ── Trade History column ────────────────────────────────────────────────
     # Multi-line lifecycle: Entry line + one line per DCA fill. Each line
@@ -4965,19 +4930,7 @@ _SIG_COL_CFG = {
 }
 
 def _style_alert_cell(val) -> str:
-    """Return CSS for the Alert column: orange + bold when the cell
-    contains a DCA tag (e.g. "DCA-1", "DCA-2/3"). Otherwise no styling.
-
-    Case-insensitive substring match — catches "DCA-N", "DCA N", "DCA
-    X/Y filled", etc.
-    """
-    try:
-        if val is None:
-            return ""
-        if "dca" in str(val).lower():
-            return "color: #FF8C00; font-weight: 700;"
-    except Exception:
-        pass
+    """Return CSS for the Alert column. Reserved for future use."""
     return ""
 
 
@@ -6393,7 +6346,7 @@ def _build_diagnostics_text() -> str:
             for _s, (_cv, _cm, _ef) in sorted(_suspicious.items()):
                 _push(f"    {_s:<14} ctVal={_cv}  ctMult={_cm}  effective={_ef}")
         _push("  --- Watchlist tokens ---")
-        _cfg_wl = (_b._bsc_log.get("config") or {}).get("watchlist", [])
+        _cfg_wl = _snap_cfg.get("watchlist", [])
         for _s in sorted(_cfg_wl):
             _ct_entry = _ct_raw.get(_s)
             if _ct_entry:
