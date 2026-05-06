@@ -7866,11 +7866,22 @@ with st.sidebar:
         _dbs = _db.db_status()
         if _dbs["available"]:
             st.success(f"{_dbs['icon']} **{_dbs['label']}** — data persists across restarts")
+            # Test DB write button — shows real error if writes are failing
+            if st.button("🔬 Test DB Write", use_container_width=True):
+                _tr = _db.test_write()
+                if _tr["ok"]:
+                    st.success(f"✅ {_tr['detail']}")
+                else:
+                    st.error(f"❌ Write failed: {_tr['error']}\n\n{_tr['detail']}")
+            # Show last error if any write has failed since startup
+            _last_err = _db.last_error()
+            if _last_err:
+                st.error(f"⚠️ Last DB error: {_last_err}")
         else:
             st.warning(
                 "🟡 **Local JSON only** — data will be lost on Streamlit restart.\n\n"
                 "Add Supabase credentials to `.streamlit/secrets.toml` or Streamlit Cloud secrets "
-                "to enable persistent storage. See `db.py` → `CREATE_TABLES_SQL` for setup steps.")
+                "to enable persistent storage. See `db.py` for setup steps.")
     st.divider()
 
     st.markdown("**🗑 Clear History**")
