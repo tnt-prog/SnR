@@ -31,6 +31,14 @@ import streamlit as st
 import plotly.graph_objects as go
 import plotly.express as px
 
+# ── Supabase persistence layer (falls back to JSON if not configured) ─────────
+try:
+    import db as _db          # db.py lives next to this file
+    _DB_MODULE_OK = True
+except Exception as _db_import_err:
+    _DB_MODULE_OK = False
+    print(f"[DB] Could not import db.py: {_db_import_err} — using JSON only.")
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Network constants
 # ─────────────────────────────────────────────────────────────────────────────
@@ -553,7 +561,20 @@ def load_config() -> dict:
     If the user has set them, the on-disk credentials can stay blank.
     """
     cfg = dict(DEFAULT_CONFIG)
-    if CONFIG_FILE.exists():
+
+    # ── Try Supabase DB first ─────────────────────────────────────────────────
+    _db_cfg = None
+    if _DB_MODULE_OK:
+        try:
+            _db_cfg = _db.load_config_db()
+        except Exception:
+            pass
+    if _db_cfg:
+        for k in DEFAULT_CONFIG:
+            if k in _db_cfg:
+                cfg[k] = _db_cfg[k]
+    # ── Fallback: JSON file ───────────────────────────────────────────────────
+    elif CONFIG_FILE.exists():
         try:
             saved = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
             for k in DEFAULT_CONFIG:
@@ -597,6 +618,14 @@ def save_config(cfg: dict):
             # Preserve whatever the user previously typed into the UI by leaving
             # the key blank if env is the active source.
             _cfg_to_save[_cfg_k] = ""
+    # ── Save to Supabase DB (primary) ─────────────────────────────────────────
+    if _DB_MODULE_OK:
+        try:
+            _db.save_config_db(_cfg_to_save)
+        except Exception as _dbe:
+            print(f"[DB] save_config_db error: {_dbe}")
+
+    # ── Save to JSON file (local dev / backup) ────────────────────────────────
     try:
         with _config_lock:
             CONFIG_FILE.write_text(json.dumps(_cfg_to_save, indent=2), encoding="utf-8")
@@ -645,6 +674,26 @@ def _migrate_criteria(crit: dict) -> dict:
     return crit
 
 def load_log():
+    _empty = {"health": {"total_cycles": 0, "last_scan_at": None,
+                          "last_scan_duration_s": 0.0, "total_api_errors": 0,
+                          "watchlist_size": 0, "pre_filtered_out": 0,
+                          "deep_scanned": 0},
+              "signals": []}
+
+    # ── Try Supabase DB first ─────────────────────────────────────────────────
+    if _DB_MODULE_OK:
+        try:
+            _db_data = _db.load_log_db()
+            if _db_data is not None:
+                # Migrate criteria on DB-loaded signals (same as JSON path)
+                for sig in _db_data.get("signals", []):
+                    if "criteria" in sig:
+                        sig["criteria"] = _migrate_criteria(sig["criteria"])
+                return _db_data
+        except Exception as _dbe:
+            print(f"[DB] load_log_db error: {_dbe}")
+
+    # ── Fallback: JSON file ───────────────────────────────────────────────────
     if LOG_FILE.exists():
         try:
             data = json.loads(LOG_FILE.read_text(encoding="utf-8"))
@@ -663,16 +712,21 @@ def load_log():
                     pass
             else:
                 print(f"[Log] WARNING — failed to parse {LOG_FILE}: {type(_e).__name__}: {_e}")
-    return {"health": {"total_cycles": 0, "last_scan_at": None,
-                        "last_scan_duration_s": 0.0, "total_api_errors": 0,
-                        "watchlist_size": 0, "pre_filtered_out": 0,
-                        "deep_scanned": 0},
-            "signals": []}
+    return _empty
 
 def save_log(log):
-    """Atomic-ish write of the log JSON. All errors are logged, never raised —
+    """Atomic-ish write of the log. All errors are logged, never raised —
     a failed save must not abort the scanner loop.
+    Writes to Supabase DB (primary) AND JSON file (local backup).
     """
+    # ── Supabase DB (primary, cloud-persistent) ───────────────────────────────
+    if _DB_MODULE_OK:
+        try:
+            _db.save_log_db(log)
+        except Exception as _dbe:
+            print(f"[DB] save_log_db error: {_dbe}")
+
+    # ── JSON file (local dev / offline backup) ────────────────────────────────
     try:
         LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
         LOG_FILE.write_text(json.dumps(log, indent=2), encoding="utf-8")
@@ -7806,6 +7860,17 @@ with st.sidebar:
         st.caption(f"📁 Data folder: `{_SCRIPT_DIR}`")
         st.caption(f"  • `scanner_log.json` — all signals (loaded on restart)")
         st.caption(f"  • `scanner_config.json` — filters, API keys, settings")
+
+    # ── DB / Storage status ───────────────────────────────────────────────────
+    if _DB_MODULE_OK:
+        _dbs = _db.db_status()
+        if _dbs["available"]:
+            st.success(f"{_dbs['icon']} **{_dbs['label']}** — data persists across restarts")
+        else:
+            st.warning(
+                "🟡 **Local JSON only** — data will be lost on Streamlit restart.\n\n"
+                "Add Supabase credentials to `.streamlit/secrets.toml` or Streamlit Cloud secrets "
+                "to enable persistent storage. See `db.py` → `CREATE_TABLES_SQL` for setup steps.")
     st.divider()
 
     st.markdown("**🗑 Clear History**")
