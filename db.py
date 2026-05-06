@@ -1,40 +1,54 @@
 """
 db.py -- Supabase persistence layer for SNR Short Scanner.
 Falls back to JSON if Supabase credentials are absent (local dev).
+
+Tables required in Supabase (public schema):
+  - signals        (signal_id TEXT PK, symbol, status, direction, entry_ts, data JSONB)
+  - scanner_config (key TEXT PK, value JSONB)
+  - scanner_health (id INT PK DEFAULT 1, total_cycles, last_scan_at, ...)
+
+Note: we avoid naming a table "health" — PostgREST reserves that path.
+      we avoid naming a table "config" — may conflict with reserved words.
 """
 from __future__ import annotations
 import threading
 
 CREATE_TABLES_SQL = """
+-- Run this ONCE in Supabase SQL Editor
+-- (drop old tables first if they exist with old names)
+
 CREATE TABLE IF NOT EXISTS signals (
-    signal_id   TEXT PRIMARY KEY,
-    symbol      TEXT,
-    status      TEXT,
-    direction   TEXT,
-    entry_ts    TEXT,
-    data        JSONB NOT NULL
+    signal_id TEXT PRIMARY KEY,
+    symbol    TEXT,
+    status    TEXT,
+    direction TEXT,
+    entry_ts  TEXT,
+    data      JSONB NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_signals_status   ON signals(status);
 CREATE INDEX IF NOT EXISTS idx_signals_symbol   ON signals(symbol);
 CREATE INDEX IF NOT EXISTS idx_signals_entry_ts ON signals(entry_ts DESC);
+ALTER TABLE signals DISABLE ROW LEVEL SECURITY;
 
-CREATE TABLE IF NOT EXISTS config (
+CREATE TABLE IF NOT EXISTS scanner_config (
     key   TEXT PRIMARY KEY,
     value JSONB
 );
+ALTER TABLE scanner_config DISABLE ROW LEVEL SECURITY;
 
-CREATE TABLE IF NOT EXISTS health (
-    id                    INT  PRIMARY KEY DEFAULT 1,
-    total_cycles          INT  DEFAULT 0,
+CREATE TABLE IF NOT EXISTS scanner_health (
+    id                    INT   PRIMARY KEY DEFAULT 1,
+    total_cycles          INT   DEFAULT 0,
     last_scan_at          TEXT,
     last_scan_duration_s  FLOAT DEFAULT 0.0,
-    total_api_errors      INT  DEFAULT 0,
-    watchlist_size        INT  DEFAULT 0,
-    pre_filtered_out      INT  DEFAULT 0,
-    deep_scanned          INT  DEFAULT 0,
+    total_api_errors      INT   DEFAULT 0,
+    watchlist_size        INT   DEFAULT 0,
+    pre_filtered_out      INT   DEFAULT 0,
+    deep_scanned          INT   DEFAULT 0,
     CHECK (id = 1)
 );
-INSERT INTO health (id) VALUES (1) ON CONFLICT DO NOTHING;
+INSERT INTO scanner_health (id) VALUES (1) ON CONFLICT DO NOTHING;
+ALTER TABLE scanner_health DISABLE ROW LEVEL SECURITY;
 """
 
 _sb_client     = None
@@ -96,23 +110,25 @@ def db_status() -> dict:
 
 
 def test_write() -> dict:
-    """Write a test row to health and read it back. Returns ok/error."""
+    """Write a test row to scanner_health and read it back."""
     sb = _get_client()
     if sb is None:
-        return {"ok": False, "error": "No Supabase client -- check URL/key in Streamlit secrets.", "detail": _last_db_error}
+        return {"ok": False,
+                "error": "No Supabase client -- check URL/key in Streamlit secrets.",
+                "detail": _last_db_error}
     try:
-        sb.table("health").upsert({
+        sb.schema("public").table("scanner_health").upsert({
             "id": 1, "total_cycles": 0, "last_scan_at": None,
             "last_scan_duration_s": 0.0, "total_api_errors": 0,
             "watchlist_size": 0, "pre_filtered_out": 0, "deep_scanned": 0,
         }).execute()
-        resp = sb.table("health").select("id").eq("id", 1).execute()
+        resp = sb.schema("public").table("scanner_health").select("id").eq("id", 1).execute()
         if resp.data:
-            return {"ok": True, "error": "", "detail": "health row written and read back successfully"}
+            return {"ok": True, "error": "", "detail": "scanner_health row written and read back OK"}
         else:
             return {"ok": False,
-                    "error": "Write seemed OK but read-back returned nothing.",
-                    "detail": "Possible RLS still blocking SELECT. Run: ALTER TABLE health DISABLE ROW LEVEL SECURITY;"}
+                    "error": "Write OK but read-back returned nothing.",
+                    "detail": "RLS may still be active. Run: ALTER TABLE scanner_health DISABLE ROW LEVEL SECURITY;"}
     except Exception as exc:
         _set_error(f"test_write: {type(exc).__name__}: {exc}")
         return {"ok": False, "error": str(exc), "detail": f"{type(exc).__name__}"}
@@ -125,7 +141,7 @@ def load_config_db() -> dict | None:
     if sb is None:
         return None
     try:
-        resp = sb.table("config").select("key, value").execute()
+        resp = sb.schema("public").table("scanner_config").select("key, value").execute()
         if not resp.data:
             return None
         return {row["key"]: row["value"] for row in resp.data}
@@ -141,7 +157,7 @@ def save_config_db(cfg: dict) -> bool:
     try:
         rows = [{"key": k, "value": v} for k, v in cfg.items()]
         for i in range(0, len(rows), 200):
-            sb.table("config").upsert(rows[i: i + 200]).execute()
+            sb.schema("public").table("scanner_config").upsert(rows[i: i + 200]).execute()
         return True
     except Exception as exc:
         _set_error(f"save_config_db: {type(exc).__name__}: {exc}")
@@ -154,7 +170,7 @@ def _signal_pk(sig: dict) -> str:
     sid = sig.get("id", "").strip()
     if sid:
         return sid
-    return f"{sig.get('symbol','unknown')}|{sig.get('timestamp','')}"
+    return f"{sig.get('symbol', 'unknown')}|{sig.get('timestamp', '')}"
 
 
 def load_log_db() -> dict | None:
@@ -163,14 +179,17 @@ def load_log_db() -> dict | None:
         return None
     try:
         sig_resp = (
-            sb.table("signals")
+            sb.schema("public").table("signals")
             .select("data")
             .order("entry_ts", desc=False)
             .execute()
         )
         signals = [row["data"] for row in sig_resp.data]
 
-        h_resp = sb.table("health").select("*").eq("id", 1).execute()
+        h_resp = (
+            sb.schema("public").table("scanner_health")
+            .select("*").eq("id", 1).execute()
+        )
         if h_resp.data:
             h = h_resp.data[0]
             health = {
@@ -209,10 +228,10 @@ def save_log_db(log: dict) -> bool:
                     "data":      sig,
                 })
             for i in range(0, len(rows), 100):
-                sb.table("signals").upsert(rows[i: i + 100]).execute()
+                sb.schema("public").table("signals").upsert(rows[i: i + 100]).execute()
 
         h = log.get("health", {})
-        sb.table("health").upsert({
+        sb.schema("public").table("scanner_health").upsert({
             "id":                   1,
             "total_cycles":         h.get("total_cycles",         0),
             "last_scan_at":         h.get("last_scan_at",         None),
