@@ -1652,6 +1652,80 @@ def _calc_lux_trend(candles: list, period: int = 14, mult: float = 2.0) -> list:
     return _calc_supertrend(candles, period=period, mult=mult)
 
 
+def _calc_trailing_extremes(candles: list, pivot_size: int = 50) -> tuple:
+    """Replicate the DZ_SAFM trailing swing extremes from the Pine Script baseline.
+
+    Mirrors the two-step logic in DZ_SMC_SAFM_V2:
+
+    Step 1 — Pivot confirmation (leg() + getCurrentStructure, pivot_size bars):
+        A swing HIGH is confirmed at bar[i] when:
+            candles[i]["high"] > max(high of the next pivot_size bars)
+        A swing LOW is confirmed at bar[i] when:
+            candles[i]["low"]  < min(low  of the next pivot_size bars)
+        On confirmation: trailing_top = pivot high  /  trailing_bottom = pivot low
+
+    Step 2 — Trailing update (updateTrailingExtremes, runs every bar):
+        trailing_top    = max(current_high, trailing_top)
+        trailing_bottom = min(current_low,  trailing_bottom)
+        This means the trailing values always reflect the all-time extreme
+        since the first confirmed pivot — they never shrink.
+
+    Parameters
+    ----------
+    candles    : list of dicts with "high" / "low" keys, oldest-first
+    pivot_size : bars used for pivot confirmation (Pine default = 50)
+
+    Returns
+    -------
+    (trailing_top, trailing_bottom) — floats, or (None, None) if too few candles
+    or no pivot was ever confirmed in the window.
+    """
+    n = len(candles)
+    if n < pivot_size + 1:
+        return None, None
+
+    trailing_top    = None
+    trailing_bottom = None
+    prev_leg        = 0   # Pine: var leg = 0 (BEARISH_LEG initially)
+
+    for i in range(pivot_size, n):
+        pivot_bar    = candles[i - pivot_size]
+        # Bars that came AFTER the pivot bar — the confirmation window
+        post_bars    = candles[i - pivot_size + 1 : i + 1]
+        highest_post = max(c["high"] for c in post_bars)
+        lowest_post  = min(c["low"]  for c in post_bars)
+
+        # Pine: newLegHigh = high[size] > ta.highest(size)
+        new_leg_high = pivot_bar["high"] > highest_post
+        # Pine: newLegLow  = low[size]  < ta.lowest(size)
+        new_leg_low  = pivot_bar["low"]  < lowest_post
+
+        if new_leg_high:
+            current_leg = 0   # BEARISH_LEG  (swing HIGH just confirmed)
+        elif new_leg_low:
+            current_leg = 1   # BULLISH_LEG  (swing LOW  just confirmed)
+        else:
+            current_leg = prev_leg   # no new pivot — leg unchanged
+
+        # startOfNewLeg: leg direction changed → record pivot extreme
+        if current_leg != prev_leg:
+            if current_leg == 1:   # new bullish leg → swing LOW confirmed
+                trailing_bottom = pivot_bar["low"]
+            else:                  # new bearish leg → swing HIGH confirmed
+                trailing_top    = pivot_bar["high"]
+
+        # updateTrailingExtremes(): extend trailing with every bar's high / low
+        curr = candles[i]
+        if trailing_top    is not None:
+            trailing_top    = max(curr["high"], trailing_top)
+        if trailing_bottom is not None:
+            trailing_bottom = min(curr["low"],  trailing_bottom)
+
+        prev_leg = current_leg
+
+    return trailing_top, trailing_bottom
+
+
 def _check_trend_confirmation(candles_15m: list,
                                use_st:  bool = True,
                                use_ce:  bool = True,
@@ -1895,8 +1969,15 @@ def process(sym, cfg: dict, **_kwargs):
             _dz_prem_pct  = float(cfg.get("dzsafm_premium_pct", 5.0))
             _dz_buf_pct   = float(cfg.get("dzsafm_buffer_pct",  2.0))
             _dz_candles   = _c15[-_dz_lookback:] if len(_c15) >= _dz_lookback else _c15
-            _dz_high      = max(c["high"] for c in _dz_candles)
-            _dz_low       = min(c["low"]  for c in _dz_candles)
+            # ── Trailing pivot extremes (DZ_SAFM Pine Script logic) ───────────
+            # Uses 50-bar pivot confirmation + continuous trailing update
+            # matching the original DZ_SMC_SAFM_V2 indicator exactly.
+            _dz_high, _dz_low = _calc_trailing_extremes(_dz_candles, pivot_size=50)
+            # Fallback to raw max/min if no pivot was confirmed (very short data)
+            if _dz_high is None:
+                _dz_high = max(c["high"] for c in _dz_candles)
+            if _dz_low is None:
+                _dz_low  = min(c["low"]  for c in _dz_candles)
             _dz_range     = _dz_high - _dz_low
             if _dz_range > 0:
                 _prem_frac    = _dz_prem_pct / 100.0
@@ -1918,8 +1999,11 @@ def process(sym, cfg: dict, **_kwargs):
             _dz_lookback  = int(cfg.get("dzsafm_lookback",    200))
             _dz_prem_pct  = float(cfg.get("dzsafm_premium_pct", 5.0))
             _dz_candles   = _c15[-_dz_lookback:] if len(_c15) >= _dz_lookback else _c15
-            _dz_high      = max(c["high"] for c in _dz_candles)
-            _dz_low       = min(c["low"]  for c in _dz_candles)
+            _dz_high, _dz_low = _calc_trailing_extremes(_dz_candles, pivot_size=50)
+            if _dz_high is None:
+                _dz_high = max(c["high"] for c in _dz_candles)
+            if _dz_low is None:
+                _dz_low  = min(c["low"]  for c in _dz_candles)
             _dz_range     = _dz_high - _dz_low
             if _dz_range > 0:
                 _prem_frac        = _dz_prem_pct / 100.0
@@ -6255,14 +6339,17 @@ def _build_diagnostics_text() -> str:
         _dz_bp  = float(_snap_cfg.get("dzsafm_buffer_pct",  2.0))
         _kv("dzsafm_filter",     "ENABLED" if _use_dz else "DISABLED")
         if _use_dz:
-            _kv("dzsafm_lookback_candles",    f"{_dz_lb} × 15m = {round(_dz_lb*15/60,1)}h of context")
-            _kv("dzsafm_swing_high",          f"max(high) over last {_dz_lb} × 15m candles")
-            _kv("dzsafm_swing_low",           f"min(low)  over last {_dz_lb} × 15m candles")
-            _kv("dzsafm_discount_zone_boundary", f"bottom {_dz_pp:.1f}% of range  →  ({100-_dz_pp:.1f}% × SwingLow) + ({_dz_pp:.1f}% × SwingHigh)")
-            _kv("dzsafm_premium_zone_boundary",  f"top {_dz_pp:.1f}% of range    →  ({100-_dz_pp:.1f}% × SwingHigh) + ({_dz_pp:.1f}% × SwingLow)")
-            _kv("dzsafm_approach_buffer",     f"{_dz_bp}% below Premium boundary")
-            _kv("dzsafm_skip_condition",      f"skip if price ≥ premium_boundary × (1 - {_dz_bp}%/100)")
-            _kv("dzsafm_columns_in_tables",   "Discount Zone + Premium Zone stored on each signal at creation → visible in all 4 signal tables")
+            _kv("dzsafm_lookback_candles",       f"{_dz_lb} × 15m = {round(_dz_lb*15/60,1)}h of context")
+            _kv("dzsafm_pivot_confirmation",     "50-bar lookback (matches DZ_SMC_SAFM_V2 swingsLengthInput=50)")
+            _kv("dzsafm_swing_high_method",      "trailing_top: confirmed when high[50] > max(next 50 bars highs), then extended by any subsequent new high")
+            _kv("dzsafm_swing_low_method",       "trailing_bottom: confirmed when low[50] < min(next 50 bars lows), then extended by any subsequent new low")
+            _kv("dzsafm_trailing_update",        "every bar: trailing_top=max(high, trailing_top) | trailing_bottom=min(low, trailing_bottom)")
+            _kv("dzsafm_discount_zone_boundary", f"bottom {_dz_pp:.1f}% of trailing range  →  ({100-_dz_pp:.1f}% × trailing_bottom) + ({_dz_pp:.1f}% × trailing_top)")
+            _kv("dzsafm_premium_zone_boundary",  f"top {_dz_pp:.1f}% of trailing range    →  ({100-_dz_pp:.1f}% × trailing_top)    + ({_dz_pp:.1f}% × trailing_bottom)")
+            _kv("dzsafm_approach_buffer",        f"{_dz_bp}% below Premium boundary")
+            _kv("dzsafm_skip_condition",         f"skip if price ≥ premium_boundary × (1 - {_dz_bp}%/100)")
+            _kv("dzsafm_fallback",               "if no pivot confirmed in window → falls back to raw max(high)/min(low)")
+            _kv("dzsafm_columns_in_tables",      "Discount Zone + Premium Zone stored on each signal at creation → visible in all 4 signal tables")
         _sub("Exit Criteria")
         _use_tp_exit_d  = bool(_snap_cfg.get("use_tp_exit",    False))
         _use_sl_exit_d  = bool(_snap_cfg.get("use_sl_exit",    False))
