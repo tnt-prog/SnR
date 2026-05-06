@@ -6,12 +6,10 @@ Tables required in Supabase (public schema):
   - signals        (signal_id TEXT PK, symbol, status, direction, entry_ts, data JSONB)
   - scanner_config (key TEXT PK, value JSONB)
   - scanner_health (id INT PK DEFAULT 1, total_cycles, last_scan_at, ...)
-
-Note: tables named "health" and "config" are avoided as PostgREST
-      may treat them as reserved paths.
 """
 from __future__ import annotations
 import threading
+import json as _json
 
 CREATE_TABLES_SQL = """
 -- Run this ONCE in Supabase SQL Editor
@@ -55,6 +53,8 @@ _sb_init_done  = False
 _sb_lock       = threading.Lock()
 _db_available  = False
 _last_db_error = ""
+_sb_url        = ""   # stored for diagnostics
+_sb_key        = ""   # stored for diagnostics
 
 
 def _set_error(msg: str):
@@ -68,7 +68,7 @@ def last_error() -> str:
 
 
 def _get_client():
-    global _sb_client, _sb_init_done, _db_available
+    global _sb_client, _sb_init_done, _db_available, _sb_url, _sb_key
     if _sb_init_done:
         return _sb_client
     with _sb_lock:
@@ -77,8 +77,10 @@ def _get_client():
         try:
             import streamlit as st
             sb_cfg = st.secrets.get("supabase", {})
-            url = sb_cfg.get("url", "").strip()
+            url = sb_cfg.get("url", "").strip().rstrip("/")
             key = sb_cfg.get("key", "").strip()
+            _sb_url = url
+            _sb_key = key
             if not url or not key:
                 _sb_client = None
                 _db_available = False
@@ -86,7 +88,7 @@ def _get_client():
             from supabase import create_client
             _sb_client = create_client(url, key)
             _db_available = True
-            print("[DB] Supabase connected.")
+            print(f"[DB] Supabase connected. URL={url}")
         except Exception as exc:
             _set_error(f"Supabase init failed -- {type(exc).__name__}: {exc}")
             _sb_client = None
@@ -108,29 +110,67 @@ def db_status() -> dict:
         return {"available": False, "label": "Local JSON",  "icon": "yellow", "error": _last_db_error}
 
 
-def test_write() -> dict:
-    """Write a test row to scanner_health and read it back."""
-    sb = _get_client()
-    if sb is None:
-        return {"ok": False,
-                "error": "No Supabase client -- check URL/key in Streamlit secrets.",
-                "detail": _last_db_error}
+def test_raw_http() -> dict:
+    """
+    Test Supabase using raw requests -- bypasses supabase-py library.
+    Returns full diagnostic including the exact URL called and HTTP status.
+    """
+    import requests as _req
+    _get_client()   # ensure _sb_url / _sb_key are populated
+    url = _sb_url.rstrip("/")
+    key = _sb_key
+    if not url or not key:
+        return {"ok": False, "url": url, "status": None,
+                "body": "No URL/key — check Streamlit secrets."}
+    headers = {
+        "apikey":        key,
+        "Authorization": f"Bearer {key}",
+        "Content-Type":  "application/json",
+        "Prefer":        "return=representation",
+    }
+    # 1. Try GET on scanner_health
+    full_url = f"{url}/rest/v1/scanner_health?id=eq.1"
     try:
-        sb.table("scanner_health").upsert({
-            "id": 1, "total_cycles": 0, "last_scan_at": None,
-            "last_scan_duration_s": 0.0, "total_api_errors": 0,
-            "watchlist_size": 0, "pre_filtered_out": 0, "deep_scanned": 0,
-        }).execute()
-        resp = sb.table("scanner_health").select("id").eq("id", 1).execute()
-        if resp.data:
-            return {"ok": True, "error": "", "detail": "scanner_health written and read back OK"}
-        else:
-            return {"ok": False,
-                    "error": "Write OK but read-back returned nothing.",
-                    "detail": "RLS may still be blocking SELECT. Run: ALTER TABLE scanner_health DISABLE ROW LEVEL SECURITY;"}
+        r = _req.get(full_url, headers=headers, timeout=10)
+        return {
+            "ok":     r.status_code == 200,
+            "url":    full_url,
+            "status": r.status_code,
+            "body":   r.text[:600],
+        }
     except Exception as exc:
-        _set_error(f"test_write: {type(exc).__name__}: {exc}")
-        return {"ok": False, "error": str(exc), "detail": f"{type(exc).__name__}"}
+        return {"ok": False, "url": full_url, "status": None, "body": str(exc)}
+
+
+def test_write() -> dict:
+    """Write a test row via raw HTTP (most reliable path)."""
+    result = test_raw_http()
+    if result["ok"]:
+        return {"ok": True, "error": "",
+                "detail": f"GET {result['url']} -> {result['status']} OK\n{result['body']}"}
+    else:
+        # Try supabase-py as fallback for comparison
+        sb = _get_client()
+        lib_err = ""
+        if sb:
+            try:
+                sb.table("scanner_health").upsert({
+                    "id": 1, "total_cycles": 0, "last_scan_at": None,
+                    "last_scan_duration_s": 0.0, "total_api_errors": 0,
+                    "watchlist_size": 0, "pre_filtered_out": 0, "deep_scanned": 0,
+                }).execute()
+            except Exception as exc:
+                lib_err = str(exc)
+        return {
+            "ok":    False,
+            "error": f"HTTP {result['status']}: {result['body']}",
+            "detail": (
+                f"URL tried: {result['url']}\n"
+                f"Raw HTTP status: {result['status']}\n"
+                f"Raw HTTP body: {result['body']}\n"
+                f"supabase-py error: {lib_err or '(not tested)'}"
+            ),
+        }
 
 
 # ---------- Config helpers ----------
