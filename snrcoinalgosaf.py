@@ -1888,6 +1888,8 @@ def process(sym, cfg: dict, **_kwargs):
                 return None
 
         # —— DZ_SAFM Premium Zone Filter ————————————————————————————
+        _sig_premium_zone  = None   # stored on signal for table display
+        _sig_discount_zone = None
         if cfg.get("use_dzsafm_filter", True) and _c15:
             _dz_lookback  = int(cfg.get("dzsafm_lookback",    200))
             _dz_prem_pct  = float(cfg.get("dzsafm_premium_pct", 5.0))
@@ -1901,11 +1903,28 @@ def process(sym, cfg: dict, **_kwargs):
                 _buf_frac     = _dz_buf_pct  / 100.0
                 # Premium zone boundary: top _prem_frac of the swing range
                 _prem_thresh  = (1 - _prem_frac) * _dz_high + _prem_frac * _dz_low
+                # Discount zone boundary: bottom _prem_frac of the swing range (symmetric)
+                _disc_thresh  = (1 - _prem_frac) * _dz_low  + _prem_frac * _dz_high
                 # Extended skip zone: entry must be below threshold*(1 - buffer)
                 _skip_thresh  = _prem_thresh * (1 - _buf_frac)
+                # Store zone boundaries for table display (persisted on signal)
+                _sig_premium_zone  = _prem_thresh
+                _sig_discount_zone = _disc_thresh
                 if entry >= _skip_thresh:
                     _record_elim("f_premium_zone", "f_premium_zone_syms", sym)
                     return None
+        elif _c15:
+            # Filter disabled — still compute zone reference prices for table display
+            _dz_lookback  = int(cfg.get("dzsafm_lookback",    200))
+            _dz_prem_pct  = float(cfg.get("dzsafm_premium_pct", 5.0))
+            _dz_candles   = _c15[-_dz_lookback:] if len(_c15) >= _dz_lookback else _c15
+            _dz_high      = max(c["high"] for c in _dz_candles)
+            _dz_low       = min(c["low"]  for c in _dz_candles)
+            _dz_range     = _dz_high - _dz_low
+            if _dz_range > 0:
+                _prem_frac        = _dz_prem_pct / 100.0
+                _sig_premium_zone  = (1 - _prem_frac) * _dz_high + _prem_frac * _dz_low
+                _sig_discount_zone = (1 - _prem_frac) * _dz_low  + _prem_frac * _dz_high
 
         _incr_filter("passed")
         _filter_counts["passed_syms"].append(sym)
@@ -1925,6 +1944,8 @@ def process(sym, cfg: dict, **_kwargs):
             "is_super_setup":   False,
             "criteria":         {},
             "entry_indicators": "+".join(_entry_indicators) if _entry_indicators else "—",
+            "discount_zone":    _sig_discount_zone,
+            "premium_zone":     _sig_premium_zone,
         }
 
     except Exception as _proc_exc:
@@ -4719,6 +4740,8 @@ def _build_signal_row(s: dict, is_open_table: bool = False,
             "Algo ID":           algo_id_str,
             "⚠️ SL Reason":     sl_reason,
             "Order Size":        order_size_col,
+            "Discount Zone":     s.get("discount_zone"),
+            "Premium Zone":      s.get("premium_zone"),
         }
         return row
 
@@ -4762,6 +4785,8 @@ def _build_signal_row(s: dict, is_open_table: bool = False,
     # Order Size for trades that had real positions
     if show_pnl:
         row["Order Size"] = order_size_col
+    row["Discount Zone"] = s.get("discount_zone")
+    row["Premium Zone"]  = s.get("premium_zone")
     return row
 
 # Shared column_config used by all four tables
@@ -4927,6 +4952,21 @@ _SIG_COL_CFG = {
     "Algo ID":        st.column_config.TextColumn(width="medium"),
     "Entry Criteria": st.column_config.TextColumn(width="medium"),
     "⚠️ SL Reason":  st.column_config.TextColumn(width="medium"),
+    "Discount Zone": st.column_config.NumberColumn(
+                         "🟢 Discount Zone", format="%.8f",
+                         help="Top boundary of the Discount Zone — bottom 5% of the 15m swing range.\n\n"
+                              "Formula: (95% × SwingLow) + (5% × SwingHigh)\n\n"
+                              "Price at or below this level is in the ideal long entry area.\n"
+                              "Computed from the last 200 × 15m candles at signal creation time.\n\n"
+                              "Shows '—' for signals created before this feature was added."),
+    "Premium Zone":  st.column_config.NumberColumn(
+                         "🔴 Premium Zone", format="%.8f",
+                         help="Bottom boundary of the Premium Zone — top 5% of the 15m swing range.\n\n"
+                              "Formula: (95% × SwingHigh) + (5% × SwingLow)\n\n"
+                              "Price at or above this level is expensive / high reversal-risk.\n"
+                              "Signals are blocked when entry price is near or inside this zone.\n"
+                              "Computed from the last 200 × 15m candles at signal creation time.\n\n"
+                              "Shows '—' for signals created before this feature was added."),
 }
 
 def _style_alert_cell(val) -> str:
@@ -6215,10 +6255,14 @@ def _build_diagnostics_text() -> str:
         _dz_bp  = float(_snap_cfg.get("dzsafm_buffer_pct",  2.0))
         _kv("dzsafm_filter",     "ENABLED" if _use_dz else "DISABLED")
         if _use_dz:
-            _kv("dzsafm_lookback_candles",  f"{_dz_lb} × 15m = {round(_dz_lb*15/60,1)}h of context")
-            _kv("dzsafm_premium_zone_top",  f"top {_dz_pp}% of swing range")
-            _kv("dzsafm_approach_buffer",   f"{_dz_bp}% below Premium boundary")
-            _kv("dzsafm_skip_condition",    f"skip if price ≥ premium_boundary × (1 - {_dz_bp}%/100)")
+            _kv("dzsafm_lookback_candles",    f"{_dz_lb} × 15m = {round(_dz_lb*15/60,1)}h of context")
+            _kv("dzsafm_swing_high",          f"max(high) over last {_dz_lb} × 15m candles")
+            _kv("dzsafm_swing_low",           f"min(low)  over last {_dz_lb} × 15m candles")
+            _kv("dzsafm_discount_zone_boundary", f"bottom {_dz_pp:.1f}% of range  →  ({100-_dz_pp:.1f}% × SwingLow) + ({_dz_pp:.1f}% × SwingHigh)")
+            _kv("dzsafm_premium_zone_boundary",  f"top {_dz_pp:.1f}% of range    →  ({100-_dz_pp:.1f}% × SwingHigh) + ({_dz_pp:.1f}% × SwingLow)")
+            _kv("dzsafm_approach_buffer",     f"{_dz_bp}% below Premium boundary")
+            _kv("dzsafm_skip_condition",      f"skip if price ≥ premium_boundary × (1 - {_dz_bp}%/100)")
+            _kv("dzsafm_columns_in_tables",   "Discount Zone + Premium Zone stored on each signal at creation → visible in all 4 signal tables")
         _sub("Exit Criteria")
         _use_tp_exit_d  = bool(_snap_cfg.get("use_tp_exit",    False))
         _use_sl_exit_d  = bool(_snap_cfg.get("use_sl_exit",    False))
