@@ -7,15 +7,14 @@ Tables required in Supabase (public schema):
   - scanner_config (key TEXT PK, value JSONB)
   - scanner_health (id INT PK DEFAULT 1, total_cycles, last_scan_at, ...)
 
-Note: we avoid naming a table "health" — PostgREST reserves that path.
-      we avoid naming a table "config" — may conflict with reserved words.
+Note: tables named "health" and "config" are avoided as PostgREST
+      may treat them as reserved paths.
 """
 from __future__ import annotations
 import threading
 
 CREATE_TABLES_SQL = """
 -- Run this ONCE in Supabase SQL Editor
--- (drop old tables first if they exist with old names)
 
 CREATE TABLE IF NOT EXISTS signals (
     signal_id TEXT PRIMARY KEY,
@@ -117,18 +116,18 @@ def test_write() -> dict:
                 "error": "No Supabase client -- check URL/key in Streamlit secrets.",
                 "detail": _last_db_error}
     try:
-        sb.schema("public").table("scanner_health").upsert({
+        sb.table("scanner_health").upsert({
             "id": 1, "total_cycles": 0, "last_scan_at": None,
             "last_scan_duration_s": 0.0, "total_api_errors": 0,
             "watchlist_size": 0, "pre_filtered_out": 0, "deep_scanned": 0,
         }).execute()
-        resp = sb.schema("public").table("scanner_health").select("id").eq("id", 1).execute()
+        resp = sb.table("scanner_health").select("id").eq("id", 1).execute()
         if resp.data:
-            return {"ok": True, "error": "", "detail": "scanner_health row written and read back OK"}
+            return {"ok": True, "error": "", "detail": "scanner_health written and read back OK"}
         else:
             return {"ok": False,
                     "error": "Write OK but read-back returned nothing.",
-                    "detail": "RLS may still be active. Run: ALTER TABLE scanner_health DISABLE ROW LEVEL SECURITY;"}
+                    "detail": "RLS may still be blocking SELECT. Run: ALTER TABLE scanner_health DISABLE ROW LEVEL SECURITY;"}
     except Exception as exc:
         _set_error(f"test_write: {type(exc).__name__}: {exc}")
         return {"ok": False, "error": str(exc), "detail": f"{type(exc).__name__}"}
@@ -141,7 +140,7 @@ def load_config_db() -> dict | None:
     if sb is None:
         return None
     try:
-        resp = sb.schema("public").table("scanner_config").select("key, value").execute()
+        resp = sb.table("scanner_config").select("key, value").execute()
         if not resp.data:
             return None
         return {row["key"]: row["value"] for row in resp.data}
@@ -157,7 +156,7 @@ def save_config_db(cfg: dict) -> bool:
     try:
         rows = [{"key": k, "value": v} for k, v in cfg.items()]
         for i in range(0, len(rows), 200):
-            sb.schema("public").table("scanner_config").upsert(rows[i: i + 200]).execute()
+            sb.table("scanner_config").upsert(rows[i: i + 200]).execute()
         return True
     except Exception as exc:
         _set_error(f"save_config_db: {type(exc).__name__}: {exc}")
@@ -179,17 +178,14 @@ def load_log_db() -> dict | None:
         return None
     try:
         sig_resp = (
-            sb.schema("public").table("signals")
+            sb.table("signals")
             .select("data")
             .order("entry_ts", desc=False)
             .execute()
         )
         signals = [row["data"] for row in sig_resp.data]
 
-        h_resp = (
-            sb.schema("public").table("scanner_health")
-            .select("*").eq("id", 1).execute()
-        )
+        h_resp = sb.table("scanner_health").select("*").eq("id", 1).execute()
         if h_resp.data:
             h = h_resp.data[0]
             health = {
@@ -228,10 +224,10 @@ def save_log_db(log: dict) -> bool:
                     "data":      sig,
                 })
             for i in range(0, len(rows), 100):
-                sb.schema("public").table("signals").upsert(rows[i: i + 100]).execute()
+                sb.table("signals").upsert(rows[i: i + 100]).execute()
 
         h = log.get("health", {})
-        sb.schema("public").table("scanner_health").upsert({
+        sb.table("scanner_health").upsert({
             "id":                   1,
             "total_cycles":         h.get("total_cycles",         0),
             "last_scan_at":         h.get("last_scan_at",         None),
