@@ -3732,7 +3732,7 @@ with st.sidebar:
 st.markdown(
     "<h1 style='margin-bottom:4px;'>S&amp;R — Crypto Intelligent Portal"
     " <span style='font-size:0.55em;font-weight:400;vertical-align:middle;"
-    "color:#007a7a;'>v2.0</span></h1>",
+    "color:#007a7a;'>v2.1</span></h1>",
     unsafe_allow_html=True,
 )
 
