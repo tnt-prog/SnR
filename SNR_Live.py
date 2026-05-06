@@ -7872,7 +7872,8 @@ with st.sidebar:
                 if _tr["ok"]:
                     st.success(f"✅ {_tr['detail']}")
                 else:
-                    st.error(f"❌ Write failed: {_tr['error']}\n\n{_tr['detail']}")
+                    st.error(f"❌ Write failed: {_tr['error']}")
+                    st.code(_tr.get("detail", ""), language="text")
             # Show last error if any write has failed since startup
             _last_err = _db.last_error()
             if _last_err:
