@@ -1726,7 +1726,7 @@ def _calc_trailing_extremes(candles: list, pivot_size: int = 50) -> tuple:
     return trailing_top, trailing_bottom
 
 
-def _find_nearest_resistance(candles: list, entry: float, pivot_n: int = 3) -> float | None:
+def _find_nearest_resistance(candles: list, entry: float, pivot_n: int = 3):
     """Find the nearest swing-high resistance above the entry price.
 
     A swing high is a candle whose high is strictly greater than
