@@ -106,7 +106,7 @@ DEFAULT_CONFIG: dict = {
     # ── per-filter enable/disable ──────────────────────────────────────────────
     "use_pre_filter":       True,   # Bulk ticker pre-filter (volume / change / low)
     # ── Queue limit (max concurrent open trades) ──────────────────────────────
-    "max_open_trades":       30,     # Hard cap on concurrent open trades.
+    "max_open_trades":       49,     # Hard cap on concurrent open trades.
                                      # Lowering this does NOT close existing
                                      # trades — new signals during overflow are
                                      # logged as queue_limit until natural TP/SL
@@ -123,7 +123,7 @@ DEFAULT_CONFIG: dict = {
     "api_key":               "",
     "api_secret":            "",
     "api_passphrase":        "",
-    "trade_usdt_amount":     5.0,    # USDT collateral per trade (before leverage)
+    "trade_usdt_amount":     10.0,   # USDT collateral per trade (before leverage)
     "trade_leverage":        20,     # leverage applied (capped by MAX_LEVERAGE)
     "trade_margin_mode":     "cross",     # always cross — isolated removed
     # ── Hours of operation (GST / Dubai UTC+4) ────────────────────────────────
@@ -131,24 +131,24 @@ DEFAULT_CONFIG: dict = {
     # Open-trade monitoring (TP/SL/DCA) always runs regardless of this setting.
     # Supports midnight-crossing windows (e.g. start=22, end=06).
     # ── Exit criteria (which methods close an open trade) ─────────────────────
-    "use_tp_exit":            False,  # close trade when TP price is reached (default OFF — rely on trend exit)
+    "use_tp_exit":            True,   # close trade when TP price is reached
     "use_sl_exit":            False,  # close trade at hard SL price floor (default OFF — rely on trend exit)
     "use_trend_exit":         True,   # auto-close open long when F2/F3/F4 indicator(s) flip bearish (15m)
-    "trend_exit_min_confirms": 1,     # how many indicators must flip bearish to trigger trend exit (1/2/3)
+    "trend_exit_min_confirms": 2,     # how many indicators must flip bearish to trigger trend exit (1/2/3)
     # ── SafeStop trailing break-even ──────────────────────────────────────────
-    "use_safestop":           False,  # enable SafeStop trailing break-even mechanism
+    "use_safestop":           True,   # enable SafeStop trailing break-even mechanism
     "safestop_pct":           1.5,    # Safe Stop Trigger Price %: % gain that activates SafeStop (SL to entry)
     "safestop_range_pct":     1.0,    # Range Increase %: each additional rise before SL steps up
     "safestop_step_pct":      0.5,    # Step Distance %: how much SL moves up on each step
-    "use_time_limit_exit":    False,  # close trade when open >= X hours AND PnL >= threshold
+    "use_time_limit_exit":    True,   # close trade when open >= X hours AND PnL >= threshold
     "time_limit_hours":       2.0,    # hours a trade must be open before time-limit exit applies
-    "time_limit_min_pnl_usd": 0.25,  # minimum unrealized PnL $ required to trigger time-limit exit
+    "time_limit_min_pnl_usd": 0.6,   # minimum unrealized PnL $ required to trigger time-limit exit
     "f2_supertrend":         True,   # F2 SuperTrend (ATR 10, mult 3.0) on 15m
     "f3_chandelier":         True,   # F3 Chandelier Exit (ATR 22, mult 3.0) on 15m
     "f4_lux":                True,   # F4 Lux Trend (ATR 14, mult 2.0) on 15m
     # —— DZ_SAFM Premium Zone Filter ——————————————————————————————
     "use_dzsafm_filter":     True,   # Skip entries in/near Premium zone (DZ_SAFM)
-    "dzsafm_lookback":       200,    # Candles to look back for swing high/low (15m)
+    "dzsafm_lookback":       150,    # Candles to look back for swing high/low (15m)
     "dzsafm_premium_pct":    5.0,    # Top X% of range = Premium zone
     "dzsafm_buffer_pct":     2.0,    # Extra % buffer below Premium zone boundary
     "scan_hour_enabled":     False,
@@ -372,13 +372,22 @@ def load_config() -> dict:
             else:
                 print(f"[Config] WARNING — failed to parse {CONFIG_FILE}: {type(_e).__name__}: {_e}")
 
-    # One-time defaults reset - forces 6 values back to correct defaults on startup
+    # One-time defaults reset - forces values back to correct defaults on startup
     _reset_to_defaults = {
-        "trend_exit_min_confirms": 1,
-        "use_safestop":            False,
+        "trend_exit_min_confirms": 2,
+        "use_safestop":            True,
+        "safestop_pct":            1.5,
         "safestop_range_pct":      1.0,
-        "use_time_limit_exit":     False,
-        "max_open_trades":         30,
+        "safestop_step_pct":       0.5,
+        "use_time_limit_exit":     True,
+        "time_limit_hours":        2.0,
+        "time_limit_min_pnl_usd":  0.6,
+        "use_tp_exit":             True,
+        "use_sl_exit":             False,
+        "max_open_trades":         49,
+        "trade_usdt_amount":       10.0,
+        "trade_leverage":          20,
+        "dzsafm_lookback":         150,
         "sl_cooldown_hours":       2,
     }
     _needs_save = any(cfg.get(_rk) != _rv for _rk, _rv in _reset_to_defaults.items())
@@ -3142,7 +3151,7 @@ with st.sidebar:
         ))
     new_trade_lev = ta2.number_input(
         "Leverage ×", min_value=1, max_value=125, step=1,
-        value=int(_snap_cfg.get("trade_leverage", 10)),
+        value=int(_snap_cfg.get("trade_leverage", 20)),
         key="cfg_trade_lev",
         help=(
             "Leverage applied (capped by OKX max for each coin).\n\n"
@@ -3286,7 +3295,7 @@ with st.sidebar:
 
     st.markdown("**📊 Trade Settings**")
     c1, c2 = st.columns(2)
-    new_tp = c1.number_input("TP %", min_value=0.1, max_value=20.0, step=0.1, value=float(_snap_cfg.get("tp_pct", 1.5)),    key="cfg_tp")
+    new_tp = c1.number_input("TP %", min_value=0.1, max_value=20.0, step=0.1, value=float(_snap_cfg.get("tp_pct", 1.2)),    key="cfg_tp")
     new_sl = c2.number_input(
         "SL %", min_value=0.1, max_value=20.0, step=0.1,
         value=float(_snap_cfg.get("sl_pct", 3.0)), key="cfg_sl",
@@ -3372,7 +3381,7 @@ with st.sidebar:
     if new_use_dzsafm:
         new_dzsafm_lookback = st.number_input(
             "Lookback candles (15m)", min_value=50, max_value=500,
-            value=int(_snap_cfg.get("dzsafm_lookback", 200)),
+            value=int(_snap_cfg.get("dzsafm_lookback", 150)),
             step=50, key="cfg_dzsafm_lookback",
             help="Number of 15m candles to compute swing high/low. 200 = ~50 hours."
         )
@@ -3415,7 +3424,7 @@ with st.sidebar:
 
     new_use_tp_exit = st.checkbox(
         "TP Exit",
-        value=bool(_snap_cfg.get("use_tp_exit", False)),
+        value=bool(_snap_cfg.get("use_tp_exit", True)),
         key="cfg_use_tp_exit",
         help="Close trade when price reaches the take-profit target."
     )
@@ -3455,10 +3464,10 @@ with st.sidebar:
             "2 of 3 — moderate":           2,
             "All 3 — stubborn":            3,
         }
-        _cur_conf = int(_snap_cfg.get("trend_exit_min_confirms", 1))
+        _cur_conf = int(_snap_cfg.get("trend_exit_min_confirms", 2))
         _conf_default = next(
             (k for k, v in _conf_options.items() if v == _cur_conf),
-            "Any 1 — sensitive (default)"
+            "2 of 3 — moderate"
         )
         new_trend_confirms_label = st.selectbox(
             "Confirmations required",
@@ -3484,7 +3493,7 @@ with st.sidebar:
         else:
             st.caption("✅ ALL enabled indicators must flip → close (most stubborn)")
     else:
-        new_trend_exit_min_confirms = int(_snap_cfg.get("trend_exit_min_confirms", 1))
+        new_trend_exit_min_confirms = int(_snap_cfg.get("trend_exit_min_confirms", 2))
         st.caption("⚠️ Trend exit disabled — no indicator-based closes")
 
     st.markdown("**🛡️ SafeStop — Trailing Break-Even**",
@@ -3501,7 +3510,7 @@ with st.sidebar:
     )
     new_use_safestop = st.checkbox(
         "Enable SafeStop",
-        value=bool(_snap_cfg.get("use_safestop", False)),
+        value=bool(_snap_cfg.get("use_safestop", True)),
         key="cfg_use_safestop",
         help="Activate the SafeStop trailing break-even mechanism."
     )
@@ -3547,7 +3556,7 @@ with st.sidebar:
         help="Close a trade automatically when it has been open longer than the set hours AND the unrealized PnL is above the minimum threshold. Closed as Time Limit category.")
     new_use_time_limit = st.checkbox(
         "Enable Time Limit Exit",
-        value=bool(_snap_cfg.get("use_time_limit_exit", False)),
+        value=bool(_snap_cfg.get("use_time_limit_exit", True)),
         key="cfg_use_time_limit_exit"
     )
     if new_use_time_limit:
@@ -3562,14 +3571,14 @@ with st.sidebar:
         new_time_limit_min_pnl = _tl_c2.number_input(
             "Min PnL $",
             min_value=0.01, max_value=100.0, step=0.05,
-            value=float(_snap_cfg.get("time_limit_min_pnl_usd", 0.25)),
+            value=float(_snap_cfg.get("time_limit_min_pnl_usd", 0.6)),
             key="cfg_time_limit_min_pnl_usd", format="%.2f",
             help="Minimum unrealized PnL in USD required to trigger the Time Limit exit."
         )
         st.caption(f"✅ Close if open ≥{new_time_limit_hours:.1f}h AND PnL ≥${new_time_limit_min_pnl:.2f}")
     else:
         new_time_limit_hours   = float(_snap_cfg.get("time_limit_hours",       2.0))
-        new_time_limit_min_pnl = float(_snap_cfg.get("time_limit_min_pnl_usd", 0.25))
+        new_time_limit_min_pnl = float(_snap_cfg.get("time_limit_min_pnl_usd", 0.6))
         st.caption("⚠️ Time Limit Exit disabled")
 
     st.divider()
@@ -3579,7 +3588,7 @@ with st.sidebar:
     qs1, qs2 = st.columns(2)
     new_max_open_trades = qs1.number_input(
         "Max Open Trades", min_value=1, max_value=50, step=1,
-        value=int(_snap_cfg.get("max_open_trades", 15)),
+        value=int(_snap_cfg.get("max_open_trades", 49)),
         key="cfg_max_open_trades",
         help=(
             "Hard cap on the number of concurrent open trades.\n\n"
@@ -3854,7 +3863,7 @@ with st.sidebar:
 st.markdown(
     "<h1 style='margin-bottom:4px;'>S&amp;R — Crypto Intelligent Portal"
     " <span style='font-size:0.55em;font-weight:400;vertical-align:middle;"
-    "color:#007a7a;'>v2.1</span></h1>",
+    "color:#007a7a;'>v2.2</span></h1>",
     unsafe_allow_html=True,
 )
 
@@ -6328,6 +6337,7 @@ def _build_diagnostics_text() -> str:
     _push("DCA_SMACORSS DIAGNOSTICS SNAPSHOT")
     _push("Generated: " + dubai_now().strftime("%Y-%m-%d %H:%M:%S GST"))
     _push("User: " + (os.environ.get("USER") or os.environ.get("USERNAME") or "?"))
+    _push("Version: S&R — Crypto Intelligent Portal v2.2")
 
     # ── Runtime state ────────────────────────────────────────────────────────
     _hdr("RUNTIME STATE")
@@ -6385,7 +6395,7 @@ def _build_diagnostics_text() -> str:
         _kv("candle_window_restriction", "NONE — buys can be any distance apart")
         _sub("DZ_SAFM Premium Zone Filter (F5)")
         _use_dz = bool(_snap_cfg.get("use_dzsafm_filter", True))
-        _dz_lb  = int(_snap_cfg.get("dzsafm_lookback", 200))
+        _dz_lb  = int(_snap_cfg.get("dzsafm_lookback", 150))
         _dz_pp  = float(_snap_cfg.get("dzsafm_premium_pct", 5.0))
         _dz_bp  = float(_snap_cfg.get("dzsafm_buffer_pct",  2.0))
         _kv("dzsafm_filter",     "ENABLED" if _use_dz else "DISABLED")
@@ -6401,11 +6411,22 @@ def _build_diagnostics_text() -> str:
             _kv("dzsafm_skip_condition",         f"skip if price ≥ premium_boundary × (1 - {_dz_bp}%/100)")
             _kv("dzsafm_fallback",               "if no pivot confirmed in window → falls back to raw max(high)/min(low)")
             _kv("dzsafm_columns_in_tables",      "Discount Zone + Premium Zone stored on each signal at creation → visible in all 4 signal tables")
+        _sub("Nearest Resistance Column")
+        _kv("nearest_resistance_method",     "Two-pass: 1H × 200 bars (pivot_n=3) → fallback 15m × 200 bars (pivot_n=2)")
+        _kv("nearest_resistance_definition", "Swing high = candle whose high > pivot_n bars on EACH side; only levels ABOVE entry price")
+        _kv("nearest_resistance_result",     "Nearest (smallest distance above entry) stored at signal creation; shows — if none found")
+        _kv("nearest_resistance_column",     "Visible in all 4 signal tables: Open, TP Hit, Trend Exit, Closed/SL Hit")
+        _sub("F1 Pre-filter")
+        _use_pf = bool(_snap_cfg.get("use_pre_filter", True))
+        _kv("f1_pre_filter",                 "ENABLED" if _use_pf else "DISABLED")
+        if _use_pf:
+            _kv("f1_rule",                   "1 API call screens full watchlist: Vol ≥ 100k USDT · Price ≥ 24h Low × 1.005")
+            _kv("f1_benefit",                "Eliminates ~70% of coins before any candle fetch")
         _sub("Exit Criteria")
-        _use_tp_exit_d  = bool(_snap_cfg.get("use_tp_exit",    False))
+        _use_tp_exit_d  = bool(_snap_cfg.get("use_tp_exit",    True))
         _use_sl_exit_d  = bool(_snap_cfg.get("use_sl_exit",    False))
         _use_te_d       = bool(_snap_cfg.get("use_trend_exit", True))
-        _min_conf_d     = int(_snap_cfg.get("trend_exit_min_confirms", 1))
+        _min_conf_d     = int(_snap_cfg.get("trend_exit_min_confirms", 2))
         _conf_label     = {1: "any 1 (sensitive)", 2: "2 of 3 (moderate)", 3: "all 3 (stubborn)"}.get(_min_conf_d, str(_min_conf_d))
         _kv("tp_exit",          "ENABLED — closes at TP price"         if _use_tp_exit_d  else "DISABLED — TP price will not close trade")
         _kv("sl_exit",          "ENABLED — closes at hard SL floor"    if _use_sl_exit_d  else "DISABLED — no hard price floor (rely on trend exit)")
@@ -6414,15 +6435,15 @@ def _build_diagnostics_text() -> str:
             _kv("trend_exit_confirmations", f"{_min_conf_d}  →  {_conf_label}")
             _kv("trend_exit_rule",
                 f"{_conf_label} of enabled F2/F3/F4 must flip bearish on last closed 15m candle → close trade")
-        _use_tl_d       = bool(_snap_cfg.get("use_time_limit_exit",  False))
+        _use_tl_d       = bool(_snap_cfg.get("use_time_limit_exit",  True))
         _tl_hours_d     = float(_snap_cfg.get("time_limit_hours",    2.0))
-        _tl_pnl_d       = float(_snap_cfg.get("time_limit_min_pnl_usd", 0.25))
+        _tl_pnl_d       = float(_snap_cfg.get("time_limit_min_pnl_usd", 0.6))
         _kv("time_limit_exit",  "ENABLED" if _use_tl_d else "DISABLED")
         if _use_tl_d:
             _kv("time_limit_hours",   f"{_tl_hours_d}h")
             _kv("time_limit_min_pnl", f"${_tl_pnl_d:.2f}")
             _kv("time_limit_logic",   f"close if open >= {_tl_hours_d}h AND PnL >= ${_tl_pnl_d:.2f}")
-        _use_ss_d       = bool(_snap_cfg.get("use_safestop",        False))
+        _use_ss_d       = bool(_snap_cfg.get("use_safestop",        True))
         _ss_pct_d       = float(_snap_cfg.get("safestop_pct",       1.5))
         _ss_range_pct_d = float(_snap_cfg.get("safestop_range_pct", 1.0))
         _ss_step_pct_d  = float(_snap_cfg.get("safestop_step_pct",  0.5))
@@ -6438,9 +6459,15 @@ def _build_diagnostics_text() -> str:
             _kv("WARNING", "ALL EXIT METHODS DISABLED — open trades will never close automatically")
         _kv("tp_level",  f"entry × (1 + {_snap_cfg.get('tp_pct', 1.2)}% / 100)")
         _kv("sl_level",  f"entry × (1 − {_snap_cfg.get('sl_pct', 3.0)}% / 100)  [computed even when SL exit is OFF]")
+        _sl_cd = float(_snap_cfg.get("sl_cooldown_hours", 2))
+        _kv("sl_cooldown_after_hit",  f"{_sl_cd}h — coin blocked from new signals for this duration after an SL hit")
         _sub("Margin / SL Mode")
         _kv("margin_mode",  _snap_cfg.get("trade_margin_mode", "cross"))
         _kv("sl_formula",   "entry × (1 − sl_pct/100)   — cross margin, NOT liq price")
+        _sub("Trade Sizing")
+        _kv("trade_usdt_amount",  f"${float(_snap_cfg.get('trade_usdt_amount', 10.0)):.2f} USDT per trade (collateral before leverage)")
+        _kv("trade_leverage",     f"{int(_snap_cfg.get('trade_leverage', 20))}×  (capped per coin by OKX max leverage)")
+        _kv("max_open_trades",    f"{int(_snap_cfg.get('max_open_trades', 49))}  (queue_limit status used when cap is reached)")
     except Exception as _le:
         _push(f"  <error: {_le}>")
 
@@ -6461,8 +6488,8 @@ def _build_diagnostics_text() -> str:
     # ── Capital Requirement Summary ──────────────────────────────────────────
     _hdr("CAPITAL REQUIREMENT SUMMARY")
     try:
-        _dc_base    = float(_snap_cfg.get("trade_usdt_amount", 5.0))
-        _dc_pool    = int(_snap_cfg.get("max_open_trades", 7))
+        _dc_base    = float(_snap_cfg.get("trade_usdt_amount", 10.0))
+        _dc_pool    = int(_snap_cfg.get("max_open_trades", 49))
         _dc_min     = _dc_base * _dc_pool
         _dc_buf     = _dc_min * 0.25
         _dc_tot     = _dc_min + _dc_buf
