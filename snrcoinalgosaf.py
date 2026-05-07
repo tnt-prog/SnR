@@ -1735,7 +1735,8 @@ def _find_nearest_resistance(candles: list, entry: float, pivot_n: int = 3):
     Returns the closest one (smallest distance above entry), or None
     if no qualifying swing high exists above the current price.
 
-    Uses the already-fetched 15m candle array — no extra API call.
+    Caller tries 1H candles first (200 bars ≈ 8 days, broader context),
+    falling back to 15m with pivot_n=2 if no level is found above entry.
     """
     swing_highs = []
     n = len(candles)
@@ -2037,8 +2038,17 @@ def process(sym, cfg: dict, **_kwargs):
         _incr_filter("passed")
         _filter_counts["passed_syms"].append(sym)
 
-        # ── Nearest swing-high resistance above entry (15m, pivot_n=3) ──────
-        _nearest_res = _find_nearest_resistance(_c15, entry) if _c15 else None
+        # ── Nearest swing-high resistance above entry ─────────────────────
+        # Strategy: try 1H candles first (200 bars ≈ 8 days, broader S/R).
+        # If still None (price in discovery / all-time-high territory),
+        # fall back to 15m candles with a looser pivot_n=2.
+        try:
+            _c1h_res = get_klines(sym, "1h", 200)[:-1]
+        except Exception:
+            _c1h_res = []
+        _nearest_res = _find_nearest_resistance(_c1h_res, entry, pivot_n=3) if _c1h_res else None
+        if _nearest_res is None and _c15:
+            _nearest_res = _find_nearest_resistance(_c15, entry, pivot_n=2)
 
         return {
             "id":                 str(uuid.uuid4())[:8],
@@ -5084,13 +5094,14 @@ _SIG_COL_CFG = {
     "Nearest Resistance": st.column_config.NumberColumn(
                          "🧱 Nearest Resistance", format="%.8f",
                          help="Closest confirmed swing-high resistance level above the entry price.\n\n"
-                              "Detection: a candle whose high is strictly greater than the 3 candles\n"
-                              "on each side of it (pivot_n = 3) on the 15m timeframe.\n\n"
-                              "Only levels ABOVE the entry price are considered.\n"
-                              "The nearest one (smallest distance above entry) is stored at signal\n"
-                              "creation time using the same 15m candles already fetched.\n\n"
-                              "Use this to gauge how much room price has before hitting a wall.\n"
-                              "Shows '—' for signals created before this feature was added."),
+                              "Detection method (two-pass):\n"
+                              "  1. 1H candles × 200 bars (≈8 days), pivot_n=3 — broad S/R context.\n"
+                              "  2. If no level found above entry, falls back to 15m × 200 bars, pivot_n=2.\n\n"
+                              "A swing high = candle whose high is strictly greater than pivot_n candles\n"
+                              "on EACH side. Only levels ABOVE the entry price are considered.\n"
+                              "The nearest one (smallest distance above entry) is displayed.\n\n"
+                              "Shows '—' if price is in discovery territory (no resistance found above entry)\n"
+                              "or for signals created before this feature was added."),
 }
 
 def _style_alert_cell(val) -> str:
