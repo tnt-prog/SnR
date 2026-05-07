@@ -1726,6 +1726,30 @@ def _calc_trailing_extremes(candles: list, pivot_size: int = 50) -> tuple:
     return trailing_top, trailing_bottom
 
 
+def _find_nearest_resistance(candles: list, entry: float, pivot_n: int = 3) -> float | None:
+    """Find the nearest swing-high resistance above the entry price.
+
+    A swing high is a candle whose high is strictly greater than
+    the `pivot_n` candles on each side of it (default 3).
+    Only levels ABOVE `entry` are considered.
+    Returns the closest one (smallest distance above entry), or None
+    if no qualifying swing high exists above the current price.
+
+    Uses the already-fetched 15m candle array — no extra API call.
+    """
+    swing_highs = []
+    n = len(candles)
+    for i in range(pivot_n, n - pivot_n):
+        h = candles[i]["high"]
+        if h <= entry:
+            continue   # only care about levels above entry
+        left_ok  = all(h > candles[j]["high"] for j in range(i - pivot_n, i))
+        right_ok = all(h > candles[j]["high"] for j in range(i + 1, i + pivot_n + 1))
+        if left_ok and right_ok:
+            swing_highs.append(h)
+    return min(swing_highs) if swing_highs else None
+
+
 def _check_trend_confirmation(candles_15m: list,
                                use_st:  bool = True,
                                use_ce:  bool = True,
@@ -2013,23 +2037,27 @@ def process(sym, cfg: dict, **_kwargs):
         _incr_filter("passed")
         _filter_counts["passed_syms"].append(sym)
 
+        # ── Nearest swing-high resistance above entry (15m, pivot_n=3) ──────
+        _nearest_res = _find_nearest_resistance(_c15, entry) if _c15 else None
+
         return {
-            "id":               str(uuid.uuid4())[:8],
-            "timestamp":        dubai_now().isoformat(),
-            "symbol":           sym,
-            "entry":            entry,
-            "tp":               tp,
-            "sl":               sl,
-            "sector":           sec,
-            "status":           "open",
-            "close_price":      None,
-            "close_time":       None,
-            "max_lev":          max_lev,
-            "is_super_setup":   False,
-            "criteria":         {},
-            "entry_indicators": "+".join(_entry_indicators) if _entry_indicators else "—",
-            "discount_zone":    _sig_discount_zone,
-            "premium_zone":     _sig_premium_zone,
+            "id":                 str(uuid.uuid4())[:8],
+            "timestamp":          dubai_now().isoformat(),
+            "symbol":             sym,
+            "entry":              entry,
+            "tp":                 tp,
+            "sl":                 sl,
+            "sector":             sec,
+            "status":             "open",
+            "close_price":        None,
+            "close_time":         None,
+            "max_lev":            max_lev,
+            "is_super_setup":     False,
+            "criteria":           {},
+            "entry_indicators":   "+".join(_entry_indicators) if _entry_indicators else "—",
+            "discount_zone":      _sig_discount_zone,
+            "premium_zone":       _sig_premium_zone,
+            "nearest_resistance": _nearest_res,
         }
 
     except Exception as _proc_exc:
@@ -4824,8 +4852,9 @@ def _build_signal_row(s: dict, is_open_table: bool = False,
             "Algo ID":           algo_id_str,
             "⚠️ SL Reason":     sl_reason,
             "Order Size":        order_size_col,
-            "Discount Zone":     s.get("discount_zone"),
-            "Premium Zone":      s.get("premium_zone"),
+            "Discount Zone":      s.get("discount_zone"),
+            "Premium Zone":       s.get("premium_zone"),
+            "Nearest Resistance": s.get("nearest_resistance"),
         }
         return row
 
@@ -4869,8 +4898,9 @@ def _build_signal_row(s: dict, is_open_table: bool = False,
     # Order Size for trades that had real positions
     if show_pnl:
         row["Order Size"] = order_size_col
-    row["Discount Zone"] = s.get("discount_zone")
-    row["Premium Zone"]  = s.get("premium_zone")
+    row["Discount Zone"]      = s.get("discount_zone")
+    row["Premium Zone"]       = s.get("premium_zone")
+    row["Nearest Resistance"] = s.get("nearest_resistance")
     return row
 
 # Shared column_config used by all four tables
@@ -5050,6 +5080,16 @@ _SIG_COL_CFG = {
                               "Price at or above this level is expensive / high reversal-risk.\n"
                               "Signals are blocked when entry price is near or inside this zone.\n"
                               "Computed from the last 200 × 15m candles at signal creation time.\n\n"
+                              "Shows '—' for signals created before this feature was added."),
+    "Nearest Resistance": st.column_config.NumberColumn(
+                         "🧱 Nearest Resistance", format="%.8f",
+                         help="Closest confirmed swing-high resistance level above the entry price.\n\n"
+                              "Detection: a candle whose high is strictly greater than the 3 candles\n"
+                              "on each side of it (pivot_n = 3) on the 15m timeframe.\n\n"
+                              "Only levels ABOVE the entry price are considered.\n"
+                              "The nearest one (smallest distance above entry) is stored at signal\n"
+                              "creation time using the same 15m candles already fetched.\n\n"
+                              "Use this to gauge how much room price has before hitting a wall.\n"
                               "Shows '—' for signals created before this feature was added."),
 }
 
