@@ -2079,47 +2079,51 @@ def calc_pdz_zone_short(candles: list, price: float, buffer_pct: float = 0.015) 
     """
     SHORT mirror of calc_pdz_zone.
 
+    Zone boundaries (ATR-based, 60-candle lookback):
+      premium_bottom = SwingHigh - 0.5 × ATR
+      discount_top   = SwingLow  + 0.5 × ATR
+
     Qualification logic (SHORT trades only):
-      • Premium zone  : price >= 0.95*H + 0.05*L  -> QUALIFIES (greatest room to dump)
-      • Equilibrium   : indecision                  -> REJECTED
-      • Discount zone : no downward room            -> REJECTED
-      • Band A (equil_top < price < prem_bot)       -> QUALIFIES if at least
-                                                       buffer_pct ABOVE equil_top
-      • Band B (disc_top  < price < equil_bot)      -> REJECTED
+      • Premium zone   : price >= premium_bottom              -> QUALIFIES (best short entry)
+      • NearPrem band  : premium_bottom*(1-buf) <= price      -> QUALIFIES (within buffer)
+      • Discount zone  : price <= discount_top                -> REJECTED  (no downward room)
+      • Middle zone    : everything else                      -> REJECTED
 
     Returns (qualifies: bool, zone_label: str)
     """
     if not candles or len(candles) < 50:
         return False, "insufficient_data"
 
-    lookback = candles[-290:]
+    lookback = candles[-60:]
     H = max(c["high"] for c in lookback)
     L = min(c["low"]  for c in lookback)
 
     if H <= L:
         return False, "flat_range"
 
-    premium_bottom = 0.95 * H + 0.05 * L
-    equil_top      = 0.525 * H + 0.475 * L
-    equil_bottom   = 0.475 * H + 0.525 * L
-    discount_top   = 0.05  * H + 0.95  * L
+    # ATR over the lookback window
+    trs = [max(lookback[i]["high"] - lookback[i]["low"],
+               abs(lookback[i]["high"] - lookback[i-1]["close"]),
+               abs(lookback[i]["low"]  - lookback[i-1]["close"]))
+           for i in range(1, len(lookback))]
+    atr = sum(trs) / len(trs) if trs else (H - L)
 
-    band_a_floor = equil_top * (1 + buffer_pct)
+    premium_bottom = H - 0.5 * atr   # bottom edge of Premium zone
+    discount_top   = L + 0.5 * atr   # top edge of Discount zone
+    near_prem_floor = premium_bottom * (1 - buffer_pct)  # buffer just below premium
 
     if price >= premium_bottom:
         return True, "Premium"
     elif price <= discount_top:
         return False, "Discount"
-    elif equil_bottom <= price <= equil_top:
-        return False, "Equilibrium"
-    elif equil_top < price < premium_bottom:
-        dist_pct = (price - equil_top) / equil_top * 100
-        label    = f"BandA({dist_pct:.1f}%up-Equil)"
-        return (price >= band_a_floor), label
+    elif price >= near_prem_floor:
+        dist_pct = (premium_bottom - price) / premium_bottom * 100
+        return True, f"NearPrem({dist_pct:.1f}%↓Prem)"
     else:
-        dist_pct = (equil_bottom - price) / equil_bottom * 100
-        label    = f"BandB({dist_pct:.1f}%dn-Equil)"
-        return False, label
+        # Middle — compute position as % of the Premium-Discount range
+        rng = premium_bottom - discount_top
+        pos_pct = (price - discount_top) / rng * 100 if rng > 0 else 50
+        return False, f"Middle({pos_pct:.0f}%)"
 
 
 def calc_parabolic_sar(candles: list, af_start=0.02, af_step=0.02, af_max=0.20):
@@ -2152,40 +2156,30 @@ def calc_parabolic_sar(candles: list, af_start=0.02, af_step=0.02, af_max=0.20):
     return result
 
 # ─────────────────────────────────────────────────────────────────────────────
-# F12 — Premium / Discount / Equilibrium zone  (DZSAFM Pine Script logic)
+# ─────────────────────────────────────────────────────────────────────────────
+# F12 — Premium / Discount zone  (ATR-based boundaries)
 # ─────────────────────────────────────────────────────────────────────────────
 def calc_pdz_zone(candles: list, price: float, buffer_pct: float = 0.015) -> tuple:
     """
-    Compute Smart Money Premium/Discount/Equilibrium zones from up to the last
-    50 candles on a given timeframe (mirrors the DZSAFM TradingView indicator exactly).
+    Compute Smart Money Premium/Discount zones using ATR-based boundaries.
 
-    Zone boundaries  (H = swing high, L = swing low over last 50 candles):
-      Premium zone    : price >= 0.95·H + 0.05·L     ← top 5% of range
-      Equilibrium zone: 0.475·H+0.525·L ≤ price ≤ 0.525·H+0.475·L
-      Discount zone   : price ≤ 0.05·H + 0.95·L      ← bottom 5% of range
+    Zone boundaries (60-candle lookback):
+      premium_bottom = SwingHigh - 0.5 × ATR   ← bottom edge of Premium zone
+      discount_top   = SwingLow  + 0.5 × ATR   ← top edge of Discount zone
 
     Qualification logic (LONG trades only):
-      • Discount zone                         → QUALIFIES  (greatest room to pump)
-      • Equilibrium zone                      → REJECTED   (indecision, risky)
-      • Premium zone                          → REJECTED   (no upward room)
-      • Band A (equil_top < price < prem_bot) → QUALIFIES if room ≥ buffer_pct (= tp_pct)
-      • Band B (disc_top  < price < equil_bot)→ QUALIFIES if room ≥ buffer_pct (= tp_pct)
+      • Discount zone  : price <= discount_top              → QUALIFIES (greatest room to pump)
+      • NearDisc band  : price <= discount_top*(1+buf)      → QUALIFIES (within buffer)
+      • Premium zone   : price >= premium_bottom            → REJECTED  (no upward room)
+      • Middle zone    : everything else                    → REJECTED
 
     Returns (qualifies: bool, zone_label: str)
     """
-    # ── Empty / insufficient data → FAIL-CLOSED ──────────────────────────────
-    # Previously returned (True, "unknown") which silently qualified coins
-    # with no candle data — a serious fail-open bug. Now we fail-closed so
-    # missing data cannot accidentally pass the PDZ filter (or trigger a
-    # Super Setup on empty 1h data, for example).
-    #
-    # The DZSAFM indicator needs enough history for a meaningful swing
-    # high / swing low — use 50 as the functional minimum (matches the
-    # Pine Script's default lookback length).
+    # Fail-closed on insufficient data — missing data must never silently pass.
     if not candles or len(candles) < 50:
         return False, "insufficient_data"
 
-    lookback = candles[-290:]  # 290 candles — 1 OKX API call (~72 hrs on 15m, ~24 hrs on 5m)
+    lookback = candles[-60:]   # 60 candles — matches DZSAFM indicator default lookback
     H = max(c["high"] for c in lookback)
     L = min(c["low"]  for c in lookback)
 
@@ -2193,14 +2187,16 @@ def calc_pdz_zone(candles: list, price: float, buffer_pct: float = 0.015) -> tup
         # Degenerate range (flat or inverted) — cannot compute zones.
         return False, "flat_range"
 
-    # Boundary levels  (exact Pine Script maths from DZSAFM)
-    premium_bottom = 0.95 * H + 0.05 * L    # bottom edge of Premium zone
-    equil_top      = 0.525 * H + 0.475 * L  # top edge of Equilibrium zone
-    equil_bottom   = 0.475 * H + 0.525 * L  # bottom edge of Equilibrium zone
-    discount_top   = 0.05  * H + 0.95  * L  # top edge of Discount zone
+    # ATR over the lookback window
+    trs = [max(lookback[i]["high"] - lookback[i]["low"],
+               abs(lookback[i]["high"] - lookback[i-1]["close"]),
+               abs(lookback[i]["low"]  - lookback[i-1]["close"]))
+           for i in range(1, len(lookback))]
+    atr = sum(trs) / len(trs) if trs else (H - L)
 
-    band_a_ceil = premium_bottom * (1 - buffer_pct)   # buffer below Premium boundary
-    band_b_ceil = equil_bottom   * (1 - buffer_pct)   # buffer below Equilibrium boundary
+    premium_bottom = H - 0.5 * atr   # bottom edge of Premium zone
+    discount_top   = L + 0.5 * atr   # top edge of Discount zone
+    near_disc_ceil = discount_top * (1 + buffer_pct)  # buffer just above discount
 
     if price <= discount_top:
         # Fully inside Discount zone — best long setup
@@ -2208,19 +2204,14 @@ def calc_pdz_zone(candles: list, price: float, buffer_pct: float = 0.015) -> tup
     elif price >= premium_bottom:
         # Fully inside Premium zone — no upward room
         return False, "Premium"
-    elif equil_bottom <= price <= equil_top:
-        # Equilibrium band — can go either way, skip
-        return False, "Equilibrium"
-    elif equil_top < price < premium_bottom:
-        # Band A: qualifies only if price is at least 1.5% below the Premium boundary
-        dist_pct = (premium_bottom - price) / premium_bottom * 100
-        label    = f"BandA({dist_pct:.1f}%\u2193Prem)"
-        return (price <= band_a_ceil), label
+    elif price <= near_disc_ceil:
+        dist_pct = (price - discount_top) / discount_top * 100
+        return True, f"NearDisc({dist_pct:.1f}%up-Disc)"
     else:
-        # Band B: qualifies only if price is at least 1.5% below the Equilibrium boundary
-        dist_pct = (equil_bottom - price) / equil_bottom * 100
-        label    = f"BandB({dist_pct:.1f}%\u2193Equil)"
-        return (price <= band_b_ceil), label
+        # Middle — show position as % of the Premium-Discount range
+        rng = premium_bottom - discount_top
+        pos_pct = (price - discount_top) / rng * 100 if rng > 0 else 50
+        return False, f"Middle({pos_pct:.0f}%)"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -11541,20 +11532,4 @@ def _build_diagnostics_text() -> str:
     return "\n".join(_lines)
 
 
-# ──────────────────────────────────────────────────────────────────────────────────
-# Download button — renders the button in the Streamlit UI
-# ──────────────────────────────────────────────────────────────────────────────────
-try:
-    _diag_text = _build_diagnostics_text()
-except Exception as _diag_ex:
-    _diag_text = f"Error building diagnostics: {_diag_ex}"
-
-import datetime as _diag_dt
-_diag_fname = "diagnostics_" + _diag_dt.datetime.now().strftime("%Y%m%d_%H%M%S") + ".txt"
-
-st.download_button(
-    label="⬇️ Download Diagnostics",
-    data=_diag_text,
-    file_name=_diag_fname,
-    mime="text/plain",
-)
+#  
