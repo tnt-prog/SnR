@@ -6273,6 +6273,8 @@ if (
         _after_drift = max(0, _after_trend - _drift_n)
         _err_n       = max(0, fc.get("errors", 0))
         _after_err   = max(0, _after_drift - _err_n)
+        _pz_n        = fc.get("f_premium_zone", 0)          # DZ_SAFM premium zone
+        _after_pz    = max(0, _after_err - _pz_n)
         _passed_n    = fc.get("passed", 0)
         _res_blk_n   = fc.get("f_resistance_blocker", 0)
 
@@ -6282,6 +6284,7 @@ if (
         _fempty_syms   = set(fc.get("f_empty_data_syms",             []))
         _ftrend_syms   = set(fc.get("f_trend_filter_syms",           []))
         _fdrift_syms   = set(fc.get("f_price_drift_syms",            []))
+        _fpz_syms      = set(fc.get("f_premium_zone_syms",           []))  # DZ_SAFM
         _passed_syms   = set(fc.get("passed_syms",                   []))
         _fres_syms     = set(fc.get("f_resistance_blocker_syms",     []))
         _new_sig_s     = set(fc.get("new_signal_syms",               []))
@@ -6323,12 +6326,15 @@ if (
             _row("💥 Dropped — Process Error",
                  _after_drift, _err_n,
                  "See API Error Log ↓" if _err_n else "—"),
+            _row("🏔️ Dropped — Premium Zone (DZ_SAFM: entry too close to swing high)",
+                 _after_err, _pz_n,
+                 _coin_str(_fpz_syms) if _fpz_syms else ("⏸️ Filter disabled" if not bool(_snap_cfg.get("use_dzsafm_filter", True)) else "—")),
             _row("🧱 Dropped — Resistance Blocker (F6: Premium/Resistance ≤ TP+buffer)",
-                 _after_err, _res_blk_n,
+                 _after_pz, _res_blk_n,
                  _coin_str(_fres_syms) if _fres_syms else ("⏸️ Filter disabled" if not bool(_snap_cfg.get("use_resistance_blocker", False)) else "—")),
             _row("✅ Passed All Filters",
-                 max(0, _after_err - _res_blk_n), 0,
-                 _coin_str(_passed_syms)),
+                 max(0, _after_pz - _res_blk_n), 0,
+                 _coin_str(_passed_syms - _fres_syms) if (_passed_syms - _fres_syms) else "—"),
             _row("🔵 Blocked — Open trade",
                  _passed_n, len(_blk_active_s),
                  _coin_str(_blk_active_s)),
