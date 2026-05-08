@@ -5318,13 +5318,12 @@ def _signal_tables_fragment():
         if state_key not in st.session_state:
             st.session_state[state_key] = "Today"
         _sel = st.session_state[state_key]
-        _pcols = st.columns(len(_PILL_OPTS))
+        _pcols = st.columns([1, 1, 1, 1, 1, 5])
         for _pc, _lbl in zip(_pcols, _PILL_OPTS):
             if _pc.button(
                 _lbl,
                 key=f"pill_{state_key}_{_lbl}",
                 type="primary" if _sel == _lbl else "secondary",
-                use_container_width=True,
             ):
                 st.session_state[state_key] = _lbl
                 _sel = _lbl
