@@ -5303,13 +5303,64 @@ def _signal_tables_fragment():
     filtered_sorted = sorted(filtered, key=lambda x: x.get("timestamp", ""), reverse=True)
 
     _open_sigs        = [s for s in filtered_sorted if s.get("status") == "open"]
-    _tp_sigs          = [s for s in filtered_sorted if s.get("status") == "tp_hit"]
-    _sl_sigs          = [s for s in filtered_sorted if s.get("status") == "sl_hit"]
-    _trend_exit_sigs  = [s for s in filtered_sorted if s.get("status") == "trend_exit"]
-    _safestop_sigs    = [s for s in filtered_sorted if s.get("status") == "safestop"]
-    _timelimit_sigs   = [s for s in filtered_sorted if s.get("status") == "time_limit"]
+    _tp_sigs_all      = [s for s in filtered_sorted if s.get("status") == "tp_hit"]
+    _sl_sigs_all      = [s for s in filtered_sorted if s.get("status") == "sl_hit"]
+    _trend_exit_sigs_all = [s for s in filtered_sorted if s.get("status") == "trend_exit"]
+    _safestop_sigs_all   = [s for s in filtered_sorted if s.get("status") == "safestop"]
+    _timelimit_sigs_all  = [s for s in filtered_sorted if s.get("status") == "time_limit"]
     _queue_sigs       = [s for s in filtered_sorted if s.get("status") == "queue_limit"]
     _closed_okx_sigs  = [s for s in filtered_sorted if s.get("status") == "closed_okx"]
+
+    # ── Closed-table date filter (applies to TP Hit, SL Hit, Trend Exit,
+    #    Safe Stop Hit, Time Limit) ──────────────────────────────────────────
+    _CLOSED_DATE_OPTIONS = {
+        "Today":        0,
+        "Last 3 Days":  2,
+        "Last 7 Days":  6,
+        "Last 30 Days": 29,
+        "All Time":     -1,
+    }
+    _closed_date_sel = st.selectbox(
+        "📅 Closed trades — date filter",
+        options=list(_CLOSED_DATE_OPTIONS.keys()),
+        index=0,          # default: Today
+        key="closed_date_filter",
+        help=(
+            "Filter the TP Hit, SL Hit, Trend Exit, Safe Stop Hit and Time Limit "
+            "tables by the date the trade was closed (Dubai / GST time).\n\n"
+            "Today — only trades closed today.\n"
+            "Last 3 / 7 / 30 Days — rolling window.\n"
+            "All Time — show every record."
+        ),
+    )
+    _closed_days_back = _CLOSED_DATE_OPTIONS[_closed_date_sel]
+
+    def _date_filter(sigs):
+        """Return signals whose close_time falls within the selected window."""
+        if _closed_days_back == -1:
+            return sigs          # All Time — no filtering
+        _today_gst = dubai_now().date()
+        _cutoff    = _today_gst - timedelta(days=_closed_days_back)
+        out = []
+        for _s in sigs:
+            _ct = _s.get("close_time") or _s.get("timestamp", "")
+            try:
+                _close_date = datetime.fromisoformat(_ct).date()
+            except Exception:
+                try:
+                    _close_date = datetime.strptime(_ct[:10], "%Y-%m-%d").date()
+                except Exception:
+                    out.append(_s)   # unparseable — keep it
+                    continue
+            if _close_date >= _cutoff:
+                out.append(_s)
+        return out
+
+    _tp_sigs         = _date_filter(_tp_sigs_all)
+    _sl_sigs         = _date_filter(_sl_sigs_all)
+    _trend_exit_sigs = _date_filter(_trend_exit_sigs_all)
+    _safestop_sigs   = _date_filter(_safestop_sigs_all)
+    _timelimit_sigs  = _date_filter(_timelimit_sigs_all)
 
     # ── Table 1: Open Signals ───────────────────────────────────────────────────────
     # ── Open Signals table with row selection + Force Close ─────────────────────
@@ -6632,14 +6683,14 @@ def _build_diagnostics_text() -> str:
     except Exception as _oe:
         _push(f"  <error: {_oe}>")
 
-    # ── OKX ctVal / ctMult cache ─────────────────────────────────────────────
-    _hdr("OKX CONTRACT SIZE CACHE (ctVal × ctMult → effective)")
+    # ââ OKX ctVal / ctMult cache âââââââââââââââââââââ
+    _hdr("OKX CONTRACT SIZE CACHE (ctVal Ã ctMult â effective)")
     _ct_raw = _b._bsc_symbol_cache.get("ct_raw", {})
     if _ct_raw:
         _suspicious = {s: v for s, v in _ct_raw.items()
-                       if abs(v[1] - 1.0) > 0.01}  # ctMult ≠ 1
+                       if abs(v[1] - 1.0) > 0.01}  # ctMult â  1
         _push(f"  Total cached: {len(_ct_raw)} symbols")
-        _push(f"  Symbols with ctMult ≠ 1: {len(_suspicious)}")
+        _push(f"  Symbols with ctMult â  1: {len(_suspicious)}")
         if _suspicious:
             _push("  --- Non-unity ctMult tokens ---")
             for _s, (_cv, _cm, _ef) in sorted(_suspicious.items()):
@@ -6653,14 +6704,14 @@ def _build_diagnostics_text() -> str:
             else:
                 _push(f"    {_s:<14} (not in cache)")
     else:
-        _push("  (cache empty — no symbols fetched yet)")
+        _push("  (cache empty â no symbols fetched yet)")
 
     return "\n".join(_lines)
 
 
 _diag_text = _build_diagnostics_text()
 st.download_button(
-    label="⬇️ Download diagnostics.txt",
+    label="â¬ï¸ Download diagnostics.txt",
     data=_diag_text,
     file_name=f"diagnostics_{dubai_now().strftime('%Y%m%d_%H%M%S')}.txt",
     mime="text/plain",
