@@ -5311,6 +5311,44 @@ def _signal_tables_fragment():
     _queue_sigs       = [s for s in filtered_sorted if s.get("status") == "queue_limit"]
     _closed_okx_sigs  = [s for s in filtered_sorted if s.get("status") == "closed_okx"]
 
+    # ── Per-table pill-button date filter ─────────────────────────────────────
+    def _pill_date_filter(state_key, sigs_all):
+        """Render 5 pill buttons above a closed table; return date-filtered list."""
+        _PILL_OPTS = {"Today": 0, "Last 3d": 2, "Last 7d": 6, "Last 30d": 29, "All": -1}
+        if state_key not in st.session_state:
+            st.session_state[state_key] = "Today"
+        _sel = st.session_state[state_key]
+        _pcols = st.columns(len(_PILL_OPTS))
+        for _pc, _lbl in zip(_pcols, _PILL_OPTS):
+            if _pc.button(
+                _lbl,
+                key=f"pill_{state_key}_{_lbl}",
+                type="primary" if _sel == _lbl else "secondary",
+                use_container_width=True,
+            ):
+                st.session_state[state_key] = _lbl
+                _sel = _lbl
+        _days = _PILL_OPTS[_sel]
+        if _days == -1:
+            return sigs_all
+        _today_gst = dubai_now().date()
+        _cutoff    = _today_gst - timedelta(days=_days)
+        _filtered_out = []
+        for _s in sigs_all:
+            _ct = _s.get("close_time") or _s.get("timestamp", "")
+            try:
+                _cd = datetime.fromisoformat(_ct).date()
+            except Exception:
+                try:
+                    _cd = datetime.strptime(_ct[:10], "%Y-%m-%d").date()
+                except Exception:
+                    _filtered_out.append(_s)
+                    continue
+            if _cd >= _cutoff:
+                _filtered_out.append(_s)
+        return _filtered_out
+
+
     # ── Table 1: Open Signals ───────────────────────────────────────────────────────
     # ── Open Signals table with row selection + Force Close ─────────────────────
     _open_tip = "Active trades currently being monitored. Price, PnL and exit criteria are checked on every scan cycle."
@@ -5543,58 +5581,8 @@ def _signal_tables_fragment():
             _append_error("trade", f"Positions-history fetch failed: {_ph_exc}",
                           endpoint="/api/v5/account/positions-history")
 
-    # ── Closed-table date filter (applies to TP Hit, SL Hit, Trend Exit,
-    #    Safe Stop Hit, Time Limit) ──────────────────────────────────────────
-    _CLOSED_DATE_OPTIONS = {
-        "Today":        0,
-        "Last 3 Days":  2,
-        "Last 7 Days":  6,
-        "Last 30 Days": 29,
-        "All Time":     -1,
-    }
-    _closed_date_sel = st.selectbox(
-        "📅 Closed trades — date filter",
-        options=list(_CLOSED_DATE_OPTIONS.keys()),
-        index=0,          # default: Today
-        key="closed_date_filter",
-        help=(
-            "Filter the TP Hit, SL Hit, Trend Exit, Safe Stop Hit and Time Limit "
-            "tables by the date the trade was closed (Dubai / GST time).\n\n"
-            "Today — only trades closed today.\n"
-            "Last 3 / 7 / 30 Days — rolling window.\n"
-            "All Time — show every record."
-        ),
-    )
-    _closed_days_back = _CLOSED_DATE_OPTIONS[_closed_date_sel]
 
-    def _date_filter(sigs):
-        """Return signals whose close_time falls within the selected window."""
-        if _closed_days_back == -1:
-            return sigs          # All Time — no filtering
-        _today_gst = dubai_now().date()
-        _cutoff    = _today_gst - timedelta(days=_closed_days_back)
-        out = []
-        for _s in sigs:
-            _ct = _s.get("close_time") or _s.get("timestamp", "")
-            try:
-                _close_date = datetime.fromisoformat(_ct).date()
-            except Exception:
-                try:
-                    _close_date = datetime.strptime(_ct[:10], "%Y-%m-%d").date()
-                except Exception:
-                    out.append(_s)   # unparseable — keep it
-                    continue
-            if _close_date >= _cutoff:
-                out.append(_s)
-        return out
-
-    _tp_sigs         = _date_filter(_tp_sigs_all)
-    _sl_sigs         = _date_filter(_sl_sigs_all)
-    _trend_exit_sigs = _date_filter(_trend_exit_sigs_all)
-    _safestop_sigs   = _date_filter(_safestop_sigs_all)
-    _timelimit_sigs  = _date_filter(_timelimit_sigs_all)
-
-
+    _tp_sigs = _pill_date_filter('pill_tp', _tp_sigs_all)
     # ── Table 2: TP Hit ─────────────────────────────────────────────────────────────
     # show_pnl=True → realized gain column, using close_price (= TP level).
     # For DCA trades, the row naturally picks up DCA-N in Alert, blended avg in
@@ -5678,6 +5666,7 @@ def _signal_tables_fragment():
 
     st.divider()
 
+    _sl_sigs = _pill_date_filter('pill_sl', _sl_sigs_all)
     # ── Table 3: SL Hit (non-DCA trades only) ──────────────────────────────────────
     # Trades that exhausted a DCA ladder and hit the −3% final SL are routed to
     # the dedicated "DCA SL Hit" table below, not this one.
@@ -5685,16 +5674,19 @@ def _signal_tables_fragment():
                       show_pnl=True,
                       tooltip="Trades closed because price hit the hard Stop Loss level.")
 
+    _trend_exit_sigs = _pill_date_filter('pill_trend', _trend_exit_sigs_all)
     # ── Table 3b: Trend Exit ────────────────────────────────────────────────
     _render_sig_table(_trend_exit_sigs, "🚨 Trend Exit",
                       "No trend exits yet.", show_pnl=True,
                       tooltip="Trades closed because 1 or more trend indicators (F2/F3/F4) flipped bearish on the last 15m candle.")
 
+    _safestop_sigs = _pill_date_filter('pill_safestop', _safestop_sigs_all)
     # ── Table 3c: SafeStop ──────────────────────────────────────────────────
     _render_sig_table(_safestop_sigs, "🛡️ Safe Stop Hit",
                       "No Safe Stop exits yet.", show_pnl=True,
                       tooltip="Trades closed by the SafeStop trailing mechanism. Price rose enough to activate break-even SL, which then got hit on a pullback. Exit price is at or above entry.")
 
+    _timelimit_sigs = _pill_date_filter('pill_timelimit', _timelimit_sigs_all)
     # ── Table 3e: Time Limit Exit ────────────────────────
     _render_sig_table(_timelimit_sigs, "🕐 Time Limit",
                       "No Time Limit exits yet.", show_pnl=True,
