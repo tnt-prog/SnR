@@ -151,6 +151,10 @@ DEFAULT_CONFIG: dict = {
     "dzsafm_lookback":       150,    # Candles to look back for swing high/low (15m)
     "dzsafm_premium_pct":    5.0,    # Top X% of range = Premium zone
     "dzsafm_buffer_pct":     2.0,    # Extra % buffer below Premium zone boundary
+    # —— Resistance Blocker (F6) ——————————————————————————————————
+    "use_resistance_blocker":        False, # Skip signal if Premium Zone or Nearest Resistance
+                                            # is closer to entry than TP + buffer %
+    "resistance_blocker_buffer_pct": 0.5,  # Extra % above TP required for clear path
     "scan_hour_enabled":     False,
     "scan_hour_start":       0,    # 0–23 GST
     "scan_hour_end":         23,   # 0–23 GST
@@ -389,6 +393,8 @@ def load_config() -> dict:
         "trade_leverage":          20,
         "dzsafm_lookback":         150,
         "sl_cooldown_hours":       2,
+        "use_resistance_blocker":        False,
+        "resistance_blocker_buffer_pct": 0.5,
     }
     _needs_save = any(cfg.get(_rk) != _rv for _rk, _rv in _reset_to_defaults.items())
     cfg.update(_reset_to_defaults)
@@ -1881,6 +1887,8 @@ def _reset_filter_counts():
         "f_trend_filter":            0,
         "f_premium_zone":             0,
         "f_premium_zone_syms":        [],
+        "f_resistance_blocker":       0,
+        "f_resistance_blocker_syms":  [],
         "f_empty_data":              0,
         "passed":                    0,
         "f_sl_cooldown":             0,
@@ -2058,6 +2066,26 @@ def process(sym, cfg: dict, **_kwargs):
         _nearest_res = _find_nearest_resistance(_c1h_res, entry, pivot_n=3) if _c1h_res else None
         if _nearest_res is None and _c15:
             _nearest_res = _find_nearest_resistance(_c15, entry, pivot_n=2)
+
+        # ── F6 Resistance Blocker ─────────────────────────────────────────────
+        # Block signal if Premium Zone OR Nearest Resistance sits within
+        # TP + buffer % from entry — meaning the trade has no clear path.
+        # Only blocks when the value exists (None = price discovery = clear).
+        if bool(cfg.get("use_resistance_blocker", False)):
+            _rb_buf     = float(cfg.get("resistance_blocker_buffer_pct", 0.5))
+            _tp_pct_val = float(cfg.get("tp_pct", 1.2))
+            _rb_thresh  = entry * (1 + (_tp_pct_val + _rb_buf) / 100.0)
+            _rb_blocked = False
+            _rb_reason  = ""
+            if _sig_premium_zone is not None and _sig_premium_zone < _rb_thresh:
+                _rb_blocked = True
+                _rb_reason  = f"Premium Zone {_sig_premium_zone:.8f} < TP+{_rb_buf}% threshold {_rb_thresh:.8f}"
+            if not _rb_blocked and _nearest_res is not None and _nearest_res < _rb_thresh:
+                _rb_blocked = True
+                _rb_reason  = f"Nearest Resistance {_nearest_res:.8f} < TP+{_rb_buf}% threshold {_rb_thresh:.8f}"
+            if _rb_blocked:
+                _record_elim("f_resistance_blocker", "f_resistance_blocker_syms", sym)
+                return None
 
         return {
             "id":                 str(uuid.uuid4())[:8],
@@ -3399,10 +3427,53 @@ with st.sidebar:
         )
         st.caption(f"✅ Top {new_dzsafm_premium_pct:.1f}% of swing range skipped + {new_dzsafm_buffer_pct:.1f}% approach buffer")
     else:
-        new_dzsafm_lookback    = int(_snap_cfg.get("dzsafm_lookback",     200))
+        new_dzsafm_lookback    = int(_snap_cfg.get("dzsafm_lookback",     150))
         new_dzsafm_premium_pct = float(_snap_cfg.get("dzsafm_premium_pct", 5.0))
         new_dzsafm_buffer_pct  = float(_snap_cfg.get("dzsafm_buffer_pct",  2.0))
         st.caption("⏸️ Disabled — entries near Premium zone are allowed")
+    st.divider()
+
+    # ── F6: Resistance Blocker ────────────────────────────────────────────────
+    st.markdown(
+        "**🧱 F6 — Resistance Blocker**",
+        help=(
+            "Blocks a new signal if Premium Zone or Nearest Resistance is too close "
+            "to the entry price to allow the trade enough room to reach TP.\n\n"
+            "Rule: skip if Premium Zone OR Nearest Resistance < entry × (1 + TP% + Buffer%)\n\n"
+            "Example (TP=1.2%, Buffer=0.5%):\n"
+            "  Threshold = entry × 1.017\n"
+            "  If Premium Zone or Nearest Resistance is below that threshold → signal blocked.\n\n"
+            "Note: if the resistance level is None (price in discovery territory) "
+            "that metric is skipped — discovery means no wall above, which is good for the trade."
+        )
+    )
+    new_use_rb = st.checkbox(
+        "Enable F6 — Resistance Blocker",
+        value=bool(_snap_cfg.get("use_resistance_blocker", False)),
+        key="cfg_use_resistance_blocker",
+        help="Block new signals when Premium Zone or Nearest Resistance leaves insufficient room to TP."
+    )
+    if new_use_rb:
+        new_rb_buffer = st.number_input(
+            "Minimum clearance above TP %",
+            min_value=0.0, max_value=5.0, step=0.1,
+            value=float(_snap_cfg.get("resistance_blocker_buffer_pct", 0.5)),
+            format="%.1f", key="cfg_resistance_blocker_buffer_pct",
+            help=(
+                "Extra % above TP price required for a clear path.\n\n"
+                "Threshold = entry × (1 + TP% + this value)\n"
+                "If resistance sits below this threshold → signal is blocked.\n\n"
+                "0.5% = resistance must be at least 0.5% above TP to allow the trade."
+            )
+        )
+        _rb_thresh_preview = entry_display = (1 + (float(_snap_cfg.get("tp_pct", 1.2)) + new_rb_buffer) / 100)
+        st.caption(
+            f"✅ Threshold = entry × {_rb_thresh_preview:.4f}  "
+            f"(TP {_snap_cfg.get('tp_pct', 1.2):.1f}% + {new_rb_buffer:.1f}% clearance)"
+        )
+    else:
+        new_rb_buffer = float(_snap_cfg.get("resistance_blocker_buffer_pct", 0.5))
+        st.caption("⏸️ Disabled — resistance proximity not checked at entry")
     st.divider()
 
     # ── Exit Criteria ─────────────────────────────────────────────────────────
@@ -3825,6 +3896,8 @@ with st.sidebar:
             "dzsafm_lookback":     int(new_dzsafm_lookback),
             "dzsafm_premium_pct":  float(new_dzsafm_premium_pct),
             "dzsafm_buffer_pct":   float(new_dzsafm_buffer_pct),
+            "use_resistance_blocker":        bool(new_use_rb),
+            "resistance_blocker_buffer_pct": float(new_rb_buffer),
             "loop_minutes": int(new_loop), "cooldown_minutes": int(new_cool),
             "max_open_trades":    max(1, int(new_max_open_trades)),
             "sl_cooldown_hours":  max(1, int(new_sl_cooldown_hours)),
@@ -3863,7 +3936,7 @@ with st.sidebar:
 st.markdown(
     "<h1 style='margin-bottom:4px;'>S&amp;R — Crypto Intelligent Portal"
     " <span style='font-size:0.55em;font-weight:400;vertical-align:middle;"
-    "color:#007a7a;'>v2.2</span></h1>",
+    "color:#007a7a;'>v2.3</span></h1>",
     unsafe_allow_html=True,
 )
 
@@ -6124,18 +6197,20 @@ if (
         _err_n       = max(0, fc.get("errors", 0))
         _after_err   = max(0, _after_drift - _err_n)
         _passed_n    = fc.get("passed", 0)
+        _res_blk_n   = fc.get("f_resistance_blocker", 0)
 
         # ── Symbol sets ───────────────────────────────────────────────────────
-        _pre_syms      = set(fc.get("pre_filter_passed_syms",   []))
-        _chk_syms      = set(fc.get("checked_syms",             []))
-        _fempty_syms   = set(fc.get("f_empty_data_syms",        []))
-        _ftrend_syms   = set(fc.get("f_trend_filter_syms",      []))
-        _fdrift_syms   = set(fc.get("f_price_drift_syms",       []))
-        _passed_syms   = set(fc.get("passed_syms",              []))
-        _new_sig_s     = set(fc.get("new_signal_syms",          []))
-        _blk_active_s  = set(fc.get("blocked_by_active_syms",   []))
-        _blk_cool_s    = set(fc.get("blocked_by_cooldown_syms", []))
-        _blk_sl_cool_s = set(fc.get("blocked_by_sl_cooldown_syms", []))
+        _pre_syms      = set(fc.get("pre_filter_passed_syms",        []))
+        _chk_syms      = set(fc.get("checked_syms",                  []))
+        _fempty_syms   = set(fc.get("f_empty_data_syms",             []))
+        _ftrend_syms   = set(fc.get("f_trend_filter_syms",           []))
+        _fdrift_syms   = set(fc.get("f_price_drift_syms",            []))
+        _passed_syms   = set(fc.get("passed_syms",                   []))
+        _fres_syms     = set(fc.get("f_resistance_blocker_syms",     []))
+        _new_sig_s     = set(fc.get("new_signal_syms",               []))
+        _blk_active_s  = set(fc.get("blocked_by_active_syms",        []))
+        _blk_cool_s    = set(fc.get("blocked_by_cooldown_syms",      []))
+        _blk_sl_cool_s = set(fc.get("blocked_by_sl_cooldown_syms",   []))
 
         def _coin_str(s): return ", ".join(sorted(s)) if s else "—"
 
@@ -6171,8 +6246,11 @@ if (
             _row("💥 Dropped — Process Error",
                  _after_drift, _err_n,
                  "See API Error Log ↓" if _err_n else "—"),
+            _row("🧱 Dropped — Resistance Blocker (F6: Premium/Resistance ≤ TP+buffer)",
+                 _after_err, _res_blk_n,
+                 _coin_str(_fres_syms) if _fres_syms else ("⏸️ Filter disabled" if not fc.get("f_resistance_blocker_syms") and _res_blk_n == 0 else "—")),
             _row("✅ Passed All Filters",
-                 _after_err, 0,
+                 max(0, _after_err - _res_blk_n), 0,
                  _coin_str(_passed_syms)),
             _row("🔵 Blocked — Open trade",
                  _passed_n, len(_blk_active_s),
@@ -6337,7 +6415,7 @@ def _build_diagnostics_text() -> str:
     _push("DCA_SMACORSS DIAGNOSTICS SNAPSHOT")
     _push("Generated: " + dubai_now().strftime("%Y-%m-%d %H:%M:%S GST"))
     _push("User: " + (os.environ.get("USER") or os.environ.get("USERNAME") or "?"))
-    _push("Version: S&R — Crypto Intelligent Portal v2.2")
+    _push("Version: S&R — Crypto Intelligent Portal v2.3")
 
     # ── Runtime state ────────────────────────────────────────────────────────
     _hdr("RUNTIME STATE")
@@ -6422,6 +6500,17 @@ def _build_diagnostics_text() -> str:
         if _use_pf:
             _kv("f1_rule",                   "1 API call screens full watchlist: Vol ≥ 100k USDT · Price ≥ 24h Low × 1.005")
             _kv("f1_benefit",                "Eliminates ~70% of coins before any candle fetch")
+        _sub("F6 Resistance Blocker")
+        _use_rb_d   = bool(_snap_cfg.get("use_resistance_blocker",        False))
+        _rb_buf_d   = float(_snap_cfg.get("resistance_blocker_buffer_pct", 0.5))
+        _tp_pct_d   = float(_snap_cfg.get("tp_pct", 1.2))
+        _kv("resistance_blocker",            "ENABLED" if _use_rb_d else "DISABLED")
+        if _use_rb_d:
+            _kv("rb_clearance_buffer_pct",   f"{_rb_buf_d:.1f}%  above TP required for clear path")
+            _kv("rb_threshold_formula",      f"entry × (1 + ({_tp_pct_d:.1f}% TP + {_rb_buf_d:.1f}% buffer) / 100)")
+            _kv("rb_rule",                   f"Block signal if Premium Zone OR Nearest Resistance < threshold")
+            _kv("rb_none_handling",          "If resistance is None (price discovery) → that metric is skipped, NOT blocked")
+            _kv("rb_blocked_this_scan",      str(_filter_counts.get("f_resistance_blocker", 0)))
         _sub("Exit Criteria")
         _use_tp_exit_d  = bool(_snap_cfg.get("use_tp_exit",    True))
         _use_sl_exit_d  = bool(_snap_cfg.get("use_sl_exit",    False))
@@ -6471,7 +6560,7 @@ def _build_diagnostics_text() -> str:
     except Exception as _le:
         _push(f"  <error: {_le}>")
 
-    # ── Signal bucket counts ────────────────────────────────────────────────────────
+    # ── Signal bucket counts ──────────────────────────────────────────────────
     _hdr("SIGNAL COUNTS")
     _kv("open",        len(_open_sigs))
     _kv("tp_hit",      len(_tp_sigs))
@@ -6481,8 +6570,9 @@ def _build_diagnostics_text() -> str:
     _kv("time_limit",  len(_timelimit_sigs))
     _kv("queue_limit",           len(_queue_sigs))
     _kv("closed_okx",            len(_closed_okx_sigs))
-    _kv("premium_zone_skipped",  _filter_counts.get("f_premium_zone", 0))
-    _kv("total",                 len(signals))
+    _kv("premium_zone_skipped",       _filter_counts.get("f_premium_zone", 0))
+    _kv("resistance_blocker_skipped", _filter_counts.get("f_resistance_blocker", 0))
+    _kv("total",                      len(signals))
 
 
     # ── Capital Requirement Summary ──────────────────────────────────────────
@@ -6502,7 +6592,7 @@ def _build_diagnostics_text() -> str:
     except Exception as _ce:
         _push(f"  <error: {_ce}>")
 
-    # ── Live OKX Positions (real-time API call) ───────────────────────────────
+    # ── Live OKX Positions (real-time API call) ────────────────────────────
     _hdr("LIVE OKX POSITIONS (from /api/v5/account/positions)")
     try:
         _has_creds = bool(
