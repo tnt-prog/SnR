@@ -5210,7 +5210,8 @@ def _render_sig_table(sig_list: list, header: str, empty_msg: str,
                       auto_height: bool = False, is_open_table: bool = False,
                       show_pnl: bool = False, scroll_height: int = None,
                       use_expander: bool = False, expander_open: bool = True,
-                      show_header: bool = True, tooltip: str = ""):
+                      show_header: bool = True, tooltip: str = "",
+                      pill_filter_fn=None):
     """Render a signal table.
 
     Parameters
@@ -5223,11 +5224,21 @@ def _render_sig_table(sig_list: list, header: str, empty_msg: str,
                     when the caller wraps the table in its own st.expander and
                     wants to avoid a redundant heading inside.
     """
-    rows = [_build_signal_row(s, is_open_table=is_open_table, show_pnl=show_pnl)
-            for s in sig_list]
-
     def _draw_table_content():
-        # Heading is shown in non-expander mode (unless explicitly suppressed).
+        # ── Apply pill date filter if provided ────────────────────────────────
+        # Use st.empty() so the header reserves its slot ABOVE the pill chips,
+        # then we fill it after filtering (so count reflects filtered rows).
+        if pill_filter_fn is not None:
+            _hdr_slot = st.empty()
+            _active_list = pill_filter_fn(sig_list)
+        else:
+            _hdr_slot = None
+            _active_list = sig_list
+
+        rows = [_build_signal_row(s, is_open_table=is_open_table, show_pnl=show_pnl)
+                for s in _active_list]
+
+        # Heading — rendered into placeholder (above chips) or directly.
         if show_header and not use_expander:
             if tooltip:
                 _tip_html = (
@@ -5236,9 +5247,16 @@ def _render_sig_table(sig_list: list, header: str, empty_msg: str,
                     f'width:8px;height:8px;background:#0097A7;border-radius:50%;'
                     f'cursor:help;vertical-align:middle;margin-left:2px;"></span>'
                 )
-                st.markdown(_tip_html, unsafe_allow_html=True)
+                if _hdr_slot:
+                    with _hdr_slot: st.markdown(_tip_html, unsafe_allow_html=True)
+                else:
+                    st.markdown(_tip_html, unsafe_allow_html=True)
             else:
-                st.markdown(f"### {header} ({len(rows)})")
+                _hdr_md = f"### {header} ({len(rows)})"
+                if _hdr_slot:
+                    with _hdr_slot: st.markdown(_hdr_md)
+                else:
+                    st.markdown(_hdr_md)
         if rows:
             # Wrap the rows in a pandas DataFrame so we can apply Styler to
             # color the Alert cell orange+bold when it contains DCA text.
@@ -5277,7 +5295,7 @@ def _render_sig_table(sig_list: list, header: str, empty_msg: str,
 
     if use_expander:
         # Expander label carries the count so it's visible while collapsed.
-        with st.expander(f"{header} ({len(rows)})", expanded=expander_open):
+        with st.expander(f"{header} ({len(sig_list)})", expanded=expander_open):
             _draw_table_content()
     else:
         _draw_table_content()
@@ -5321,8 +5339,8 @@ def _signal_tables_fragment():
     }
     div[data-testid="stRadio"] div[role="radiogroup"]>label{
         display:inline-flex!important;align-items:center!important;
-        padding:3px 10px!important;border-radius:12px!important;
-        font-size:11px!important;font-weight:500!important;
+        padding:2px 7px!important;border-radius:12px!important;
+        font-size:10px!important;font-weight:500!important;
         border:1px solid #7ABCBC!important;background:#D4ECEC!important;
         color:#1A4A4A!important;margin:0!important;cursor:pointer!important;
         line-height:1.5!important;white-space:nowrap!important;
@@ -5602,13 +5620,10 @@ def _signal_tables_fragment():
                           endpoint="/api/v5/account/positions-history")
 
 
-    _tp_sigs = _pill_date_filter('pill_tp', _tp_sigs_all)
     # ── Table 2: TP Hit ─────────────────────────────────────────────────────────────
-    # show_pnl=True → realized gain column, using close_price (= TP level).
-    # For DCA trades, the row naturally picks up DCA-N in Alert, blended avg in
-    # Signal Entry, original entry in Original Entry, and cumulative Order Size.
-    _render_sig_table(_tp_sigs,    "✅ TP Hit",         "No TP hits yet.",
+    _render_sig_table(_tp_sigs_all, "✅ TP Hit",         "No TP hits yet.",
                       show_pnl=True,
+                      pill_filter_fn=lambda s: _pill_date_filter('pill_tp', s),
                       tooltip="Trades closed because price reached the Take Profit target.")
 
     # ── OKX Fulfilled Orders (auto-trading only) ────────────────────────────────────
@@ -5686,30 +5701,28 @@ def _signal_tables_fragment():
 
     st.divider()
 
-    _sl_sigs = _pill_date_filter('pill_sl', _sl_sigs_all)
     # ── Table 3: SL Hit (non-DCA trades only) ──────────────────────────────────────
-    # Trades that exhausted a DCA ladder and hit the −3% final SL are routed to
-    # the dedicated "DCA SL Hit" table below, not this one.
-    _render_sig_table(_sl_sigs,    "❌ SL Hit",         "No SL hits yet.",
+    _render_sig_table(_sl_sigs_all, "❌ SL Hit",         "No SL hits yet.",
                       show_pnl=True,
+                      pill_filter_fn=lambda s: _pill_date_filter('pill_sl', s),
                       tooltip="Trades closed because price hit the hard Stop Loss level.")
 
-    _trend_exit_sigs = _pill_date_filter('pill_trend', _trend_exit_sigs_all)
     # ── Table 3b: Trend Exit ────────────────────────────────────────────────
-    _render_sig_table(_trend_exit_sigs, "🚨 Trend Exit",
+    _render_sig_table(_trend_exit_sigs_all, "🚨 Trend Exit",
                       "No trend exits yet.", show_pnl=True,
+                      pill_filter_fn=lambda s: _pill_date_filter('pill_trend', s),
                       tooltip="Trades closed because 1 or more trend indicators (F2/F3/F4) flipped bearish on the last 15m candle.")
 
-    _safestop_sigs = _pill_date_filter('pill_safestop', _safestop_sigs_all)
     # ── Table 3c: SafeStop ──────────────────────────────────────────────────
-    _render_sig_table(_safestop_sigs, "🛡️ Safe Stop Hit",
+    _render_sig_table(_safestop_sigs_all, "🛡️ Safe Stop Hit",
                       "No Safe Stop exits yet.", show_pnl=True,
+                      pill_filter_fn=lambda s: _pill_date_filter('pill_safestop', s),
                       tooltip="Trades closed by the SafeStop trailing mechanism. Price rose enough to activate break-even SL, which then got hit on a pullback. Exit price is at or above entry.")
 
-    _timelimit_sigs = _pill_date_filter('pill_timelimit', _timelimit_sigs_all)
     # ── Table 3e: Time Limit Exit ────────────────────────
-    _render_sig_table(_timelimit_sigs, "🕐 Time Limit",
+    _render_sig_table(_timelimit_sigs_all, "🕐 Time Limit",
                       "No Time Limit exits yet.", show_pnl=True,
+                      pill_filter_fn=lambda s: _pill_date_filter('pill_timelimit', s),
                       tooltip="Trades closed automatically after being open longer than the set hours with PnL above the minimum threshold.")
 
     # ── OKX Liquidated / SL Closed Orders (auto-trading only) ───────────────────────
