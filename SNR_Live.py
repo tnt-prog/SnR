@@ -2101,14 +2101,14 @@ def calc_pdz_zone_short(candles: list, price: float, buffer_pct: float = 0.015) 
     Returns (qualifies: bool, zone_label: str)
     """
     if not candles or len(candles) < 50:
-        return False, "insufficient_data"
+        return False, "insufficient_data", None, None
 
     lookback = candles[-60:]
     H = max(c["high"] for c in lookback)
     L = min(c["low"]  for c in lookback)
 
     if H <= L:
-        return False, "flat_range"
+        return False, "flat_range", None, None
 
     # ATR over the lookback window
     trs = [max(lookback[i]["high"] - lookback[i]["low"],
@@ -2122,17 +2122,16 @@ def calc_pdz_zone_short(candles: list, price: float, buffer_pct: float = 0.015) 
     near_prem_floor = premium_bottom * (1 - buffer_pct)  # buffer just below premium
 
     if price >= premium_bottom:
-        return True, "Premium"
+        return True, "Premium", premium_bottom, discount_top
     elif price <= discount_top:
-        return False, "Discount"
+        return False, "Discount", premium_bottom, discount_top
     elif price >= near_prem_floor:
         dist_pct = (premium_bottom - price) / premium_bottom * 100
-        return True, f"NearPrem({dist_pct:.1f}%↓Prem)"
+        return True, f"NearPrem({dist_pct:.1f}%↓Prem)", premium_bottom, discount_top
     else:
-        # Middle — compute position as % of the Premium-Discount range
         rng = premium_bottom - discount_top
         pos_pct = (price - discount_top) / rng * 100 if rng > 0 else 50
-        return False, f"Middle({pos_pct:.0f}%)"
+        return False, f"Middle({pos_pct:.0f}%)", premium_bottom, discount_top
 
 
 def calc_parabolic_sar(candles: list, af_start=0.02, af_step=0.02, af_max=0.20):
@@ -2186,7 +2185,7 @@ def calc_pdz_zone(candles: list, price: float, buffer_pct: float = 0.015) -> tup
     """
     # Fail-closed on insufficient data — missing data must never silently pass.
     if not candles or len(candles) < 50:
-        return False, "insufficient_data"
+        return False, "insufficient_data", None, None
 
     lookback = candles[-60:]   # 60 candles — matches DZSAFM indicator default lookback
     H = max(c["high"] for c in lookback)
@@ -2194,7 +2193,7 @@ def calc_pdz_zone(candles: list, price: float, buffer_pct: float = 0.015) -> tup
 
     if H <= L:
         # Degenerate range (flat or inverted) — cannot compute zones.
-        return False, "flat_range"
+        return False, "flat_range", None, None
 
     # ATR over the lookback window
     trs = [max(lookback[i]["high"] - lookback[i]["low"],
@@ -2208,19 +2207,16 @@ def calc_pdz_zone(candles: list, price: float, buffer_pct: float = 0.015) -> tup
     near_disc_ceil = discount_top * (1 + buffer_pct)  # buffer just above discount
 
     if price <= discount_top:
-        # Fully inside Discount zone — best long setup
-        return True, "Discount"
+        return True, "Discount", premium_bottom, discount_top
     elif price >= premium_bottom:
-        # Fully inside Premium zone — no upward room
-        return False, "Premium"
+        return False, "Premium", premium_bottom, discount_top
     elif price <= near_disc_ceil:
         dist_pct = (price - discount_top) / discount_top * 100
-        return True, f"NearDisc({dist_pct:.1f}%up-Disc)"
+        return True, f"NearDisc({dist_pct:.1f}%up-Disc)", premium_bottom, discount_top
     else:
-        # Middle — show position as % of the Premium-Discount range
         rng = premium_bottom - discount_top
         pos_pct = (price - discount_top) / rng * 100 if rng > 0 else 50
-        return False, f"Middle({pos_pct:.0f}%)"
+        return False, f"Middle({pos_pct:.0f}%)", premium_bottom, discount_top
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2397,17 +2393,19 @@ def process(sym, cfg: dict, super_counter: dict = None, super_lock=None,
         # the necessary downtrend confirmation instead.
         pdz_zone_15m       = "—"
         pdz_zone_1h        = "—"
+        _pdz_prem_15m      = None
+        _pdz_disc_15m      = None
         is_super_eligible  = False
         _pdz_fn    = calc_pdz_zone_short if direction == "short" else calc_pdz_zone
         _super_zone = "Premium" if direction == "short" else "Discount"
         _skip_pdz_gate = (direction == "short" and short_mode == "trend_follow")
         if cfg.get("use_pdz_15m", True):
-            pdz_pass_15m, pdz_zone_15m = _pdz_fn(m15_quick, entry_q, float(cfg.get("tp_pct", 1.2)) / 100.0)
+            pdz_pass_15m, pdz_zone_15m, _pdz_prem_15m, _pdz_disc_15m = _pdz_fn(m15_quick, entry_q, float(cfg.get("tp_pct", 1.2)) / 100.0)
             if _skip_pdz_gate:
                 pass  # trend-follow short — store zone label but don't gate on it
             elif pdz_zone_15m == _super_zone:
                 if m1h_quick:
-                    _, pdz_zone_1h = _pdz_fn(m1h_quick, entry_q, float(cfg.get("tp_pct", 1.2)) / 100.0)
+                    _, pdz_zone_1h, _, _ = _pdz_fn(m1h_quick, entry_q, float(cfg.get("tp_pct", 1.2)) / 100.0)
                 if pdz_zone_1h == _super_zone:
                     is_super_eligible = True
             elif not pdz_pass_15m:
@@ -2468,6 +2466,7 @@ def process(sym, cfg: dict, super_counter: dict = None, super_lock=None,
                         "vol_ratio": "—",
                         "pdz_zone_5m":  "—",
                         "pdz_zone_15m": pdz_zone_15m,
+                        "pdz_levels":   (f"P:{_pdz_prem_15m:.6g}/D:{_pdz_disc_15m:.6g}" if _pdz_prem_15m is not None else "—"),
                         "pdz_zone_1h":  pdz_zone_1h,
                         "ema_cross_12_15m": "—",
                         "ema_cross_21_15m": "—",
@@ -2483,7 +2482,7 @@ def process(sym, cfg: dict, super_counter: dict = None, super_lock=None,
         # range shows Discount for bearish coins, not their 5m structure).
         pdz_zone_5m = "—"
         if cfg.get("use_pdz_5m", True):
-            pdz_pass_5m, pdz_zone_5m = _pdz_fn(m5_quick, entry_q, float(cfg.get("tp_pct", 1.2)) / 100.0)
+            pdz_pass_5m, pdz_zone_5m, _, _ = _pdz_fn(m5_quick, entry_q, float(cfg.get("tp_pct", 1.2)) / 100.0)
             if not _skip_pdz_gate and not pdz_pass_5m:
                 _record_elim("f3_pdz5m", "f3_elim_syms", sym)
                 return None
@@ -2756,6 +2755,7 @@ def process(sym, cfg: dict, super_counter: dict = None, super_lock=None,
             "vol_ratio":    vol_ratio    if cfg.get("use_vol_spike") else "—",
             "pdz_zone_5m":  pdz_zone_5m  if cfg.get("use_pdz_5m",  True) else "—",
             "pdz_zone_15m": pdz_zone_15m if cfg.get("use_pdz_15m", True) else "—",
+            "pdz_levels":   (f"P:{_pdz_prem_15m:.6g}/D:{_pdz_disc_15m:.6g}" if _pdz_prem_15m is not None else "—"),
             "pdz_zone_1h":  pdz_zone_1h  if cfg.get("use_pdz_15m", True) else "—",
             "ema_cross_12_15m": ema_cross_12_15m_val if cfg.get("use_ema_cross_15m", True) else "—",
             "ema_cross_21_15m": ema_cross_21_15m_val if cfg.get("use_ema_cross_15m", True) else "—",
@@ -5983,12 +5983,12 @@ def _analyze_market_conditions(cfg: dict, symbols: list,
 
             # ── F2: PDZ 15m ───────────────────────────────────────────────
             _pdz_fn_am = calc_pdz_zone_short if _am_short else calc_pdz_zone
-            _p15, _z15 = _pdz_fn_am(m15, entry, tp_pct / 100.0)
+            _p15, _z15, _, _ = _pdz_fn_am(m15, entry, tp_pct / 100.0)
             _d["f2_pdz15m"]["zones"].append(_z15)
             _d["f2_pdz15m"]["pass" if _p15 else "fail"] += 1
 
             # ── F3: PDZ 5m ────────────────────────────────────────────────
-            _p5, _z5 = _pdz_fn_am(m5, entry, tp_pct / 100.0)
+            _p5, _z5, _, _ = _pdz_fn_am(m5, entry, tp_pct / 100.0)
             _d["f3_pdz5m"]["zones"].append(_z5)
             _d["f3_pdz5m"]["pass" if _p5 else "fail"] += 1
 
@@ -8917,8 +8917,9 @@ def _build_signal_row(s: dict, is_open_table: bool = False,
     ts_str    = fmt_dubai(s.get("timestamp", ""))
     close_str = fmt_dubai(s["close_time"]) if s.get("close_time") else "—"
     crit      = s.get("criteria", {})
-    pdz_5m_val  = crit.get("pdz_zone_5m",  "—") or "—"
-    pdz_15m_val = crit.get("pdz_zone_15m", "—") or "—"
+    pdz_5m_val   = crit.get("pdz_zone_5m",  "—") or "—"
+    pdz_15m_val  = crit.get("pdz_zone_15m", "—") or "—"
+    pdz_levels_col = crit.get("pdz_levels", "—") or "—"
     crit_str = (
         f"• RSI 5m    : {crit.get('rsi_5m','—')}\n"
         f"• RSI 1h    : {crit.get('rsi_1h','—')}\n"
@@ -9292,6 +9293,7 @@ def _build_signal_row(s: dict, is_open_table: bool = False,
             "Original Entry":    _orig_entry_display,
             "Current Price":     current_price_col,
             "DCA Levels":        dca_levels_col,
+            "PDZ Levels":        pdz_levels_col,
             "Next DCA":          next_dca_col,
             "FC Trigger Price":  fc_trig_col,
             "TP":                s.get("tp", ""),
@@ -9343,6 +9345,7 @@ def _build_signal_row(s: dict, is_open_table: bool = False,
         row["Exit %"] = exit_pct_col
     row.update({
         "DCA Levels":        dca_levels_col,
+        "PDZ Levels":        pdz_levels_col,
         "Signal Entry":      _sig_entry_display,
         "Original Entry":    _orig_entry_display,
         "Fill $":            s.get("entry", "") if s.get("signal_entry") else "—",
@@ -9384,6 +9387,11 @@ _SIG_COL_CFG = {
                                "vs. the ATR% measured at entry, so it gets easier as price "
                                "moves toward TP. Shows '—' when ATR was not computed (ATR "
                                "filter disabled at entry time)."),
+    "PDZ Levels":     st.column_config.TextColumn(
+                         "PDZ Levels (15m)", width="small",
+                         help="ATR-based Premium/Discount boundaries on 15m.\n"
+                              "P = premium_bottom (H - 0.5×ATR)\n"
+                              "D = discount_top  (L + 0.5×ATR)"),
     "DCA Levels":     st.column_config.TextColumn(
                           "📊 DCA Levels", width="medium",
                           help=(
