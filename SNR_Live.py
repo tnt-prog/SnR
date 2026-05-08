@@ -11552,28 +11552,3 @@ try:
     )
 except Exception as _diag_exc:
     st.warning(f"Diagnostics unavailable: {_diag_exc}")
-"")[:120]
-                _push(f"  [{_ei:>4}] {_ts_fmt} | {_src} | {_sym} | {_ep} | {_msg}")
-    except Exception as _ele:
-        _push(f"  <error: {_ele}>")
-
-    # ── Footer ────────────────────────────────────────────────────────
-    _push("")
-    _push("=" * 78)
-    _push("END OF DIAGNOSTIC REPORT")
-    return "\n".join(_lines)
-
-
-# ── Render the download button ────────────────────────────────────────────
-try:
-    _diag_bytes = _build_diagnostics_text().encode("utf-8", errors="replace")
-    st.download_button(
-        label="Download diagnostics.txt",
-        data=_diag_bytes,
-        file_name="snr_diagnostics.txt",
-        mime="text/plain",
-        help="Full snapshot of filters, signals, trade state, and error log.",
-    )
-except Exception as _diag_exc:
-    st.warning(f"Diagnostics unavailable: {_diag_exc}")
-}")
