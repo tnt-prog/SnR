@@ -6325,7 +6325,7 @@ if (
                  "See API Error Log ↓" if _err_n else "—"),
             _row("🧱 Dropped — Resistance Blocker (F6: Premium/Resistance ≤ TP+buffer)",
                  _after_err, _res_blk_n,
-                 _coin_str(_fres_syms) if _fres_syms else ("⏸️ Filter disabled" if not fc.get("f_resistance_blocker_syms") and _res_blk_n == 0 else "—")),
+                 _coin_str(_fres_syms) if _fres_syms else ("⏸️ Filter disabled" if not bool(_snap_cfg.get("use_resistance_blocker", False)) else "—")),
             _row("✅ Passed All Filters",
                  max(0, _after_err - _res_blk_n), 0,
                  _coin_str(_passed_syms)),
