@@ -5312,8 +5312,39 @@ def _signal_tables_fragment():
     _closed_okx_sigs  = [s for s in filtered_sorted if s.get("status") == "closed_okx"]
 
     # ── Per-table pill-button date filter ─────────────────────────────────────
+    # Inject chip styling once — targets buttons by aria-label + kind attribute
+    # so it never affects other buttons (Force Close, etc.)
+    st.markdown("""<style>
+    button[aria-label="Today"],button[aria-label="Last 3d"],
+    button[aria-label="Last 7d"],button[aria-label="Last 30d"],
+    button[aria-label="All"]{
+        font-size:11px!important;padding:3px 10px!important;
+        border-radius:12px!important;height:auto!important;
+        min-height:0!important;line-height:1.5!important;
+        box-shadow:none!important;transition:none!important;
+    }
+    button[aria-label="Today"][kind="secondary"],
+    button[aria-label="Last 3d"][kind="secondary"],
+    button[aria-label="Last 7d"][kind="secondary"],
+    button[aria-label="Last 30d"][kind="secondary"],
+    button[aria-label="All"][kind="secondary"]{
+        background:#D4ECEC!important;color:#1A4A4A!important;
+        border:1px solid #7ABCBC!important;font-weight:500!important;
+    }
+    button[aria-label="Today"][kind="primary"],
+    button[aria-label="Last 3d"][kind="primary"],
+    button[aria-label="Last 7d"][kind="primary"],
+    button[aria-label="Last 30d"][kind="primary"],
+    button[aria-label="All"][kind="primary"]{
+        background:#C8F5C8!important;color:#1B5E20!important;
+        border:1px solid #2E7D32!important;font-weight:700!important;
+    }
+    div[data-testid="stHorizontalBlock"]:has(button[aria-label="Today"])
+    >div[data-testid="column"]{padding-left:0!important;padding-right:4px!important;}
+    </style>""", unsafe_allow_html=True)
+
     def _pill_date_filter(state_key, sigs_all):
-        """Render 5 pill buttons above a closed table; return date-filtered list."""
+        """Render 5 chip-style date filter pills; return filtered list."""
         _PILL_OPTS = {"Today": 0, "Last 3d": 2, "Last 7d": 6, "Last 30d": 29, "All": -1}
         if state_key not in st.session_state:
             st.session_state[state_key] = "Today"
@@ -6675,14 +6706,14 @@ def _build_diagnostics_text() -> str:
     except Exception as _oe:
         _push(f"  <error: {_oe}>")
 
-    # ââ OKX ctVal / ctMult cache âââââââââââââââââââââ
-    _hdr("OKX CONTRACT SIZE CACHE (ctVal Ã ctMult â effective)")
+    # ── OKX ctVal / ctMult cache ─────────────────────
+    _hdr("OKX CONTRACT SIZE CACHE (ctVal × ctMult → effective)")
     _ct_raw = _b._bsc_symbol_cache.get("ct_raw", {})
     if _ct_raw:
         _suspicious = {s: v for s, v in _ct_raw.items()
-                       if abs(v[1] - 1.0) > 0.01}  # ctMult â  1
+                       if abs(v[1] - 1.0) > 0.01}
         _push(f"  Total cached: {len(_ct_raw)} symbols")
-        _push(f"  Symbols with ctMult â  1: {len(_suspicious)}")
+        _push(f"  Symbols with ctMult ≠ 1: {len(_suspicious)}")
         if _suspicious:
             _push("  --- Non-unity ctMult tokens ---")
             for _s, (_cv, _cm, _ef) in sorted(_suspicious.items()):
@@ -6696,7 +6727,7 @@ def _build_diagnostics_text() -> str:
             else:
                 _push(f"    {_s:<14} (not in cache)")
     else:
-        _push("  (cache empty â no symbols fetched yet)")
+        _push("  (cache empty — no symbols fetched yet)")
 
     return "\n".join(_lines)
 
