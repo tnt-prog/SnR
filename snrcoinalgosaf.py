@@ -152,7 +152,7 @@ DEFAULT_CONFIG: dict = {
     "dzsafm_premium_pct":    5.0,    # Top X% of range = Premium zone
     "dzsafm_buffer_pct":     2.0,    # Extra % buffer below Premium zone boundary
     # —— Resistance Blocker (F6) ——————————————————————————————————
-    "use_resistance_blocker":        False, # Skip signal if Premium Zone or Nearest Resistance
+    "use_resistance_blocker":        True,  # Skip signal if Premium Zone or Nearest Resistance
                                             # is closer to entry than TP + buffer %
     "resistance_blocker_buffer_pct": 0.5,  # Extra % above TP required for clear path
     "scan_hour_enabled":     False,
@@ -393,7 +393,7 @@ def load_config() -> dict:
         "trade_leverage":          20,
         "dzsafm_lookback":         150,
         "sl_cooldown_hours":       2,
-        "use_resistance_blocker":        False,
+        "use_resistance_blocker":        True,
         "resistance_blocker_buffer_pct": 0.5,
     }
     _needs_save = any(cfg.get(_rk) != _rv for _rk, _rv in _reset_to_defaults.items())
@@ -5311,57 +5311,6 @@ def _signal_tables_fragment():
     _queue_sigs       = [s for s in filtered_sorted if s.get("status") == "queue_limit"]
     _closed_okx_sigs  = [s for s in filtered_sorted if s.get("status") == "closed_okx"]
 
-    # ── Closed-table date filter (applies to TP Hit, SL Hit, Trend Exit,
-    #    Safe Stop Hit, Time Limit) ──────────────────────────────────────────
-    _CLOSED_DATE_OPTIONS = {
-        "Today":        0,
-        "Last 3 Days":  2,
-        "Last 7 Days":  6,
-        "Last 30 Days": 29,
-        "All Time":     -1,
-    }
-    _closed_date_sel = st.selectbox(
-        "📅 Closed trades — date filter",
-        options=list(_CLOSED_DATE_OPTIONS.keys()),
-        index=0,          # default: Today
-        key="closed_date_filter",
-        help=(
-            "Filter the TP Hit, SL Hit, Trend Exit, Safe Stop Hit and Time Limit "
-            "tables by the date the trade was closed (Dubai / GST time).\n\n"
-            "Today — only trades closed today.\n"
-            "Last 3 / 7 / 30 Days — rolling window.\n"
-            "All Time — show every record."
-        ),
-    )
-    _closed_days_back = _CLOSED_DATE_OPTIONS[_closed_date_sel]
-
-    def _date_filter(sigs):
-        """Return signals whose close_time falls within the selected window."""
-        if _closed_days_back == -1:
-            return sigs          # All Time — no filtering
-        _today_gst = dubai_now().date()
-        _cutoff    = _today_gst - timedelta(days=_closed_days_back)
-        out = []
-        for _s in sigs:
-            _ct = _s.get("close_time") or _s.get("timestamp", "")
-            try:
-                _close_date = datetime.fromisoformat(_ct).date()
-            except Exception:
-                try:
-                    _close_date = datetime.strptime(_ct[:10], "%Y-%m-%d").date()
-                except Exception:
-                    out.append(_s)   # unparseable — keep it
-                    continue
-            if _close_date >= _cutoff:
-                out.append(_s)
-        return out
-
-    _tp_sigs         = _date_filter(_tp_sigs_all)
-    _sl_sigs         = _date_filter(_sl_sigs_all)
-    _trend_exit_sigs = _date_filter(_trend_exit_sigs_all)
-    _safestop_sigs   = _date_filter(_safestop_sigs_all)
-    _timelimit_sigs  = _date_filter(_timelimit_sigs_all)
-
     # ── Table 1: Open Signals ───────────────────────────────────────────────────────
     # ── Open Signals table with row selection + Force Close ─────────────────────
     _open_tip = "Active trades currently being monitored. Price, PnL and exit criteria are checked on every scan cycle."
@@ -5593,6 +5542,58 @@ def _signal_tables_fragment():
             st.session_state["okx_sl_hist"]  = None
             _append_error("trade", f"Positions-history fetch failed: {_ph_exc}",
                           endpoint="/api/v5/account/positions-history")
+
+    # ── Closed-table date filter (applies to TP Hit, SL Hit, Trend Exit,
+    #    Safe Stop Hit, Time Limit) ──────────────────────────────────────────
+    _CLOSED_DATE_OPTIONS = {
+        "Today":        0,
+        "Last 3 Days":  2,
+        "Last 7 Days":  6,
+        "Last 30 Days": 29,
+        "All Time":     -1,
+    }
+    _closed_date_sel = st.selectbox(
+        "📅 Closed trades — date filter",
+        options=list(_CLOSED_DATE_OPTIONS.keys()),
+        index=0,          # default: Today
+        key="closed_date_filter",
+        help=(
+            "Filter the TP Hit, SL Hit, Trend Exit, Safe Stop Hit and Time Limit "
+            "tables by the date the trade was closed (Dubai / GST time).\n\n"
+            "Today — only trades closed today.\n"
+            "Last 3 / 7 / 30 Days — rolling window.\n"
+            "All Time — show every record."
+        ),
+    )
+    _closed_days_back = _CLOSED_DATE_OPTIONS[_closed_date_sel]
+
+    def _date_filter(sigs):
+        """Return signals whose close_time falls within the selected window."""
+        if _closed_days_back == -1:
+            return sigs          # All Time — no filtering
+        _today_gst = dubai_now().date()
+        _cutoff    = _today_gst - timedelta(days=_closed_days_back)
+        out = []
+        for _s in sigs:
+            _ct = _s.get("close_time") or _s.get("timestamp", "")
+            try:
+                _close_date = datetime.fromisoformat(_ct).date()
+            except Exception:
+                try:
+                    _close_date = datetime.strptime(_ct[:10], "%Y-%m-%d").date()
+                except Exception:
+                    out.append(_s)   # unparseable — keep it
+                    continue
+            if _close_date >= _cutoff:
+                out.append(_s)
+        return out
+
+    _tp_sigs         = _date_filter(_tp_sigs_all)
+    _sl_sigs         = _date_filter(_sl_sigs_all)
+    _trend_exit_sigs = _date_filter(_trend_exit_sigs_all)
+    _safestop_sigs   = _date_filter(_safestop_sigs_all)
+    _timelimit_sigs  = _date_filter(_timelimit_sigs_all)
+
 
     # ── Table 2: TP Hit ─────────────────────────────────────────────────────────────
     # show_pnl=True → realized gain column, using close_price (= TP level).
@@ -6711,7 +6712,7 @@ def _build_diagnostics_text() -> str:
 
 _diag_text = _build_diagnostics_text()
 st.download_button(
-    label="â¬ï¸ Download diagnostics.txt",
+    label="⬇️ Download diagnostics.txt",
     data=_diag_text,
     file_name=f"diagnostics_{dubai_now().strftime('%Y%m%d_%H%M%S')}.txt",
     mime="text/plain",
