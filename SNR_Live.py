@@ -1521,7 +1521,8 @@ def place_okx_order(sig: dict, cfg: dict) -> dict:
             # ── Cross: TP-only algo at the entry TP price ─────────────────────
             _tp_sig = _place_tp_only_order(
                 {"symbol": sym, "order_margin_mode": mode,
-                 "order_is_hedge": is_hedge},
+                 "order_is_hedge": is_hedge,
+                 "direction": sig.get("direction", "long")},
                 cfg, actual_tp, contracts
             )
             if not _tp_sig:
@@ -11527,9 +11528,5 @@ def _build_diagnostics_text() -> str:
     # ── Footer ────────────────────────────────────────────────
     _push("")
     _push("=" * 78)
-    _push("END OF DIAGNOSTICS")
-    _push("=" * 78)
+    _push("END OF DIAGNOSTIC")
     return "\n".join(_lines)
-
-
-#  
