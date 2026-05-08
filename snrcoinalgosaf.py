@@ -5312,52 +5312,42 @@ def _signal_tables_fragment():
     _closed_okx_sigs  = [s for s in filtered_sorted if s.get("status") == "closed_okx"]
 
     # ── Per-table pill-button date filter ─────────────────────────────────────
-    # Inject chip styling once — targets buttons by aria-label + kind attribute
-    # so it never affects other buttons (Force Close, etc.)
+    # Uses st.radio (horizontal) styled as chips via CSS.
+    # Radio circle is hidden; each option becomes a compact inline chip.
     st.markdown("""<style>
-    button[aria-label="Today"],button[aria-label="Last 3d"],
-    button[aria-label="Last 7d"],button[aria-label="Last 30d"],
-    button[aria-label="All"]{
-        font-size:11px!important;padding:3px 10px!important;
-        border-radius:12px!important;height:auto!important;
-        min-height:0!important;line-height:1.5!important;
-        box-shadow:none!important;transition:none!important;
+    div[data-testid="stRadio"]>label{display:none!important;}
+    div[data-testid="stRadio"] div[role="radiogroup"]{
+        gap:4px!important;flex-wrap:wrap!important;
     }
-    button[aria-label="Today"][kind="secondary"],
-    button[aria-label="Last 3d"][kind="secondary"],
-    button[aria-label="Last 7d"][kind="secondary"],
-    button[aria-label="Last 30d"][kind="secondary"],
-    button[aria-label="All"][kind="secondary"]{
-        background:#D4ECEC!important;color:#1A4A4A!important;
-        border:1px solid #7ABCBC!important;font-weight:500!important;
+    div[data-testid="stRadio"] div[role="radiogroup"]>label{
+        display:inline-flex!important;align-items:center!important;
+        padding:3px 10px!important;border-radius:12px!important;
+        font-size:11px!important;font-weight:500!important;
+        border:1px solid #7ABCBC!important;background:#D4ECEC!important;
+        color:#1A4A4A!important;margin:0!important;cursor:pointer!important;
+        line-height:1.5!important;white-space:nowrap!important;
     }
-    button[aria-label="Today"][kind="primary"],
-    button[aria-label="Last 3d"][kind="primary"],
-    button[aria-label="Last 7d"][kind="primary"],
-    button[aria-label="Last 30d"][kind="primary"],
-    button[aria-label="All"][kind="primary"]{
+    div[data-testid="stRadio"] div[role="radiogroup"]>label:has(input:checked){
         background:#C8F5C8!important;color:#1B5E20!important;
         border:1px solid #2E7D32!important;font-weight:700!important;
     }
-    div[data-testid="stHorizontalBlock"]:has(button[aria-label="Today"])
-    >div[data-testid="column"]{padding-left:0!important;padding-right:4px!important;}
+    div[data-testid="stRadio"] div[role="radiogroup"]>label>div:first-child{
+        display:none!important;
+    }
+    div[data-testid="stRadio"]{margin-bottom:0!important;padding-bottom:0!important;}
     </style>""", unsafe_allow_html=True)
 
     def _pill_date_filter(state_key, sigs_all):
-        """Render 5 chip-style date filter pills; return filtered list."""
+        """Render chip-style date filter using st.radio; return filtered list."""
         _PILL_OPTS = {"Today": 0, "Last 3d": 2, "Last 7d": 6, "Last 30d": 29, "All": -1}
-        if state_key not in st.session_state:
-            st.session_state[state_key] = "Today"
-        _sel = st.session_state[state_key]
-        _pcols = st.columns([1, 1, 1, 1, 1, 5])
-        for _pc, _lbl in zip(_pcols, _PILL_OPTS):
-            if _pc.button(
-                _lbl,
-                key=f"pill_{state_key}_{_lbl}",
-                type="primary" if _sel == _lbl else "secondary",
-            ):
-                st.session_state[state_key] = _lbl
-                _sel = _lbl
+        _sel = st.radio(
+            "",
+            list(_PILL_OPTS.keys()),
+            index=0,
+            horizontal=True,
+            label_visibility="collapsed",
+            key=f"pill_{state_key}",
+        )
         _days = _PILL_OPTS[_sel]
         if _days == -1:
             return sigs_all
