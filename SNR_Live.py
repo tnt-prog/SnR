@@ -1541,15 +1541,23 @@ def place_okx_order(sig: dict, cfg: dict) -> dict:
                     **_base_info}
 
         # ── Isolated: OCO (TP + SL) ───────────────────────────────────────────
-        # In hedge mode, closing a long requires posSide="long" on the sell too.
-        # OKX BUY-side OCO field semantics (closing a short):
-        #   tpTriggerPx fires when price RISES  → use for SHORT SL (loss = price rises)
-        #   slTriggerPx fires when price FALLS   → use for SHORT TP (profit = price falls)
-        # For LONG OCO (sell-side): standard mapping applies (tp=rises, sl=falls).
-        if _is_short_ord:
-            _oco_tp_px  = str(actual_sl)   # short SL price → tpTriggerPx (fires on rise)
-            _oco_sl_px  = str(actual_tp)   # short TP price → slTriggerPx (fires on fall)
+        # OKX field semantics differ by position mode:
+        #
+        # NET MODE (no posSide — OKX uses absolute price direction):
+        #   tpTriggerPx fires when price RISES  → SHORT SL  / LONG TP
+        #   slTriggerPx fires when price FALLS  → SHORT TP  / LONG SL
+        #   → SHORT: swap fields so TP fires on fall, SL fires on rise.
+        #
+        # HEDGE MODE (posSide="short" — OKX is direction-aware):
+        #   tpTriggerPx = take-profit price for the SHORT (price must FALL to it)
+        #   slTriggerPx = stop-loss price   for the SHORT (price must RISE to it)
+        #   → Do NOT swap; pass TP/SL directly and let OKX use direction semantics.
+        if _is_short_ord and not is_hedge:
+            # Net mode short: swap fields
+            _oco_tp_px  = str(actual_sl)   # short SL → tpTriggerPx (fires on rise)
+            _oco_sl_px  = str(actual_tp)   # short TP → slTriggerPx (fires on fall)
         else:
+            # Long (both modes) OR short in hedge mode (direction-aware via posSide)
             _oco_tp_px  = str(actual_tp)
             _oco_sl_px  = str(actual_sl)
         algo_body: dict = {
@@ -3622,21 +3630,21 @@ def _place_tp_only_order(sig: dict, cfg: dict,
                     cfg.get("trade_margin_mode", "isolated")).strip().lower()
         is_hedge = bool(sig.get("order_is_hedge", False))
         _is_short_tp = sig.get("direction", "long") == "short"
-        # OKX BUY-side conditional order field semantics are inverted vs intuition:
-        #   tpTriggerPx  → fires when price RISES  (= short SL / long TP)
-        #   slTriggerPx  → fires when price FALLS   (= short TP / long SL)
-        # For SHORT TP (close short when price falls to profit target):
-        #   use slTriggerPx = tp_price
-        # For LONG TP (close long when price rises to profit target):
-        #   use tpTriggerPx = tp_price  (standard behaviour)
-        if _is_short_tp:
-            _tp_trigger_field     = "slTriggerPx"
-            _tp_trigger_type_field = "slTriggerPxType"
-            _tp_ord_field         = "slOrdPx"
-        else:
-            _tp_trigger_field     = "tpTriggerPx"
-            _tp_trigger_type_field = "tpTriggerPxType"
-            _tp_ord_field         = "tpOrdPx"
+        # OKX TP field selection:
+        #   All cases → tpTriggerPx.
+        #
+        #   For longs:  tpTriggerPx fires when price rises to TP  ✓
+        #   For shorts: tpTriggerPx fires when price falls to TP  ✓
+        #     • Hedge mode:  OKX is direction-aware via posSide="short"
+        #     • Cross/net:   OKX infers direction from reduceOnly=true on the
+        #                    closing BUY order; tpTriggerPx is shown as TP on
+        #                    the position page (slTriggerPx would be invisible).
+        #
+        # Using tpTriggerPx for all cases ensures OKX's positions panel always
+        # displays the TP value correctly for both longs and shorts.
+        _tp_trigger_field      = "tpTriggerPx"
+        _tp_trigger_type_field = "tpTriggerPxType"
+        _tp_ord_field          = "tpOrdPx"
         algo_body: dict = {
             "instId":              _to_okx(sym),
             "tdMode":              mode,
@@ -11528,5 +11536,44 @@ def _build_diagnostics_text() -> str:
     # ── Footer ────────────────────────────────────────────────
     _push("")
     _push("=" * 78)
-    _push("END OF DIAGNOSTIC")
+    _push("END OF DIAGNOSTIC REPORT")
     return "\n".join(_lines)
+
+
+# ── Render the download button ────────────────────────────────────────────────
+try:
+    _diag_bytes = _build_diagnostics_text().encode("utf-8", errors="replace")
+    st.download_button(
+        label="📥 Download diagnostics.txt",
+        data=_diag_bytes,
+        file_name="snr_diagnostics.txt",
+        mime="text/plain",
+        help="Downloads a full snapshot of filters, signals, trade state, and error log.",
+    )
+except Exception as _diag_exc:
+    st.warning(f"Diagnostics unavailable: {_diag_exc}")
+"")[:120]
+                _push(f"  [{_ei:>4}] {_ts_fmt} | {_src} | {_sym} | {_ep} | {_msg}")
+    except Exception as _ele:
+        _push(f"  <error: {_ele}>")
+
+    # ── Footer ────────────────────────────────────────────────────────
+    _push("")
+    _push("=" * 78)
+    _push("END OF DIAGNOSTIC REPORT")
+    return "\n".join(_lines)
+
+
+# ── Render the download button ────────────────────────────────────────────
+try:
+    _diag_bytes = _build_diagnostics_text().encode("utf-8", errors="replace")
+    st.download_button(
+        label="Download diagnostics.txt",
+        data=_diag_bytes,
+        file_name="snr_diagnostics.txt",
+        mime="text/plain",
+        help="Full snapshot of filters, signals, trade state, and error log.",
+    )
+except Exception as _diag_exc:
+    st.warning(f"Diagnostics unavailable: {_diag_exc}")
+}")
