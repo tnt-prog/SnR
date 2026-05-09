@@ -4760,7 +4760,7 @@ def _build_signal_row(s: dict, is_open_table: bool = False,
     ts_str    = fmt_dubai(s.get("timestamp", ""))
     close_str = fmt_dubai(s["close_time"]) if s.get("close_time") else "—"
     crit      = s.get("criteria", {})
-    crit_str = "—"
+    crit_str = _fmt_criteria(s.get("signal_criteria"))
 
     max_lev   = s.get("max_lev", get_max_leverage(s.get("symbol", "")))
     sl_reason = analyze_sl_reason(s) if status == "sl_hit" else "—"
@@ -5025,7 +5025,6 @@ def _build_signal_row(s: dict, is_open_table: bool = False,
     row["Discount Zone"]      = s.get("discount_zone")
     row["Premium Zone"]       = s.get("premium_zone")
     row["Nearest Resistance"] = s.get("nearest_resistance")
-    row["Criteria"]           = _fmt_criteria(s.get("signal_criteria"))
     return row
 
 def _fmt_criteria(sc: dict | None) -> str:
@@ -5238,7 +5237,18 @@ _SIG_COL_CFG = {
                                "Notional = collateral × leverage (this is what OKX shows as position size)."),
     "Order ID":       st.column_config.TextColumn(width="medium"),
     "Algo ID":        st.column_config.TextColumn(width="medium"),
-    "Entry Criteria": st.column_config.TextColumn(width="medium"),
+    "Entry Criteria": st.column_config.TextColumn(
+                      "⚙️ Entry Criteria", width="large",
+                      help="All filter settings that were ACTIVE at the moment this signal was created.\n\n"
+                           "Format: F2✓/✗ F3✓/✗ F4✓/✗ | DZ✓prem%+buf% | F6✓buf% | TP% SL✓/✗ | SS✓/✗ | TE✓×N | TL✓Nh$P\n\n"
+                           "F2 = SuperTrend · F3 = Chandelier Exit · F4 = Lux Trend\n"
+                           "DZ = DZ_SAFM Premium Zone filter (premium% + buffer%)\n"
+                           "F6 = Resistance Blocker (clearance buffer% above TP)\n"
+                           "TP = Take Profit % · SL = Hard Stop Loss on/off\n"
+                           "SS = Safe Stop trailing SL on/off\n"
+                           "TE = Trend Exit (× confirmations required)\n"
+                           "TL = Time Limit exit (hours, min PnL $)\n\n"
+                           "Shows '—' for signals created before this feature was added."),
     "⚠️ SL Reason":  st.column_config.TextColumn(width="medium"),
     "Discount Zone": st.column_config.NumberColumn(
                          "🟢 Discount Zone", format="%.8f",
@@ -5266,19 +5276,6 @@ _SIG_COL_CFG = {
                               "The nearest one (smallest distance above entry) is displayed.\n\n"
                               "Shows '—' if price is in discovery territory (no resistance found above entry)\n"
                               "or for signals created before this feature was added."),
-    "Criteria":           st.column_config.TextColumn(
-                         "⚙️ Signal Criteria", width="medium",
-                         help="Filter settings that were ACTIVE at the moment this signal was created.\n\n"
-                              "Format: F2✓/✗ F3✓/✗ F4✓/✗ | DZ✓prem%+buf% | F6✓buf% | TP% SL✓/✗ | SS✓/✗ | TE✓×N | TL✓Nh$P\n\n"
-                              "F2/F3/F4 = Trend indicator enabled (✓) or disabled (✗)\n"
-                              "DZ = DZ_SAFM Premium Zone filter (premium% + buffer%)\n"
-                              "F6 = Resistance Blocker (buffer% above TP required)\n"
-                              "TP = Take Profit %\n"
-                              "SL = Hard Stop Loss enabled/disabled\n"
-                              "SS = Safe Stop (trailing SL) enabled/disabled\n"
-                              "TE = Trend Exit (× confirmations required)\n"
-                              "TL = Time Limit exit (hours × min PnL $)\n\n"
-                              "Shows '—' for signals created before this feature was added."),
 }
 
 def _style_alert_cell(val) -> str:
