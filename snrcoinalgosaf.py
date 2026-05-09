@@ -5434,11 +5434,12 @@ def _signal_tables_fragment():
     }
     div[data-testid="stRadio"] div[role="radiogroup"]>label{
         display:inline-flex!important;align-items:center!important;
-        padding:2px 7px!important;border-radius:12px!important;
-        font-size:10px!important;font-weight:500!important;
+        justify-content:center!important;text-align:center!important;
+        padding:1px 5px!important;border-radius:10px!important;
+        font-size:9px!important;font-weight:500!important;
         border:1px solid #7ABCBC!important;background:#D4ECEC!important;
         color:#1A4A4A!important;margin:0!important;cursor:pointer!important;
-        line-height:1.5!important;white-space:nowrap!important;
+        line-height:1.4!important;white-space:nowrap!important;
     }
     div[data-testid="stRadio"] div[role="radiogroup"]>label:has(input:checked){
         background:#C8F5C8!important;color:#1B5E20!important;
@@ -5456,7 +5457,7 @@ def _signal_tables_fragment():
         _sel = st.radio(
             "",
             list(_PILL_OPTS.keys()),
-            index=0,
+            index=4,
             horizontal=True,
             label_visibility="collapsed",
             key=f"pill_{state_key}",
