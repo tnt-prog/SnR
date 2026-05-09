@@ -1891,6 +1891,9 @@ def _reset_filter_counts():
         "f_resistance_blocker_syms":  [],
         "f_empty_data":              0,
         "passed":                    0,
+        "passed_f6_syms":            [],
+        "scan_signals_count":        0,
+        "scan_signals_syms":         [],
         "f_sl_cooldown":             0,
         "f_price_drift":             0,
         "errors":                    0,
@@ -2087,6 +2090,7 @@ def process(sym, cfg: dict, **_kwargs):
                 _record_elim("f_resistance_blocker", "f_resistance_blocker_syms", sym)
                 return None
 
+        _filter_counts["passed_f6_syms"].append(sym)
         return {
             "id":                 str(uuid.uuid4())[:8],
             "timestamp":          dubai_now().isoformat(),
@@ -2725,6 +2729,8 @@ def _bg_loop():
                                     cfg.get("api_key") and cfg.get("api_secret") and
                                     cfg.get("api_passphrase")):
                                 sigs_to_trade.append(sig)
+                _filter_counts["scan_signals_count"]       = len(new_sigs)
+                _filter_counts["scan_signals_syms"]        = [s["symbol"] for s in new_sigs]
                 _filter_counts["new_signal_syms"]         = _added_syms
                 _filter_counts["queued_syms"]             = _queued_syms
                 _filter_counts["blocked_by_active_syms"]  = _blocked_active
@@ -6362,6 +6368,7 @@ if (
         _after_pz    = max(0, _after_err - _pz_n)
         _passed_n    = fc.get("passed", 0)
         _res_blk_n   = fc.get("f_resistance_blocker", 0)
+        _scan_sigs_n = fc.get("scan_signals_count", 0)
 
         # ── Symbol sets ───────────────────────────────────────────────────────
         _pre_syms      = set(fc.get("pre_filter_passed_syms",        []))
@@ -6371,6 +6378,8 @@ if (
         _fdrift_syms   = set(fc.get("f_price_drift_syms",            []))
         _fpz_syms      = set(fc.get("f_premium_zone_syms",           []))  # DZ_SAFM
         _passed_syms   = set(fc.get("passed_syms",                   []))
+        _passed_f6_syms = set(fc.get("passed_f6_syms",               []))  # after F6
+        _scan_sigs_syms = set(fc.get("scan_signals_syms",            []))
         _fres_syms     = set(fc.get("f_resistance_blocker_syms",     []))
         _new_sig_s     = set(fc.get("new_signal_syms",               []))
         _blk_active_s  = set(fc.get("blocked_by_active_syms",        []))
@@ -6419,19 +6428,19 @@ if (
                  _coin_str(_fres_syms) if _fres_syms else ("⏸️ Filter disabled" if not bool(_snap_cfg.get("use_resistance_blocker", False)) else "—")),
             _row("✅ Passed All Filters",
                  max(0, _after_pz - _res_blk_n), 0,
-                 _coin_str(_passed_syms - _fres_syms) if (_passed_syms - _fres_syms) else "—"),
+                 _coin_str(_passed_f6_syms) if _passed_f6_syms else "—"),
             _row("🔵 Blocked — Open trade",
-                 _passed_n, len(_blk_active_s),
-                 _coin_str(_blk_active_s)),
+                 _scan_sigs_n, len(_blk_active_s),
+                 _coin_str(_blk_active_s) if _blk_active_s else "—"),
             _row("🟡 Blocked — TP Cooldown",
-                 _passed_n, len(_blk_cool_s),
-                 _coin_str(_blk_cool_s)),
+                 _scan_sigs_n, len(_blk_cool_s),
+                 _coin_str(_blk_cool_s) if _blk_cool_s else "—"),
             _row("🔴 Blocked — SL Cooldown",
-                 _passed_n, len(_blk_sl_cool_s),
-                 _coin_str(_blk_sl_cool_s)),
+                 _scan_sigs_n, len(_blk_sl_cool_s),
+                 _coin_str(_blk_sl_cool_s) if _blk_sl_cool_s else "—"),
             _row("🟢 New Signals Fired",
-                 _passed_n, 0,
-                 _coin_str(_new_sig_s)),
+                 _scan_sigs_n, 0,
+                 _coin_str(_new_sig_s) if _new_sig_s else "—"),
         ]
         st.dataframe(funnel_rows, use_container_width=True, hide_index=True)
 
