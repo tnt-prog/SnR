@@ -2105,6 +2105,28 @@ def process(sym, cfg: dict, **_kwargs):
             "discount_zone":      _sig_discount_zone,
             "premium_zone":       _sig_premium_zone,
             "nearest_resistance": _nearest_res,
+            "signal_criteria": {
+                "f2":        bool(cfg.get("f2_supertrend",              True)),
+                "f3":        bool(cfg.get("f3_chandelier",              True)),
+                "f4":        bool(cfg.get("f4_lux",                     True)),
+                "dzsafm":    bool(cfg.get("use_dzsafm_filter",          True)),
+                "dz_prem_pct": float(cfg.get("dzsafm_premium_pct",      5.0)),
+                "dz_buf_pct":  float(cfg.get("dzsafm_buffer_pct",       2.0)),
+                "f6_rb":     bool(cfg.get("use_resistance_blocker",     True)),
+                "f6_buf_pct": float(cfg.get("resistance_blocker_buffer_pct", 0.5)),
+                "tp_pct":    float(cfg.get("tp_pct",                    1.2)),
+                "sl_on":     bool(cfg.get("use_sl_exit",                False)),
+                "sl_pct":    float(cfg.get("sl_pct",                    3.0)),
+                "ss_on":     bool(cfg.get("use_safestop",               True)),
+                "ss_pct":    float(cfg.get("safestop_pct",              1.5)),
+                "ss_range":  float(cfg.get("safestop_range_pct",        1.0)),
+                "ss_step":   float(cfg.get("safestop_step_pct",         0.5)),
+                "te_on":     bool(cfg.get("use_trend_exit",             True)),
+                "te_confirms": int(cfg.get("trend_exit_min_confirms",   2)),
+                "tl_on":     bool(cfg.get("use_time_limit_exit",        True)),
+                "tl_hours":  float(cfg.get("time_limit_hours",          2.0)),
+                "tl_min_pnl": float(cfg.get("time_limit_min_pnl_usd",  0.6)),
+            },
         }
 
     except Exception as _proc_exc:
@@ -4993,7 +5015,57 @@ def _build_signal_row(s: dict, is_open_table: bool = False,
     row["Discount Zone"]      = s.get("discount_zone")
     row["Premium Zone"]       = s.get("premium_zone")
     row["Nearest Resistance"] = s.get("nearest_resistance")
+    row["Criteria"]           = _fmt_criteria(s.get("signal_criteria"))
     return row
+
+def _fmt_criteria(sc: dict | None) -> str:
+    """Format signal_criteria dict into a compact one-line string for table display."""
+    if not sc:
+        return "—"
+    try:
+        parts = []
+        # Trend filters
+        tf = []
+        if sc.get("f2"): tf.append("F2✓")
+        else: tf.append("F2✗")
+        if sc.get("f3"): tf.append("F3✓")
+        else: tf.append("F3✗")
+        if sc.get("f4"): tf.append("F4✓")
+        else: tf.append("F4✗")
+        parts.append(" ".join(tf))
+        # DZ_SAFM
+        if sc.get("dzsafm"):
+            parts.append(f"DZ✓{sc.get('dz_prem_pct',5):.0f}%+{sc.get('dz_buf_pct',2):.0f}%")
+        else:
+            parts.append("DZ✗")
+        # F6 Resistance Blocker
+        if sc.get("f6_rb"):
+            parts.append(f"F6✓{sc.get('f6_buf_pct',0.5):.1f}%")
+        else:
+            parts.append("F6✗")
+        # TP / SL
+        tp_str = f"TP{sc.get('tp_pct',1.2):.1f}%"
+        sl_str = f"SL✓{sc.get('sl_pct',3):.0f}%" if sc.get("sl_on") else "SL✗"
+        parts.append(f"{tp_str} {sl_str}")
+        # Safe Stop
+        if sc.get("ss_on"):
+            parts.append(f"SS✓{sc.get('ss_pct',1.5):.1f}%")
+        else:
+            parts.append("SS✗")
+        # Trend Exit
+        if sc.get("te_on"):
+            parts.append(f"TE✓×{sc.get('te_confirms',2)}")
+        else:
+            parts.append("TE✗")
+        # Time Limit
+        if sc.get("tl_on"):
+            parts.append(f"TL✓{sc.get('tl_hours',2):.0f}h${sc.get('tl_min_pnl',0.6):.1f}")
+        else:
+            parts.append("TL✗")
+        return " | ".join(parts)
+    except Exception:
+        return "—"
+
 
 # Shared column_config used by all four tables
 _SIG_COL_CFG = {
@@ -5184,6 +5256,19 @@ _SIG_COL_CFG = {
                               "The nearest one (smallest distance above entry) is displayed.\n\n"
                               "Shows '—' if price is in discovery territory (no resistance found above entry)\n"
                               "or for signals created before this feature was added."),
+    "Criteria":           st.column_config.TextColumn(
+                         "⚙️ Signal Criteria", width="medium",
+                         help="Filter settings that were ACTIVE at the moment this signal was created.\n\n"
+                              "Format: F2✓/✗ F3✓/✗ F4✓/✗ | DZ✓prem%+buf% | F6✓buf% | TP% SL✓/✗ | SS✓/✗ | TE✓×N | TL✓Nh$P\n\n"
+                              "F2/F3/F4 = Trend indicator enabled (✓) or disabled (✗)\n"
+                              "DZ = DZ_SAFM Premium Zone filter (premium% + buffer%)\n"
+                              "F6 = Resistance Blocker (buffer% above TP required)\n"
+                              "TP = Take Profit %\n"
+                              "SL = Hard Stop Loss enabled/disabled\n"
+                              "SS = Safe Stop (trailing SL) enabled/disabled\n"
+                              "TE = Trend Exit (× confirmations required)\n"
+                              "TL = Time Limit exit (hours × min PnL $)\n\n"
+                              "Shows '—' for signals created before this feature was added."),
 }
 
 def _style_alert_cell(val) -> str:
@@ -6642,6 +6727,30 @@ def _build_diagnostics_text() -> str:
         _kv("max_open_trades",    f"{int(_snap_cfg.get('max_open_trades', 49))}  (queue_limit status used when cap is reached)")
     except Exception as _le:
         _push(f"  <error: {_le}>")
+
+    # ── Per-signal criteria snapshot ─────────────────────────────────────────
+    _hdr("PER-SIGNAL CRITERIA SNAPSHOT")
+    try:
+        _all_sigs_diag = list(getattr(_b, "_bsc_log", {}).get("signals", []))
+        if not _all_sigs_diag:
+            _push("  (no signals recorded yet)")
+        else:
+            for _ds in _all_sigs_diag:
+                _sc = _ds.get("signal_criteria")
+                _push(f"  [{_ds.get('id','?')}] {_ds.get('symbol','?')}  status={_ds.get('status','?')}  ts={_ds.get('timestamp','?')}")
+                if _sc:
+                    _push(f"    compact : {_fmt_criteria(_sc)}")
+                    _push(f"    f2={_sc.get('f2')} f3={_sc.get('f3')} f4={_sc.get('f4')}"
+                          f"  dzsafm={_sc.get('dzsafm')} dz_prem={_sc.get('dz_prem_pct')}% dz_buf={_sc.get('dz_buf_pct')}%"
+                          f"  f6_rb={_sc.get('f6_rb')} f6_buf={_sc.get('f6_buf_pct')}%")
+                    _push(f"    tp={_sc.get('tp_pct')}%  sl_on={_sc.get('sl_on')} sl={_sc.get('sl_pct')}%"
+                          f"  ss_on={_sc.get('ss_on')} ss={_sc.get('ss_pct')}% ss_range={_sc.get('ss_range')}% ss_step={_sc.get('ss_step')}%")
+                    _push(f"    te_on={_sc.get('te_on')} te_confirms={_sc.get('te_confirms')}"
+                          f"  tl_on={_sc.get('tl_on')} tl_hours={_sc.get('tl_hours')}h tl_min_pnl=${_sc.get('tl_min_pnl')}")
+                else:
+                    _push("    (criteria not recorded — signal created before this feature)")
+    except Exception as _scd_e:
+        _push(f"  <error: {_scd_e}>")
 
     # ── Signal bucket counts ──────────────────────────────────────────────────
     _hdr("SIGNAL COUNTS")
