@@ -1890,6 +1890,7 @@ def _reset_filter_counts():
         "f_resistance_blocker":       0,
         "f_resistance_blocker_syms":  [],
         "f_empty_data":              0,
+        "f_error_syms":              [],
         "passed":                    0,
         "passed_f6_syms":            [],
         "scan_signals_count":        0,
@@ -2136,6 +2137,9 @@ def process(sym, cfg: dict, **_kwargs):
     except Exception as _proc_exc:
         _incr_filter("errors")
         _append_error("scan", str(_proc_exc), symbol=sym)
+        _lst = _filter_counts.get("f_error_syms")
+        if _lst is not None:
+            _lst.append(sym)
         return "error"
     finally:
         _flush_tl_counts()
@@ -6381,6 +6385,7 @@ if (
         _passed_f6_syms = set(fc.get("passed_f6_syms",               []))  # after F6
         _scan_sigs_syms = set(fc.get("scan_signals_syms",            []))
         _fres_syms     = set(fc.get("f_resistance_blocker_syms",     []))
+        _ferr_syms     = set(fc.get("f_error_syms",                  []))
         _new_sig_s     = set(fc.get("new_signal_syms",               []))
         _blk_active_s  = set(fc.get("blocked_by_active_syms",        []))
         _blk_cool_s    = set(fc.get("blocked_by_cooldown_syms",      []))
@@ -6422,7 +6427,7 @@ if (
                  _coin_str(_chk_syms)),
             _row("⚠️ Dropped — Empty Candle Data",
                  _after_skip, _empty_n,
-                 "—" if not _fempty_syms else _coin_str(_fempty_syms)),
+                 _coin_str(_fempty_syms) if _fempty_syms else "✓ None"),
             _row("📊 Dropped — Trend Filter (F2/F3/F4 freshness + direction)",
                  _after_empty, _trend_n,
                  _coin_str(_trend_survived) if _trend_survived else "—"),
@@ -6431,7 +6436,7 @@ if (
                  _coin_str(_entered_drift) if _entered_drift else "—"),
             _row("💥 Dropped — Process Error",
                  _after_drift, _err_n,
-                 "See API Error Log ↓" if _err_n else "—"),
+                 _coin_str(_ferr_syms) if _ferr_syms else ("✓ None" if not _err_n else "See API Error Log ↓")),
             _row("🏔️ Dropped — Premium Zone (DZ_SAFM: entry too close to swing high)",
                  _after_err, _pz_n,
                  _coin_str(_entered_pz) if _entered_pz else ("⏸️ Filter disabled" if not bool(_snap_cfg.get("use_dzsafm_filter", True)) else "—")),
