@@ -6388,9 +6388,21 @@ if (
 
         def _coin_str(s): return ", ".join(sorted(s)) if s else "—"
 
+        # ── "Entered this stage" sets (computed bottom-up) ────────────────────
+        # Each set = coins dropped at this stage ∪ all coins that survived it.
+        # This correctly answers "which coins arrived at this check?" regardless
+        # of how many were dropped vs. passed through.
+        _entered_f6    = _fres_syms | _passed_f6_syms          # entered F6 check
+        _entered_pz    = _fpz_syms  | _entered_f6              # entered DZ_SAFM check
+        _entered_drift = _fdrift_syms | _entered_pz            # entered price-drift check
+        # Trend-filter survivors = entered-drift (the small readable set that
+        # passed; the full "entered trend" set = _chk_syms which is too large).
+        _trend_survived = _entered_drift
+
         # ── Build rows: each row is (label, in, dropped, remaining, coins) ───
         # "In" = what arrived at this stage; "Dropped" = rejected here;
         # "Remaining" = passed through to next stage.
+        # "Candidate Coins" = coins that ENTERED this stage (dropped + survived).
         def _row(label, in_n, dropped_n, coins_str):
             remaining = max(0, in_n - dropped_n)
             return {
@@ -6413,19 +6425,19 @@ if (
                  "—" if not _fempty_syms else _coin_str(_fempty_syms)),
             _row("📊 Dropped — Trend Filter (F2/F3/F4 freshness + direction)",
                  _after_empty, _trend_n,
-                 _coin_str(_ftrend_syms)),
+                 _coin_str(_trend_survived) if _trend_survived else "—"),
             _row("📉 Dropped — Price Drift (>0.5% above flip candle)",
                  _after_trend, _drift_n,
-                 _coin_str(_fdrift_syms)),
+                 _coin_str(_entered_drift) if _entered_drift else "—"),
             _row("💥 Dropped — Process Error",
                  _after_drift, _err_n,
                  "See API Error Log ↓" if _err_n else "—"),
             _row("🏔️ Dropped — Premium Zone (DZ_SAFM: entry too close to swing high)",
                  _after_err, _pz_n,
-                 _coin_str(_fpz_syms) if _fpz_syms else ("⏸️ Filter disabled" if not bool(_snap_cfg.get("use_dzsafm_filter", True)) else "—")),
+                 _coin_str(_entered_pz) if _entered_pz else ("⏸️ Filter disabled" if not bool(_snap_cfg.get("use_dzsafm_filter", True)) else "—")),
             _row("🧱 Dropped — Resistance Blocker (F6: Premium/Resistance ≤ TP+buffer)",
                  _after_pz, _res_blk_n,
-                 _coin_str(_fres_syms) if _fres_syms else ("⏸️ Filter disabled" if not bool(_snap_cfg.get("use_resistance_blocker", False)) else "—")),
+                 _coin_str(_entered_f6) if _entered_f6 else ("⏸️ Filter disabled" if not bool(_snap_cfg.get("use_resistance_blocker", False)) else "—")),
             _row("✅ Passed All Filters",
                  max(0, _after_pz - _res_blk_n), 0,
                  _coin_str(_passed_f6_syms) if _passed_f6_syms else "—"),
