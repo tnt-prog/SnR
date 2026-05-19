@@ -3963,6 +3963,60 @@ with st.sidebar:
         st.success(f"✅ Saved — {len(new_wl)} coins — rescanning now…"); st.rerun()
 
 # ─────────────────────────────────────────────────────────────────────────────
+# SUPABASE CONNECTION CHECK
+# ─────────────────────────────────────────────────────────────────────────────
+@st.cache_data(ttl=60, show_spinner=False)
+def _check_supabase() -> dict:
+    """Ping each of the 3 expected tables via Supabase REST API (limit=0).
+    Returns {connected, tables: {signals, app_config, scan_runs}, error}.
+    Cached for 60 s so every Streamlit re-render doesn't hit the API."""
+    try:
+        _sb_url = st.secrets["supabase"]["url"].rstrip("/")
+        _sb_key = st.secrets["supabase"]["key"]
+    except (KeyError, AttributeError):
+        return {"connected": False, "tables": {}, "error": "No [supabase] section in secrets.toml"}
+
+    _headers = {
+        "apikey":        _sb_key,
+        "Authorization": f"Bearer {_sb_key}",
+        "Content-Type":  "application/json",
+    }
+    _tables  = ["signals", "app_config", "scan_runs"]
+    _results = {}
+    _err_msg = ""
+    for _tbl in _tables:
+        try:
+            _resp = requests.get(
+                f"{_sb_url}/rest/v1/{_tbl}",
+                headers={**_headers, "Range": "0-0", "Prefer": "count=exact"},
+                params={"limit": "0"},
+                timeout=6,
+            )
+            if _resp.status_code in (200, 206):
+                _results[_tbl] = True
+            elif _resp.status_code == 401:
+                _results[_tbl] = False
+                _err_msg = "Unauthorized — check API key"
+            elif _resp.status_code == 404:
+                _results[_tbl] = False
+                _err_msg = f"Table '{_tbl}' not found — run schema SQL"
+            else:
+                _results[_tbl] = False
+                _err_msg = f"HTTP {_resp.status_code} on '{_tbl}'"
+        except requests.exceptions.Timeout:
+            _results[_tbl] = False
+            _err_msg = "Connection timed out"
+            break
+        except Exception as _ce:
+            _results[_tbl] = False
+            _err_msg = str(_ce)
+            break
+
+    _all_ok = all(_results.get(t) for t in _tables)
+    return {"connected": _all_ok, "tables": _results, "error": _err_msg}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # MAIN AREA
 # ─────────────────────────────────────────────────────────────────────────────
 st.markdown(
@@ -3971,6 +4025,29 @@ st.markdown(
     "color:#007a7a;'>v2.3</span></h1>",
     unsafe_allow_html=True,
 )
+
+# ── Supabase connection banner ────────────────────────────────────────────────
+try:
+    _sb_status = _check_supabase()
+    _sb_tables = _sb_status.get("tables", {})
+    def _tbl_icon(t): return "✓" if _sb_tables.get(t) else "✗"
+    _sb_detail = (
+        f"signals {_tbl_icon('signals')}  "
+        f"app_config {_tbl_icon('app_config')}  "
+        f"scan_runs {_tbl_icon('scan_runs')}"
+    )
+    if _sb_status["connected"]:
+        st.success(f"🟢 **Supabase connected** — {_sb_detail}", icon=None)
+    elif not _sb_status["tables"]:
+        st.info("⚪ **Supabase not configured** — add `[supabase]` section to secrets.toml")
+    else:
+        _sb_err = _sb_status.get("error", "")
+        st.error(
+            f"🔴 **Supabase** — {_sb_detail}"
+            + (f"  ·  _{_sb_err}_" if _sb_err else ""),
+        )
+except Exception:
+    pass   # never let the banner crash the dashboard
 
 # ── Total Realized PnL computation ─────────────────────────────────────────────
 # Moved above the account summary box so _total_pnl is available for the
