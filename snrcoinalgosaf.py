@@ -351,14 +351,19 @@ _config_lock = threading.Lock()
 def load_config() -> dict:
     """Load persisted config, applying env-var overrides for API credentials.
 
+    Load priority: Supabase 'active' row → local JSON → DEFAULT_CONFIG.
+    Supabase wins when configured so restarts on any machine pick up the
+    last saved config automatically.
+
     Environment variables (preferred — never written back to disk):
       • OKX_API_KEY
       • OKX_API_SECRET
       • OKX_API_PASSPHRASE
-    These take precedence over the plaintext values in scanner_config.json.
-    If the user has set them, the on-disk credentials can stay blank.
+    These take precedence over all stored values.
     """
     cfg = dict(DEFAULT_CONFIG)
+
+    # ── 1. Local JSON baseline ────────────────────────────────────────────
     if CONFIG_FILE.exists():
         try:
             saved = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
@@ -366,15 +371,21 @@ def load_config() -> dict:
                 if k in saved:
                     cfg[k] = saved[k]
         except (json.JSONDecodeError, OSError, UnicodeDecodeError) as _e:
-            # Corrupt/unreadable config — log if error-logger is live, fall back to defaults.
             _log_fn = globals().get("_append_error")
             if callable(_log_fn):
                 try:
-                    _log_fn("io", f"load_config: {type(_e).__name__}: {_e}")
+                    _log_fn("io", f"load_config(local): {type(_e).__name__}: {_e}")
                 except Exception:
                     pass
             else:
                 print(f"[Config] WARNING — failed to parse {CONFIG_FILE}: {type(_e).__name__}: {_e}")
+
+    # ── 2. Supabase override — authoritative if configured ────────────────
+    _sb_cfg = _sb_load_config()
+    if _sb_cfg and isinstance(_sb_cfg, dict):
+        for k in DEFAULT_CONFIG:
+            if k in _sb_cfg:
+                cfg[k] = _sb_cfg[k]
 
     # One-time defaults reset - forces values back to correct defaults on startup
     _reset_to_defaults = {
@@ -415,27 +426,23 @@ def load_config() -> dict:
     return cfg
 
 def save_config(cfg: dict):
-    """Persist config to disk. Strips env-var-sourced credentials so they are
-    never written in plaintext. Sets 0o600 permissions on POSIX (best effort).
-    Errors are logged, not raised, so a failed save never crashes the loop.
+    """Persist config to disk and Supabase. Strips env-var-sourced credentials
+    so they are never written in plaintext. Sets 0o600 permissions on POSIX
+    (best effort). Errors are logged, not raised.
     """
     import os as _os
-    # If the user supplied credentials via env vars, do NOT write them back
-    # to the JSON file — keep the stored values blank so the secrets never
-    # land on disk from the env-var path.
+    # Strip env-var-sourced credentials before any write
     _cfg_to_save = dict(cfg)
     for _cfg_k, _env_k in (("api_key",        "OKX_API_KEY"),
                            ("api_secret",     "OKX_API_SECRET"),
                            ("api_passphrase", "OKX_API_PASSPHRASE")):
         if _os.environ.get(_env_k, "").strip():
-            # Preserve whatever the user previously typed into the UI by leaving
-            # the key blank if env is the active source.
             _cfg_to_save[_cfg_k] = ""
+
+    # ── Primary: local JSON ───────────────────────────────────────────────
     try:
         with _config_lock:
             CONFIG_FILE.write_text(json.dumps(_cfg_to_save, indent=2), encoding="utf-8")
-            # Best-effort: restrict to owner-only read/write (POSIX).
-            # On Windows, os.chmod only toggles the read-only bit — harmless.
             try:
                 _os.chmod(CONFIG_FILE, 0o600)
             except (OSError, NotImplementedError):
@@ -444,45 +451,60 @@ def save_config(cfg: dict):
         _log_fn = globals().get("_append_error")
         if callable(_log_fn):
             try:
-                _log_fn("io", f"save_config: {type(_e).__name__}: {_e}")
+                _log_fn("io", f"save_config(local): {type(_e).__name__}: {_e}")
             except Exception:
                 pass
         else:
             print(f"[Config] WARNING — failed to save {CONFIG_FILE}: {type(_e).__name__}: {_e}")
+
+    # ── Secondary: Supabase upsert (if configured) ────────────────────────
+    _sb_save_config(_cfg_to_save)  # errors logged inside, never raised
 
 def _migrate_criteria(crit: dict) -> dict:
     """No-op migration stub — filter criteria fields removed."""
     return crit
 
 def load_log():
+    # ── Read health stats from local file (always available, lightweight) ──
+    _local_health = {"total_cycles": 0, "last_scan_at": None,
+                     "last_scan_duration_s": 0.0, "total_api_errors": 0,
+                     "watchlist_size": 0, "pre_filtered_out": 0,
+                     "deep_scanned": 0}
+    _local_signals = None
     if LOG_FILE.exists():
         try:
-            data = json.loads(LOG_FILE.read_text(encoding="utf-8"))
-            # Migrate any pre-update signals transparently
-            for sig in data.get("signals", []):
+            _local_data = json.loads(LOG_FILE.read_text(encoding="utf-8"))
+            _local_health = _local_data.get("health", _local_health)
+            _local_signals = _local_data.get("signals", [])
+            for sig in _local_signals:
                 if "criteria" in sig:
                     sig["criteria"] = _migrate_criteria(sig["criteria"])
-            return data
         except (json.JSONDecodeError, OSError, UnicodeDecodeError) as _e:
-            # Corrupt log — don't crash the app; log and fall back to empty.
             _log_fn = globals().get("_append_error")
             if callable(_log_fn):
-                try:
-                    _log_fn("io", f"load_log: {type(_e).__name__}: {_e}")
-                except Exception:
-                    pass
+                try: _log_fn("io", f"load_log(local): {type(_e).__name__}: {_e}")
+                except Exception: pass
             else:
                 print(f"[Log] WARNING — failed to parse {LOG_FILE}: {type(_e).__name__}: {_e}")
-    return {"health": {"total_cycles": 0, "last_scan_at": None,
-                        "last_scan_duration_s": 0.0, "total_api_errors": 0,
-                        "watchlist_size": 0, "pre_filtered_out": 0,
-                        "deep_scanned": 0},
-            "signals": []}
+
+    # ── Try Supabase first — authoritative source if configured ──────────
+    _sb_signals = _sb_load_signals()
+    if _sb_signals is not None:
+        # Supabase is live — use its signals as the source of truth.
+        # Keep health stats from local file (they're not stored in Supabase).
+        return {"health": _local_health, "signals": _sb_signals}
+
+    # ── Fall back to local JSON ───────────────────────────────────────────
+    if _local_signals is not None:
+        return {"health": _local_health, "signals": _local_signals}
+
+    return {"health": _local_health, "signals": []}
 
 def save_log(log):
-    """Atomic-ish write of the log JSON. All errors are logged, never raised —
-    a failed save must not abort the scanner loop.
+    """Atomic-ish write of the log JSON. Dual-writes to Supabase if configured.
+    All errors are logged, never raised — a failed save must not abort the scanner loop.
     """
+    # ── Primary: local JSON (always) ─────────────────────────────────────
     try:
         LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
         LOG_FILE.write_text(json.dumps(log, indent=2), encoding="utf-8")
@@ -495,6 +517,220 @@ def save_log(log):
                 pass
         else:
             print(f"[Log] WARNING — failed to save {LOG_FILE}: {type(_e).__name__}: {_e}")
+
+    # ── Secondary: Supabase upsert (if configured) ────────────────────────
+    _sigs = log.get("signals")
+    if _sigs:
+        _sb_upsert_signals(_sigs)  # errors are logged inside, never raised
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Supabase helpers
+# All functions return None / False / [] on error — never raise.
+# _append_error may not be defined yet at module load; we look it up lazily.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _sb_log(err_type: str, msg: str):
+    """Safe error logger — falls back to print when _append_error isn't live yet."""
+    _fn = globals().get("_append_error")
+    if callable(_fn):
+        try:
+            _fn(err_type, msg)
+        except Exception:
+            pass
+    else:
+        print(f"[Supabase/{err_type}] {msg}")
+
+
+def _sb_get_creds() -> "tuple[str, str] | tuple[None, None]":
+    """Return (url, key) from st.secrets, or (None, None) if not configured."""
+    try:
+        _url = st.secrets["supabase"]["url"].rstrip("/")
+        _key = st.secrets["supabase"]["key"]
+        if _url and _key:
+            return _url, _key
+    except Exception:
+        pass
+    return None, None
+
+
+def _sb_headers(key: str, prefer: str = "return=minimal") -> dict:
+    return {
+        "apikey":        key,
+        "Authorization": f"Bearer {key}",
+        "Content-Type":  "application/json",
+        "Prefer":        prefer,
+    }
+
+
+# Core signal columns stored as real DB columns; everything else → data JSONB.
+_SB_CORE_SIG_KEYS = frozenset({
+    "id", "symbol", "status", "timestamp", "close_time",
+    "entry", "tp", "sl", "sector", "demo_mode",
+})
+
+
+def _sb_signal_to_row(sig: dict) -> dict:
+    """Convert a signal dict to a Supabase signals-table row."""
+    row = {
+        "id":         sig["id"],
+        "symbol":     sig.get("symbol", ""),
+        "status":     sig.get("status", "open"),
+        "created_at": sig.get("timestamp"),
+        "close_time": sig.get("close_time"),
+        "entry":      sig.get("entry"),
+        "tp":         sig.get("tp"),
+        "sl":         sig.get("sl"),
+        "sector":     sig.get("sector"),
+        "demo_mode":  bool(sig.get("demo_mode", True)),
+    }
+    # All remaining fields go into the JSONB data column
+    data = {k: v for k, v in sig.items() if k not in _SB_CORE_SIG_KEYS}
+    row["data"] = data
+    return row
+
+
+def _sb_row_to_signal(row: dict) -> dict:
+    """Reconstruct a signal dict from a Supabase row (reverse of _sb_signal_to_row)."""
+    sig = dict(row.get("data") or {})
+    sig["id"]         = row["id"]
+    sig["symbol"]     = row.get("symbol", "")
+    sig["status"]     = row.get("status", "open")
+    sig["timestamp"]  = row.get("created_at")
+    sig["close_time"] = row.get("close_time")
+    # Supabase returns NUMERIC as strings; cast back to float
+    for _fld in ("entry", "tp", "sl"):
+        _val = row.get(_fld)
+        sig[_fld] = float(_val) if _val is not None else None
+    sig["sector"]     = row.get("sector")
+    sig["demo_mode"]  = bool(row.get("demo_mode", True))
+    return sig
+
+
+def _sb_load_signals() -> "list | None":
+    """Fetch all signals from Supabase (ordered oldest→newest). Returns list or None."""
+    _url, _key = _sb_get_creds()
+    if not _url:
+        return None
+    try:
+        _resp = requests.get(
+            f"{_url}/rest/v1/signals",
+            headers=_sb_headers(_key, prefer="return=representation"),
+            params={"select": "*", "order": "created_at.asc", "limit": "10000"},
+            timeout=15,
+        )
+        if _resp.status_code == 200:
+            return [_sb_row_to_signal(r) for r in _resp.json()]
+        _sb_log("supabase", f"load_signals: HTTP {_resp.status_code}: {_resp.text[:200]}")
+    except Exception as _e:
+        _sb_log("supabase", f"load_signals: {type(_e).__name__}: {_e}")
+    return None
+
+
+def _sb_upsert_signals(signals: list) -> bool:
+    """Upsert a list of signal dicts to Supabase. Returns True on success."""
+    if not signals:
+        return True
+    _url, _key = _sb_get_creds()
+    if not _url:
+        return False
+    try:
+        _rows = [_sb_signal_to_row(s) for s in signals]
+        _resp = requests.post(
+            f"{_url}/rest/v1/signals",
+            headers=_sb_headers(_key, prefer="resolution=merge-duplicates,return=minimal"),
+            json=_rows,
+            timeout=20,
+        )
+        if _resp.status_code in (200, 201, 204):
+            return True
+        _sb_log("supabase", f"upsert_signals: HTTP {_resp.status_code}: {_resp.text[:200]}")
+    except Exception as _e:
+        _sb_log("supabase", f"upsert_signals: {type(_e).__name__}: {_e}")
+    return False
+
+
+def _sb_load_config() -> "dict | None":
+    """Load the 'active' config row from Supabase. Returns dict or None."""
+    _url, _key = _sb_get_creds()
+    if not _url:
+        return None
+    try:
+        _resp = requests.get(
+            f"{_url}/rest/v1/app_config",
+            headers=_sb_headers(_key, prefer="return=representation"),
+            params={"label": "eq.active", "select": "config", "limit": "1"},
+            timeout=10,
+        )
+        if _resp.status_code == 200:
+            _rows = _resp.json()
+            if _rows:
+                return _rows[0].get("config")
+        elif _resp.status_code != 200:
+            _sb_log("supabase", f"load_config: HTTP {_resp.status_code}: {_resp.text[:200]}")
+    except Exception as _e:
+        _sb_log("supabase", f"load_config: {type(_e).__name__}: {_e}")
+    return None
+
+
+def _sb_save_config(cfg: dict) -> bool:
+    """Upsert the 'active' config row in Supabase. Strips env-var credentials. Returns True on success."""
+    _url, _key = _sb_get_creds()
+    if not _url:
+        return False
+    try:
+        import os as _os
+        _cfg_to_save = dict(cfg)
+        for _cfg_k, _env_k in (("api_key", "OKX_API_KEY"),
+                               ("api_secret", "OKX_API_SECRET"),
+                               ("api_passphrase", "OKX_API_PASSPHRASE")):
+            if _os.environ.get(_env_k, "").strip():
+                _cfg_to_save[_cfg_k] = ""
+        _resp = requests.post(
+            f"{_url}/rest/v1/app_config",
+            headers=_sb_headers(_key, prefer="resolution=merge-duplicates,return=minimal"),
+            json={"label": "active", "config": _cfg_to_save},
+            timeout=10,
+        )
+        if _resp.status_code in (200, 201, 204):
+            return True
+        _sb_log("supabase", f"save_config: HTTP {_resp.status_code}: {_resp.text[:200]}")
+    except Exception as _e:
+        _sb_log("supabase", f"save_config: {type(_e).__name__}: {_e}")
+    return False
+
+
+def _sb_insert_scan_run(duration_s: float, signals_generated: int,
+                        api_errors: int, watchlist_size: int,
+                        filter_counts: dict) -> bool:
+    """Insert a scan_run record to Supabase. Returns True on success."""
+    _url, _key = _sb_get_creds()
+    if not _url:
+        return False
+    try:
+        # filter_counts may contain sets — convert to lists for JSON
+        _fc = {}
+        for _k, _v in filter_counts.items():
+            _fc[_k] = list(_v) if isinstance(_v, set) else _v
+        _resp = requests.post(
+            f"{_url}/rest/v1/scan_runs",
+            headers=_sb_headers(_key, prefer="return=minimal"),
+            json={
+                "duration_s":        round(float(duration_s), 2),
+                "signals_generated": int(signals_generated),
+                "api_errors":        int(api_errors),
+                "watchlist_size":    int(watchlist_size),
+                "filter_counts":     _fc,
+            },
+            timeout=10,
+        )
+        if _resp.status_code in (200, 201, 204):
+            return True
+        _sb_log("supabase", f"insert_scan_run: HTTP {_resp.status_code}: {_resp.text[:200]}")
+    except Exception as _e:
+        _sb_log("supabase", f"insert_scan_run: {type(_e).__name__}: {_e}")
+    return False
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Module-level shared state
@@ -2751,6 +2987,15 @@ def _bg_loop():
                     deep_scanned         = _filter_counts.get("checked",0),
                 )
                 save_log(_b._bsc_log)
+
+                # ── Supabase: log this scan run ───────────────────────────────
+                _sb_insert_scan_run(
+                    duration_s         = elapsed,
+                    signals_generated  = len(new_sigs),
+                    api_errors         = errors,
+                    watchlist_size     = len(cfg["watchlist"]),
+                    filter_counts      = dict(_filter_counts),
+                )
 
             # ── Place orders outside the log lock ────────────────────────────
             # sigs_to_trade are already appended to _b._bsc_log["signals"],
